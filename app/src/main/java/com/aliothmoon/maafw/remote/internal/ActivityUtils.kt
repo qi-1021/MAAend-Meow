@@ -215,6 +215,7 @@ object ActivityUtils {
      * API 28 无 TaskInfo.displayId 字段（@hide），宽松返回 true（不拦截）。
      * 任何异常也宽松返回 true，避免误伤。
      */
+    @JvmStatic
     fun isAppOnDisplay(packageName: String, targetDisplayId: Int): Boolean {
         return when (getAppDisplayId(packageName)) {
             null -> true // 无法判断，宽松放行
