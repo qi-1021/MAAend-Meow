@@ -724,4 +724,13 @@
     <string name="settings_inference_device_cpu">CPU (Default, Stable)</string>
     <string name="settings_inference_device_nnapi">NNAPI (NPU/Hardware)</string>
     <string name="settings_inference_device_vulkan">GPU (Vulkan)</string>
+
+    <!-- Troubleshooting & Feedback -->
+    <string name="settings_section_feedback">Feedback &amp; Diagnostics</string>
+    <string name="feedback_desc">When encountering errors or unexpected task terminations, copy diagnostics and export logs to report an issue.</string>
+    <string name="feedback_copy_diagnostic">Copy Diagnostics</string>
+    <string name="feedback_copied">Diagnostics copied to clipboard</string>
+    <string name="feedback_export_logs">Export Logs</string>
+    <string name="feedback_open_issue">Open GitHub Issues</string>
+    <string name="feedback_device_info_title">Device &amp; Environment Diagnostics</string>
 </resources>

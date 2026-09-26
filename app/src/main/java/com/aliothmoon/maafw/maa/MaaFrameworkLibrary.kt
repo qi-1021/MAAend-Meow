@@ -171,6 +171,22 @@ interface MaaFrameworkLibrary : Library {
 
     fun MaaStringBufferGet(handle: Pointer?): String?
 
+    // ── Rect ──
+
+    fun MaaRectCreate(): Pointer?
+
+    fun MaaRectDestroy(handle: Pointer?)
+
+    fun MaaRectGetX(handle: Pointer?): Int
+
+    fun MaaRectGetY(handle: Pointer?): Int
+
+    fun MaaRectGetW(handle: Pointer?): Int
+
+    fun MaaRectGetH(handle: Pointer?): Int
+
+    fun MaaRectSet(handle: Pointer?, x: Int, y: Int, w: Int, h: Int): Byte
+
     // ── ImageBuffer ──
     // focus 模板的 {image} 占位符取的是 controller 手里那张缓存帧
 

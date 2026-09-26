@@ -176,14 +176,34 @@ class MaaRunner(private val agentHost: AgentHost) {
         1
     }
 
+    private data class RectData(val x: Int, val y: Int, val w: Int, val h: Int)
+
+    private fun getBoxRect(lib: MaaFrameworkLibrary, box: Pointer?): RectData {
+        if (box == null) return RectData(0, 0, 0, 0)
+        return try {
+            val x = lib.MaaRectGetX(box)
+            val y = lib.MaaRectGetY(box)
+            val w = lib.MaaRectGetW(box)
+            val h = lib.MaaRectGetH(box)
+            RectData(x, y, w, h)
+        } catch (_: Throwable) {
+            try {
+                RectData(box.getInt(0), box.getInt(4), box.getInt(8), box.getInt(12))
+            } catch (_: Throwable) {
+                RectData(0, 0, 0, 0)
+            }
+        }
+    }
+
     private val autoAltClickCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, box, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
         val ctrl = controller ?: return@MaaCustomActionCallback 0
         try {
-            var x = box?.getInt(0) ?: 0
-            var y = box?.getInt(4) ?: 0
-            var w = box?.getInt(8) ?: 0
-            var h = box?.getInt(12) ?: 0
+            val rect = getBoxRect(lib, box)
+            var x = rect.x
+            var y = rect.y
+            var w = rect.w
+            var h = rect.h
             if (!customActionParam.isNullOrBlank()) {
                 runCatching {
                     val json = Json.parseToJsonElement(customActionParam).jsonObject
@@ -196,8 +216,12 @@ class MaaRunner(private val agentHost: AgentHost) {
                     }
                 }
             }
-            val cx = if (w > 0) x + w / 2 else x
-            val cy = if (h > 0) y + h / 2 else y
+            if (w <= 0 && h <= 0 && x == 0 && y == 0) {
+                Ln.w("MaaRunner: AutoAltClickAction [$nodeName] box is empty/zero, skipping click")
+                return@MaaCustomActionCallback 1
+            }
+            val cx = (if (w > 0) x + w / 2 else x).coerceIn(0, 4000)
+            val cy = (if (h > 0) y + h / 2 else y).coerceIn(0, 4000)
             Ln.i("MaaRunner: AutoAltClickAction [$nodeName] click ($cx, $cy)")
             val clickId = lib.MaaControllerPostClick(ctrl, cx, cy)
             if (clickId > 0) {
@@ -216,8 +240,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
         val ctrl = controller ?: return@MaaCustomActionCallback 0
         try {
-            var x1 = box?.getInt(0) ?: 0
-            var y1 = box?.getInt(4) ?: 0
+            val rect = getBoxRect(lib, box)
+            var x1 = rect.x
+            var y1 = rect.y
             var x2 = x1
             var y2 = y1
             var duration = 500
@@ -237,6 +262,10 @@ class MaaRunner(private val agentHost: AgentHost) {
                     json["duration"]?.jsonPrimitive?.intOrNull?.let { duration = it }
                 }
             }
+            x1 = x1.coerceIn(0, 4000)
+            y1 = y1.coerceIn(0, 4000)
+            x2 = x2.coerceIn(0, 4000)
+            y2 = y2.coerceIn(0, 4000)
             Ln.i("MaaRunner: AutoAltSwipeAction [$nodeName] swipe ($x1, $y1)->($x2, $y2) duration=$duration")
             val swipeId = lib.MaaControllerPostSwipe(ctrl, x1, y1, x2, y2, duration)
             if (swipeId > 0) {
@@ -253,11 +282,13 @@ class MaaRunner(private val agentHost: AgentHost) {
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
         val ctrl = controller ?: return@MaaCustomActionCallback 0
         try {
-            val x = box?.getInt(0) ?: 0
-            val y = box?.getInt(4) ?: 0
-            val w = box?.getInt(8) ?: 0
-            val cx = x + w / 2
-            val cy = y - 15
+            val rect = getBoxRect(lib, box)
+            if (rect.w <= 0 && rect.x == 0 && rect.y == 0) {
+                Ln.w("MaaRunner: SceneManagerMenuListClickItemAction [$nodeName] box is empty/zero, skipping click")
+                return@MaaCustomActionCallback 1
+            }
+            val cx = (rect.x + rect.w / 2).coerceIn(0, 4000)
+            val cy = (rect.y - 15).coerceIn(0, 4000)
             Ln.i("MaaRunner: SceneManagerMenuListClickItemAction [$nodeName] click ($cx, $cy)")
             val clickId = lib.MaaControllerPostClick(ctrl, cx, cy)
             if (clickId > 0) {
@@ -306,10 +337,11 @@ class MaaRunner(private val agentHost: AgentHost) {
 
                 // 1. 执行内部动作
                 if (customAction == "AutoAltClickAction" || action == "Click" || customAction == "AutoCtrlClickAction" || (customAction == null && action == null)) {
-                    var x = box?.getInt(0) ?: 0
-                    var y = box?.getInt(4) ?: 0
-                    var w = box?.getInt(8) ?: 0
-                    var h = box?.getInt(12) ?: 0
+                    val rect = getBoxRect(lib, box)
+                    var x = rect.x
+                    var y = rect.y
+                    var w = rect.w
+                    var h = rect.h
                     val offset = (rawJson?.get("target_offset") as? JsonArray
                         ?: innerParamObj?.get("target_offset") as? JsonArray)
                         ?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
@@ -319,8 +351,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                         w += offset[2]
                         h += offset[3]
                     }
-                    val cx = if (w > 0) x + w / 2 else x
-                    val cy = if (h > 0) y + h / 2 else y
+                    val cx = (if (w > 0) x + w / 2 else x).coerceIn(0, 4000)
+                    val cy = (if (h > 0) y + h / 2 else y).coerceIn(0, 4000)
                     if (ctrl != null) {
                         Ln.i("MaaRunner: RepeatUntilFoundAction [$nodeName] attempt $attempt/$repeatCount click ($cx, $cy)")
                         val cid = lib.MaaControllerPostClick(ctrl, cx, cy)
@@ -357,13 +389,17 @@ class MaaRunner(private val agentHost: AgentHost) {
                                 val recoId = lib.MaaContextRunRecognition(context, waitNode, "{}", imgBuf)
                                 if (recoId > 0L && tasker != null) {
                                     val hitMem = Memory(1)
-                                    val boxMem = Memory(16)
-                                    if (lib.MaaTaskerGetRecognitionDetail(tasker, recoId, null, null, hitMem, boxMem, null, null, null).toInt() != 0) {
-                                        if (hitMem.getByte(0).toInt() != 0) {
-                                            Ln.i("MaaRunner: RepeatUntilFoundAction [$nodeName] waitNode='$waitNode' matched via reco (attempt $attempt)")
-                                            matched = true
-                                            break
+                                    val tempRect = lib.MaaRectCreate()
+                                    try {
+                                        if (lib.MaaTaskerGetRecognitionDetail(tasker, recoId, null, null, hitMem, tempRect, null, null, null).toInt() != 0) {
+                                            if (hitMem.getByte(0).toInt() != 0) {
+                                                Ln.i("MaaRunner: RepeatUntilFoundAction [$nodeName] waitNode='$waitNode' matched via reco (attempt $attempt)")
+                                                matched = true
+                                                break
+                                            }
                                         }
+                                    } finally {
+                                        if (tempRect != null) lib.MaaRectDestroy(tempRect)
                                     }
                                 }
                             }
@@ -426,12 +462,9 @@ class MaaRunner(private val agentHost: AgentHost) {
                     return@MaaCustomActionCallback 0
                 }
                 if (customAction == "AutoAltClickAction" || action == "Click" || customAction == "AutoCtrlClickAction" || (customAction == null && action == null)) {
-                    val x = box?.getInt(0) ?: 0
-                    val y = box?.getInt(4) ?: 0
-                    val w = box?.getInt(8) ?: 0
-                    val h = box?.getInt(12) ?: 0
-                    val cx = if (w > 0) x + w / 2 else x
-                    val cy = if (h > 0) y + h / 2 else y
+                    val rect = getBoxRect(lib, box)
+                    val cx = (if (rect.w > 0) rect.x + rect.w / 2 else rect.x).coerceIn(0, 4000)
+                    val cy = (if (rect.h > 0) rect.y + rect.h / 2 else rect.y).coerceIn(0, 4000)
                     if (ctrl != null) {
                         val cid = lib.MaaControllerPostClick(ctrl, cx, cy)
                         if (cid > 0) lib.MaaControllerWait(ctrl, cid)
@@ -460,11 +493,15 @@ class MaaRunner(private val agentHost: AgentHost) {
                             val recoId = lib.MaaContextRunRecognition(context, waitNode, "{}", imgBuf)
                             if (recoId > 0L && tasker != null) {
                                 val hitMem = Memory(1)
-                                val boxMem = Memory(16)
-                                if (lib.MaaTaskerGetRecognitionDetail(tasker, recoId, null, null, hitMem, boxMem, null, null, null).toInt() != 0) {
-                                    if (hitMem.getByte(0).toInt() != 0) {
-                                        stillHit = true
+                                val tempRect = lib.MaaRectCreate()
+                                try {
+                                    if (lib.MaaTaskerGetRecognitionDetail(tasker, recoId, null, null, hitMem, tempRect, null, null, null).toInt() != 0) {
+                                        if (hitMem.getByte(0).toInt() != 0) {
+                                            stillHit = true
+                                        }
                                     }
+                                } finally {
+                                    if (tempRect != null) lib.MaaRectDestroy(tempRect)
                                 }
                             }
                         }
@@ -566,13 +603,23 @@ class MaaRunner(private val agentHost: AgentHost) {
 
             val tasker = lib.MaaContextGetTasker(context)
             val hitMem = Memory(1)
-            val boxMem = Memory(16)
-            if (tasker != null && lib.MaaTaskerGetRecognitionDetail(tasker, recoId, null, null, hitMem, boxMem, null, null, null).toInt() != 0) {
-                val hit = hitMem.getByte(0)
-                if (hit.toInt() != 0 && outBox != null) {
-                    outBox.write(0, boxMem.getByteArray(0, 16), 0, 16)
+            val tempRect = lib.MaaRectCreate()
+            try {
+                if (tasker != null && lib.MaaTaskerGetRecognitionDetail(tasker, recoId, null, null, hitMem, tempRect, null, null, null).toInt() != 0) {
+                    val hit = hitMem.getByte(0)
+                    if (hit.toInt() != 0 && outBox != null && tempRect != null) {
+                        val rx = lib.MaaRectGetX(tempRect)
+                        val ry = lib.MaaRectGetY(tempRect)
+                        val rw = lib.MaaRectGetW(tempRect)
+                        val rh = lib.MaaRectGetH(tempRect)
+                        lib.MaaRectSet(outBox, rx, ry, rw, rh)
+                    }
+                    return@MaaCustomRecognitionCallback hit
                 }
-                return@MaaCustomRecognitionCallback hit
+            } finally {
+                if (tempRect != null) {
+                    lib.MaaRectDestroy(tempRect)
+                }
             }
             0
         } catch (t: Throwable) {

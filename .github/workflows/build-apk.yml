@@ -163,8 +163,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: output_apks/*.apk
+          name: ${{ contains(github.ref_name, 'beta') && format('{0} (Beta 测试版)', github.ref_name) || contains(github.ref_name, 'alpha') && format('{0} (Alpha 实验版)', github.ref_name) || github.ref_name }}
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

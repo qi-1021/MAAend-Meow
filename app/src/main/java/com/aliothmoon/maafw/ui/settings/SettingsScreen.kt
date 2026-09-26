@@ -1,7 +1,10 @@
 package com.aliothmoon.maafw.ui.settings
 
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -39,8 +42,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
@@ -56,6 +61,8 @@ import com.aliothmoon.maafw.domain.RemoteBackend
 import com.aliothmoon.maafw.domain.ThemeMode
 import com.aliothmoon.maafw.i18n.AppLocales
 import com.aliothmoon.maafw.i18n.asString
+import com.aliothmoon.maafw.log.DeviceInfoCollector
+import com.aliothmoon.maafw.log.DeviceInfoText
 import com.aliothmoon.maafw.runner.ResolutionPreference
 import com.aliothmoon.maafw.session.SessionIntent
 import com.aliothmoon.maafw.session.SessionUiState
@@ -140,6 +147,7 @@ fun SettingsScreen(
             LogCard(state, onIntent, onOpenRunLogArchive, onOpenAppLog, onExportLogs)
             PiCard(onIntent)
             OtherCard(state, settingsState, onIntent, onSettingsIntent)
+            FeedbackCard(state, settingsState, onExportLogs)
             AboutCard(state)
         }
     }
@@ -604,6 +612,100 @@ private fun AboutCard(state: SessionUiState) {
             title = stringResource(it.titleRes),
             body = it.body,
             onDismiss = { sheet = null },
+        )
+    }
+}
+
+@Composable
+private fun FeedbackCard(
+    state: SessionUiState,
+    settingsState: SettingsUiState,
+    onExportLogs: () -> Unit,
+) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+    val copiedMessage = stringResource(R.string.feedback_copied)
+    val backendText = settingsState.remoteAccess.configuredBackend.display
+    val serviceStateText = state.privilegedService.name
+
+    MaaCard(title = stringResource(R.string.settings_section_feedback), collapsible = true) {
+        MaaInfoRow(
+            label = stringResource(R.string.feedback_device_info_title),
+            value = "${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE})",
+        )
+        MaaInfoRow(
+            label = stringResource(R.string.permission_backend),
+            value = "$backendText ($serviceStateText)",
+        )
+
+        MaaDescriptionPanel {
+            Text(
+                text = stringResource(R.string.feedback_desc),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+        }
+
+        Spacer(Modifier.height(MaaDesignTokens.Spacing.sm))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(MaaDesignTokens.Spacing.sm),
+        ) {
+            MaaButton(
+                label = stringResource(R.string.feedback_copy_diagnostic),
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    val info = DeviceInfoCollector.collect(context, context.filesDir)
+                    val report = buildString {
+                        append(DeviceInfoText.render(info))
+                        append("Backend     : ").append(backendText).append('\n')
+                        append("ServiceState: ").append(serviceStateText).append('\n')
+                        append("RunMode     : ").append(state.runMode.name).append('\n')
+                        append("Resolution  : ").append(state.resolutionPreference.name).append('\n')
+                    }
+                    clipboardManager.setText(AnnotatedString(report))
+                    Toast.makeText(context, copiedMessage, Toast.LENGTH_SHORT).show()
+                },
+            )
+            MaaButton(
+                label = stringResource(R.string.feedback_export_logs),
+                modifier = Modifier.weight(1f),
+                onClick = onExportLogs,
+            )
+        }
+
+        Spacer(Modifier.height(MaaDesignTokens.Spacing.xs))
+
+        MaaNavigationRow(
+            label = stringResource(R.string.feedback_open_issue),
+            onClick = {
+                val repo = if (BuildConfig.MAFW_GITHUB_REPO.isNotBlank()) {
+                    BuildConfig.MAFW_GITHUB_REPO
+                } else {
+                    "qi-1021/MAAend-Meow"
+                }
+                val info = DeviceInfoCollector.collect(context, context.filesDir)
+                val body = buildString {
+                    append("### 简要描述\n\n\n")
+                    append("### 复现步骤\n1. \n2. \n3. \n\n")
+                    append("### 诊断信息\n")
+                    append("```\n")
+                    append(DeviceInfoText.render(info))
+                    append("Backend     : ").append(backendText).append('\n')
+                    append("ServiceState: ").append(serviceStateText).append('\n')
+                    append("RunMode     : ").append(state.runMode.name).append('\n')
+                    append("Resolution  : ").append(state.resolutionPreference.name).append('\n')
+                    append("```\n")
+                }
+                val url = "https://github.com/$repo/issues/new?title=" +
+                    Uri.encode("[Bug] ") +
+                    "&body=" + Uri.encode(body)
+                val intent = Intent(Intent.ACTION_VIEW, url.toUri())
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                runCatching { context.startActivity(intent) }
+                    .onFailure { Timber.w(it, "No activity handles the issue link") }
+            },
         )
     }
 }

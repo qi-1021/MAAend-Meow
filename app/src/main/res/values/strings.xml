@@ -713,4 +713,13 @@
     <string name="settings_inference_device_cpu">CPU (默认稳定)</string>
     <string name="settings_inference_device_nnapi">NNAPI (硬件加速)</string>
     <string name="settings_inference_device_vulkan">GPU (Vulkan)</string>
+
+    <!-- 问题反馈与诊断 -->
+    <string name="settings_section_feedback">问题反馈与诊断</string>
+    <string name="feedback_desc">遇到任务异常、闪退或执行中断时，可一键复制诊断信息并导出日志，随后提交给开发团队排查。</string>
+    <string name="feedback_copy_diagnostic">复制诊断信息</string>
+    <string name="feedback_copied">诊断信息已复制到剪贴板</string>
+    <string name="feedback_export_logs">导出运行日志</string>
+    <string name="feedback_open_issue">前往 GitHub 提交 Issue</string>
+    <string name="feedback_device_info_title">设备与环境诊断</string>
 </resources>
