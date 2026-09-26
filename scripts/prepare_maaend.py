@@ -304,6 +304,50 @@ def enhance_opengame_pipeline():
         log(f"Warning: failed to enhance OpenGame pipeline: {e}")
 
 
+def tag_unimplemented_tasks():
+    """
+    为移动端暂未实现/部分实现的功能打上可见标签，避免用户误用。
+    这些需要桌面端 agent（3D 导航/浏览器）或完整策略移植，后续版本实现。
+    只改 label/description 显示文本，不影响流水线逻辑。
+    """
+    marks = {
+        # 自动采集：依赖 C++ 3D 地图导航 agent，手机端暂无
+        "AutoCollect": "🧺自动采集【暂未实现·需3D导航，后续版本实现】",
+        # 滑索导入：桌面端浏览器 MITM 抓取，手机端请在电脑导一次后同步数据
+        "ZiplineImport": "🚡导入/更新滑索坐标【暂未实现·需桌面端，后续版本实现】",
+        # 囤货策略：完整选品/配额策略移植中，当前仅基础流程
+        "AutoStockpile": "📦自动囤货【策略完善中，部分物资暂不支持】",
+        "AutoStockStaple": "🏪购买稳定物资【策略完善中】",
+    }
+    tasks_dir = ASSETS_ROOT / "tasks"
+    if not tasks_dir.exists():
+        return
+    count = 0
+    for p in tasks_dir.rglob("*.json"):
+        try:
+            content = p.read_text(encoding="utf-8")
+            data = json.loads(strip_json_comments(content))
+            modified = False
+            if "task" in data and isinstance(data["task"], list):
+                for t in data["task"]:
+                    if not isinstance(t, dict):
+                        continue
+                    name = t.get("name")
+                    if name in marks:
+                        t["label"] = marks[name]
+                        desc = t.get("description", "")
+                        note = "【移动端暂未完全实现，后续版本补齐，敬请期待】"
+                        if isinstance(desc, str) and note not in desc:
+                            t["description"] = f"{desc} {note}" if desc else note
+                        modified = True
+            if modified:
+                p.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+                count += 1
+        except Exception as e:
+            log(f"Warning: failed to tag unimplemented task in {p.name}: {e}")
+    log(f"Tagged unimplemented tasks in {count} task files.")
+
+
 def main():
     log("Starting MAAend Android preparation...")
     ensure_maaend_submodule()
@@ -314,6 +358,7 @@ def main():
     fix_task_controllers()
     enhance_presets_with_startup()
     enhance_opengame_pipeline()
+    tag_unimplemented_tasks()
     log("Preparation complete!")
 
 
