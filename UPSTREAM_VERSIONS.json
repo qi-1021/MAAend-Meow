@@ -7,8 +7,8 @@
       "name": "MaaEnd (Assistant For Arknights: Endfield)",
       "repository": "https://github.com/MaaEnd/MaaEnd",
       "path": "upstream/maaend",
-      "pinned_commit": "1d533c3960520003ed0fdf8e63f82bee0f20eede",
-      "pinned_tag": "v2.30.0-rc.1-16-g1d533c39",
+      "pinned_commit": "fcdc53a784c0fd3073f778d8048a8b8c61224054",
+      "pinned_tag": "v2.30.0-rc.1-19-gfcdc53a7",
       "description": "上游业务资源仓库，提供 interface.json、tasks、resource、多渠道服与 ADB 适配"
     },
     "maa_framework": {
