@@ -3,6 +3,7 @@
 .externalNativeBuild
 local.properties
 *.jks
+!signing/release.jks
 *.b64
 AGENTS.md
 /.vscode/

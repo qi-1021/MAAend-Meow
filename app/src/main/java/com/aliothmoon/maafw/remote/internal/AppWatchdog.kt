@@ -75,6 +75,13 @@ object AppWatchdog {
         _state.value = STATE_IDLE
     }
 
+    fun setExplicitTarget(pkg: String) {
+        targetPackage = pkg
+        if (job == null) {
+            startWatching()
+        }
+    }
+
     private fun tick() {
         val displayId = VirtualDisplayManager.getDisplayId()
         if (displayId == DefaultDisplayConfig.DISPLAY_NONE) {

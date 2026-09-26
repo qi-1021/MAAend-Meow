@@ -100,7 +100,11 @@ object PipController {
         val ratio = clampAspectRatio(request.resolution.width, request.resolution.height)
         val builder = PictureInPictureParams.Builder()
             .setAspectRatio(Rational(ratio.numerator, ratio.denominator))
-        request.sourceRect?.let { builder.setSourceRectHint(it) }
+        request.sourceRect?.let { rect ->
+            if (rect.width() > 0 && rect.height() > 0 && rect.left >= 0 && rect.top >= 0) {
+                builder.setSourceRectHint(rect)
+            }
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setAutoEnterEnabled(autoEnter)
             builder.setSeamlessResizeEnabled(true)

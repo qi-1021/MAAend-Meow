@@ -141,6 +141,7 @@ internal fun LivePreview(
     modifier: Modifier = Modifier,
     /** 卡片在 window 中的位置，给画中画的进入动画用 */
     onBoundsChanged: ((Rect?) -> Unit)? = null,
+    onStartTargetApp: (() -> Unit)? = null,
 ) {
     // 尺寸靠 aspectRatio 算而不是 BoxWithConstraints：后者是 SubcomposeLayout，
     // 测量期的首次组合撞上 movableContent 搬家会拿到已停用的节点（Apply is called on
@@ -164,12 +165,6 @@ internal fun LivePreview(
                 PreviewStatusMask(surfaceReady = surfaceReady, running = running)
                 if (!running && watchdogState != WatchdogState.WATCHING) {
                     val context = LocalContext.current
-                    val endfieldPkg = remember {
-                        com.aliothmoon.maafw.remote.internal.ActivityUtils.packageNameOf("com.hypergryph.endfield")
-                    }
-                    val launchIntent = remember(endfieldPkg) {
-                        context.packageManager.getLaunchIntentForPackage(endfieldPkg)
-                    }
                     Row(
                         modifier = Modifier
                             .align(Alignment.TopStart)
@@ -179,9 +174,24 @@ internal fun LivePreview(
                                 RoundedCornerShape(MaaDesignTokens.CornerRadius.button),
                             )
                             .maaClickable {
-                                if (launchIntent != null) {
-                                    launchIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    context.startActivity(launchIntent)
+                                if (onStartTargetApp != null) {
+                                    onStartTargetApp()
+                                } else {
+                                    val candidatePackages = listOf(
+                                        "com.hypergryph.endfield",
+                                        "com.hypergryph.endfield.bilibili",
+                                        "com.gryphline.endfield.gp",
+                                        "com.hypergryph.cloud.endfield",
+                                        "com.hypergryph.endfield.mi",
+                                        "com.hypergryph.endfield.huawei",
+                                    )
+                                    val intent = candidatePackages.firstNotNullOfOrNull { pkg ->
+                                        context.packageManager.getLaunchIntentForPackage(pkg)
+                                    }
+                                    if (intent != null) {
+                                        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        runCatching { context.startActivity(intent) }
+                                    }
                                 }
                             }
                             .padding(horizontal = MaaDesignTokens.Spacing.sm, vertical = MaaDesignTokens.Spacing.xs),
@@ -253,22 +263,38 @@ internal fun FullscreenPreview(
     val activity = LocalContext.current.findActivity()
 
     DisposableEffect(activity) {
-        val controller = activity?.window?.let {
-            WindowCompat.getInsetsController(it, it.decorView)
+        runCatching {
+            val controller = activity?.window?.let {
+                WindowCompat.getInsetsController(it, it.decorView)
+            }
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+            controller?.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
-        controller?.hide(WindowInsetsCompat.Type.systemBars())
-        controller?.systemBarsBehavior =
-            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
+        onDispose {
+            runCatching {
+                activity?.window?.let {
+                    WindowCompat.getInsetsController(it, it.decorView).show(WindowInsetsCompat.Type.systemBars())
+                }
+            }
+        }
     }
 
     // 虚拟屏是横的，竖着看只有中间一条；退出时还原用户原本的方向设置
     DisposableEffect(activity) {
-        val original = activity?.requestedOrientation
-        if (activity?.resources?.configuration?.orientation != Configuration.ORIENTATION_LANDSCAPE) {
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        val original = runCatching { activity?.requestedOrientation }.getOrNull()
+        runCatching {
+            if (activity != null && !activity.isInMultiWindowMode &&
+                activity.resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
+            ) {
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            }
         }
-        onDispose { if (original != null) activity.requestedOrientation = original }
+        onDispose {
+            if (original != null) {
+                runCatching { activity?.requestedOrientation = original }
+            }
+        }
     }
 
     BackHandler(onBack = onExit)

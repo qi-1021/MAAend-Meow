@@ -186,6 +186,7 @@ private fun TasksContent(
                             .weight(3f),
                         // 小窗里这张卡缩成了巴掌大，别拿它的坐标覆盖 sourceRectHint
                         onBoundsChanged = { if (!pipActive) previewBounds = it },
+                        onStartTargetApp = { onIntent(SessionIntent.StartTargetApp()) },
                     )
                     TaskWorkspace(
                         state = state,

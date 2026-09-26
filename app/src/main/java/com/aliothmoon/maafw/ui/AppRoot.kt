@@ -360,14 +360,17 @@ fun AppRoot(
                 .clearFocusOnBlankTap()
                 // 小窗期间钉在进小窗前的窗口尺寸下测量：按巴掌大重排会让任务列表丢掉视口外的行
                 .layout { measurable, constraints ->
-                    val pinned = isInPip && fullWindow[0] > 0
-                    if (!pinned) {
+                    val pinned = isInPip && fullWindow[0] > 0 && fullWindow[1] > 0
+                    if (!pinned && constraints.hasBoundedWidth && constraints.hasBoundedHeight) {
                         fullWindow[0] = constraints.maxWidth
                         fullWindow[1] = constraints.maxHeight
                     }
-                    val placeable = measurable.measure(
-                        if (pinned) Constraints.fixed(fullWindow[0], fullWindow[1]) else constraints,
-                    )
+                    val targetConstraints = if (pinned && fullWindow[0] > 0 && fullWindow[1] > 0) {
+                        Constraints.fixed(fullWindow[0], fullWindow[1])
+                    } else {
+                        constraints
+                    }
+                    val placeable = measurable.measure(targetConstraints)
                     layout(constraints.maxWidth, constraints.maxHeight) { placeable.place(0, 0) }
                 },
         ) {
@@ -453,8 +456,8 @@ fun AppRoot(
                     TopDestination.Tasks -> TasksScreen(
                         state = state,
                         previewSurfaceReady = previewSurfaceReady,
-                        // 全屏时这里让位，同一份 previewContent 搬到下面的全屏宿主
-                        previewContent = previewContent.takeUnless { previewFullscreen },
+                        // 全屏与画中画时这里让位，同一份 previewContent 搬到对应的宿主，避免并发重复挂载
+                        previewContent = previewContent.takeUnless { previewFullscreen || isInPip },
                         // settledPage 只在滑动落定后翻页，手势中途弹回去仍是旧页——组合≠可见
                         isActivePage = pagerState.settledPage == page,
                         pipOnHome = settingsState.pipOnHome,

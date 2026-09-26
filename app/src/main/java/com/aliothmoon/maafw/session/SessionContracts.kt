@@ -350,6 +350,9 @@ sealed interface SessionIntent {
     data object RefreshPermissions : SessionIntent
 
     data object ClearRunLog : SessionIntent
+
+    /** 手动启动终末地游戏客户端（在当前运行模式的目标屏拉起） */
+    data class StartTargetApp(val packageName: String? = null) : SessionIntent
 }
 
 /** 一次性 Effect，不进 UiState */

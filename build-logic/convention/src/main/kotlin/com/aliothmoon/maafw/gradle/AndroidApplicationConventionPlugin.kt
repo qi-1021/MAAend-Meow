@@ -102,15 +102,29 @@ class AndroidApplicationConventionPlugin : Plugin<Project> {
                 }
             }
 
-            // Without a keystore the release stays unsigned, so a local build never fails
-            // just for missing signing material
-            val keystorePath = signingSetting("KEYSTORE_PATH", "KEYSTORE_PATH")
+            // Check for project checked-in release keystore as default
+            val defaultKeystore = rootProject.file("signing/release.jks")
+            val keystorePath = signingSetting("KEYSTORE_PATH", "KEYSTORE_PATH").ifEmpty {
+                if (defaultKeystore.isFile) defaultKeystore.absolutePath else ""
+            }
+            val keystorePassword = signingSetting("KEYSTORE_PASSWORD", "KEYSTORE_PASSWORD").ifEmpty {
+                if (defaultKeystore.isFile) "maaendmeow" else ""
+            }
+            val keyAliasVal = signingSetting("KEY_ALIAS", "KEY_ALIAS").ifEmpty {
+                if (defaultKeystore.isFile) "maaend" else ""
+            }
+            val keyPasswordVal = signingSetting("KEY_PASSWORD", "KEY_PASSWORD").ifEmpty {
+                if (defaultKeystore.isFile) "maaendmeow" else ""
+            }
             val releaseSigning = android.signingConfigs.create("release").apply {
                 if (keystorePath.isNotEmpty()) {
                     storeFile = file(keystorePath)
-                    storePassword = signingSetting("KEYSTORE_PASSWORD", "KEYSTORE_PASSWORD")
-                    keyAlias = signingSetting("KEY_ALIAS", "KEY_ALIAS")
-                    keyPassword = signingSetting("KEY_PASSWORD", "KEY_PASSWORD")
+                    storePassword = keystorePassword
+                    keyAlias = keyAliasVal
+                    keyPassword = keyPasswordVal
+                    enableV1Signing = true
+                    enableV2Signing = true
+                    enableV3Signing = true
                 }
             }
 

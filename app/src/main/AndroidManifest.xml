@@ -46,6 +46,21 @@
         android:name="android.permission.BIND_ACCESSIBILITY_SERVICE"
         tools:ignore="ProtectedPermissions" />
 
+    <queries>
+        <package android:name="com.hypergryph.endfield" />
+        <package android:name="com.hypergryph.endfield.bilibili" />
+        <package android:name="com.gryphline.endfield.gp" />
+        <package android:name="com.hypergryph.endfield.vn" />
+        <package android:name="com.hypergryph.cloud.endfield" />
+        <package android:name="com.hypergryph.endfield.mi" />
+        <package android:name="com.hypergryph.endfield.huawei" />
+        <package android:name="com.hypergryph.endfield.nearme.gamecenter" />
+        <package android:name="com.hypergryph.endfield.vivo" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+        </intent>
+    </queries>
+
     <application
         android:name=".MaaFwApp"
         android:allowBackup="true"

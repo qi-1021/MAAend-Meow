@@ -107,7 +107,34 @@ class RemoteServiceImpl : RemoteService.Stub() {
             Ln.i("$TAG: force-stopped $target")
             true
         }.getOrElse {
-            Ln.w("$TAG: stopTargetApp failed: ${'$'}it")
+            Ln.w("$TAG: stopTargetApp failed: $it")
+            false
+        }
+    }
+
+    override fun startTargetApp(packageName: String?): Boolean {
+        return runCatching {
+            val displayId = when (virtualDisplayMode.get()) {
+                DisplayMode.PRIMARY -> 0
+                DisplayMode.BACKGROUND -> {
+                    var vdId = VirtualDisplayManager.getDisplayId()
+                    if (vdId == DefaultDisplayConfig.DISPLAY_NONE) {
+                        vdId = startVirtualDisplay()
+                    }
+                    vdId
+                }
+                else -> 0
+            }
+            val targetSpec = if (!packageName.isNullOrBlank()) packageName else "com.hypergryph.endfield"
+            Ln.i("$TAG: startTargetApp spec=$targetSpec displayId=$displayId")
+            val resolvedPkg = ActivityUtils.packageNameOf(targetSpec)
+            val success = ActivityUtils.startApp(resolvedPkg, displayId, forceStop = false, excludeFromRecents = true)
+            if (success) {
+                AppWatchdog.setExplicitTarget(resolvedPkg)
+            }
+            success
+        }.getOrElse {
+            Ln.e("$TAG: startTargetApp failed", it)
             false
         }
     }

@@ -55,12 +55,8 @@ object VirtualDisplayManager {
     private val monitorSurface = AtomicReference<Surface?>()
 
     fun setMonitorSurface(surface: Surface?) {
-        val old = monitorSurface.getAndSet(surface)
-        if (old != null && old != surface) {
-            old.release()
-            Ln.i("Old monitor surface released")
-        }
-        Ln.i("setMonitorSurface: old=${old != null}, new=${surface != null}")
+        monitorSurface.set(surface)
+        Ln.i("setMonitorSurface: hasSurface=${surface != null}")
     }
 
     fun start(): Int {
@@ -76,7 +72,7 @@ object VirtualDisplayManager {
             return
         }
         releaseResources()
-        monitorSurface.getAndSet(null)?.release()
+        monitorSurface.set(null)
         Ln.i("VirtualDisplayManager stopped")
     }
 

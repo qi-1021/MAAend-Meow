@@ -508,6 +508,22 @@ class SessionViewModel(
                     .onFailure { Timber.w(it, "stopVirtualDisplay failed") }
             }
 
+            is SessionIntent.StartTargetApp -> {
+                viewModelScope.launch {
+                    val service = servicePort.serviceOrNull()
+                    if (service != null) {
+                        val ok = runCatching {
+                            service.startTargetApp(intent.packageName)
+                        }.onFailure { Timber.w(it, "startTargetApp via service failed") }.getOrDefault(false)
+                        if (!ok) {
+                            emitEffect(SessionEffect.ShowMessage(com.aliothmoon.maafw.i18n.UiText.Verbatim("启动终末地失败，请确认游戏客户端已安装")))
+                        }
+                    } else {
+                        emitEffect(SessionEffect.ShowMessage(com.aliothmoon.maafw.i18n.UiText.Verbatim("特权服务未连接，请先连接 Shizuku 或 Root 后端")))
+                    }
+                }
+            }
+
             // 语言切换会触发 PI 重载（翻译加载期物化），运行中同样拦截
             is SessionIntent.SetLanguage -> guarded {
                 AppLocales.apply(intent.localeTag)

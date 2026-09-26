@@ -138,4 +138,11 @@ interface RemoteService {
      * 走文件不回传字节：一张 720p PNG 几百 KB，binder 事务缓冲总共才 1MB
      */
     boolean saveCachedImage(String path) = 75;
+
+    /**
+     * 拉起目标游戏客户端。
+     * packageName 为 null 时自动探测已安装的渠道包名。
+     * 在后台虚拟屏模式下直接在虚拟屏上拉起，在前台模式下拉起至主屏。
+     */
+    boolean startTargetApp(String packageName) = 76;
 }
