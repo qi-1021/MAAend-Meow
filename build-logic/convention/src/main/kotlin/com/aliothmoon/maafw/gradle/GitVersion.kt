@@ -1,0 +1,88 @@
+package com.aliothmoon.maafw.gradle
+
+import org.gradle.api.Project
+import java.io.File
+
+/**
+ * A standalone checkout versions itself. When this checkout is a submodule, walk through any
+ * nested superprojects and version from the outermost repository instead.
+ */
+private fun Project.versionGitWorkingDir(): File {
+    // Four callers each walked the whole chain, and every `git rev-parse` is a process spawn.
+    // Kept on the root project extras so the cache dies with the build, not with the daemon
+    val extras = rootProject.extensions.extraProperties
+    (extras.properties[GIT_WORKING_DIR_KEY] as? File)?.let { return it }
+
+    var workingDir = rootProject.projectDir
+    while (true) {
+        val superproject = providers.exec {
+            workingDir(workingDir)
+            commandLine("git", "rev-parse", "--show-superproject-working-tree")
+            isIgnoreExitValue = true
+        }.standardOutput.asText.get().trim()
+        if (superproject.isEmpty()) break
+        workingDir = File(superproject)
+    }
+    extras.set(GIT_WORKING_DIR_KEY, workingDir)
+    return workingDir
+}
+
+private const val GIT_WORKING_DIR_KEY = "maafw.gitWorkingDir"
+
+/** versionCode counts commits in the selected version repo; falls back safely to 1 if no commits */
+internal fun Project.gitVersionCode(): Int {
+    val gitWorkingDir = versionGitWorkingDir()
+    val count = runCatching {
+        providers.exec {
+            workingDir(gitWorkingDir)
+            commandLine("git", "rev-list", "--count", "HEAD")
+            isIgnoreExitValue = true
+        }.standardOutput.asText.get().trim().toInt()
+    }.getOrNull() ?: 1
+    return count.coerceAtLeast(1)
+}
+
+/**
+ * A tag on HEAD gives x.y.z, keeping any prerelease suffix; a tag further back bumps patch by one
+ * and appends alpha.<distance>. A describe output that does not match degrades to itself instead
+ * of blocking the build, so a repository without a single tag versions itself by short hash
+ */
+internal fun Project.gitVersionName(workingDir: File): String {
+    val desc = providers.exec {
+        workingDir(workingDir)
+        commandLine("git", "describe", "--tags", "--always")
+        isIgnoreExitValue = true
+    }.standardOutput.asText.get().trim()
+    val match = Regex("""^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.]+))?(?:-(\d+)-g[0-9a-f]+)?$""")
+        .matchEntire(desc)
+    if (match != null) {
+        val (major, minor, patch, pre, distance) = match.destructured
+        return when {
+            distance.isNotEmpty() -> "$major.$minor.${patch.toInt() + 1}-alpha.$distance"
+            pre.isNotEmpty() -> "$major.$minor.$patch-$pre"
+            else -> "$major.$minor.$patch"
+        }
+    }
+    // 当在无 tag 的提交或分支上构建时，尝试获取最近的有效 tag，避免裸 commit hash 或分支名导致 SemVer 校验失败
+    val latestTag = runCatching {
+        providers.exec {
+            workingDir(workingDir)
+            commandLine("git", "describe", "--tags", "--abbrev=0")
+            isIgnoreExitValue = true
+        }.standardOutput.asText.get().trim()
+    }.getOrNull().orEmpty()
+    val tagMatch = Regex("""^v?(\d+)\.(\d+)\.(\d+).*$""").matchEntire(latestTag)
+    val fallbackBase = tagMatch?.let { "${it.groupValues[1]}.${it.groupValues[2]}.${it.groupValues[3]}" } ?: "0.1.1"
+    return "$fallbackBase-dev"
+}
+
+internal fun Project.gitVersionName(): String = gitVersionName(versionGitWorkingDir())
+
+/** The shell's own version, told apart from the packaged project's in the about card */
+internal fun Project.gitOwnVersionName(): String = gitVersionName(rootProject.projectDir)
+
+/** Empty when this checkout is not a submodule: there is no project around it to version */
+internal fun Project.gitParentVersionName(): String {
+    val parent = versionGitWorkingDir()
+    return if (parent == rootProject.projectDir) "" else gitVersionName(parent)
+}

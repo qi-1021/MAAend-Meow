@@ -1,0 +1,3 @@
+[submodule "upstream/maaend"]
+	path = upstream/maaend
+	url = https://github.com/MaaEnd/MaaEnd.git

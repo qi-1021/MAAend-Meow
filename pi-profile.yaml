@@ -1,0 +1,42 @@
+# MAAend (明日方舟：终末地 小助手) Android 打包配方
+# 供 MaaFwApp 构建体系识别并打包 MAAend 资源、运行环境与应用标识
+
+# 指向 MAAend 资源项目根目录（含 interface.json）
+assets: upstream/maaend/assets
+
+# 进包白名单
+include:
+  - interface.json
+  - tasks/**
+  - resource/**
+  - resource_adb/**
+  - resource_cloud_adb/**
+  - data/**
+  - locales/**
+  - CONTACT
+  - LICENSE
+  - MaaEnd-Tiny.png
+
+# 过滤不需要的开发与平台多余文件
+exclude:
+  - "**/.git/**"
+  - "**/__pycache__/**"
+  - "**/.venv/**"
+  - "**/tests/**"
+  - "**/*.pyc"
+  - "resource_linux/**"
+  - "resource_macos/**"
+  - "resource_playcover/**"
+
+# 自动更新源配置
+update:
+  githubRepo: qi-1021/MAAend-Meow
+
+# 应用标识与图标
+app:
+  # 包名后缀，生成 com.aliothmoon.maafw.maaend
+  id: maaend
+  # 桌面显示名称
+  label: MAAend-Meow
+  # 应用图标
+  icon: logo.png

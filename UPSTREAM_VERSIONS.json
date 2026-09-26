@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "MAAend-Meow",
+  "description": "Upstream component versions, pinned commits, and build baseline",
+  "components": {
+    "maaend": {
+      "name": "MaaEnd (Assistant For Arknights: Endfield)",
+      "repository": "https://github.com/MaaEnd/MaaEnd",
+      "path": "upstream/maaend",
+      "pinned_commit": "17acf0dbf78598fc9976607873d5f363ae84422a",
+      "pinned_tag": "v2.30.0-rc.1-5-g17acf0db",
+      "description": "上游业务资源仓库，提供 interface.json、tasks、resource、多渠道服与 ADB 适配"
+    },
+    "maa_framework": {
+      "name": "MaaFramework",
+      "repository": "https://github.com/MaaXYZ/MaaFramework",
+      "pinned_release": "v5.14.0",
+      "compatible_releases": [
+        "v5.13.1",
+        "v5.14.0"
+      ],
+      "description": "自动化与图像识别底层核心库，提供 libMaaFramework.so、libMaaUtils.so 及 AndroidNativeControlUnit"
+    },
+    "maa_common_assets": {
+      "name": "MaaCommonAssets (OCR)",
+      "repository": "https://github.com/MaaXYZ/MaaCommonAssets",
+      "model_path": "OCR/ppocr_v6/small",
+      "files": [
+        "det.onnx",
+        "rec.onnx",
+        "keys.txt"
+      ],
+      "description": "轻量级 PP-OCR v6 文字识别 ONNX 模型"
+    },
+    "host_platform": {
+      "name": "MaaFwApp (MAA-Meow 通用架构)",
+      "repository": "https://github.com/Aliothmoon/MaaFwApp",
+      "source_reference": "https://github.com/Aliothmoon/MAA-Meow",
+      "description": "Android 宿主工程、Jetpack Compose 界面、Shizuku/Root 特权进程桥、虚拟显示屏与多点触控层"
+    }
+  },
+  "build_toolchain": {
+    "jdk": "17 (Temurin)",
+    "compile_sdk": 37,
+    "target_sdk": 36,
+    "min_sdk": 28,
+    "ndk": "27.2.12479018 (r27c)",
+    "cmake": "3.22.1",
+    "agp": "9.2.1",
+    "kotlin": "2.3.21",
+    "ksp": "2.3.9"
+  }
+}

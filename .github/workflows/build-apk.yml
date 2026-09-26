@@ -1,0 +1,165 @@
+name: Build MAAend-Meow APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      abi:
+        description: 'Target Architecture'
+        required: true
+        default: 'arm64-v8a'
+        type: choice
+        options:
+          - arm64-v8a
+          - universal
+      maafw_tag:
+        description: 'MaaFramework Tag (empty = latest)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository with Submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android NDK & SDK Tools
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          link-to-sdk: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python Build Dependencies
+        run: |
+          python -m pip install --upgrade pip packaging pillow
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Prepare MAAend Assets & OCR Models
+        run: |
+          python scripts/prepare_maaend.py
+
+      - name: Setup MaaFramework Libraries
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MAAFW_ARGS=""
+          if [ -n "${{ github.event.inputs.maafw_tag }}" ]; then
+            MAAFW_ARGS="--tag ${{ github.event.inputs.maafw_tag }}"
+          fi
+
+          if [ "${{ github.event.inputs.abi }}" = "universal" ]; then
+            python scripts/setup_maa_framework.py $MAAFW_ARGS
+            echo "build.debugAbi=arm64-v8a,x86_64" > local.properties
+            echo "build.releaseAbi=arm64-v8a,x86_64" >> local.properties
+          else
+            python scripts/setup_maa_framework.py --abi arm64-v8a $MAAFW_ARGS
+            echo "build.debugAbi=arm64-v8a" > local.properties
+            echo "build.releaseAbi=arm64-v8a" >> local.properties
+          fi
+          echo "pi.profile=pi-profile.yaml" >> local.properties
+
+      - name: Build APK via Gradle
+        run: |
+          chmod +x ./gradlew
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
+          
+          # 确保注入规范的 SemVer 版本号环境变量，避免 Gradle 回退到 git commit hash 或分支名
+          REF_NAME="${{ github.ref_name }}"
+          if [ -n "$REF_NAME" ] && [[ "$REF_NAME" == v* ]]; then
+            export BUILD_VERSION_NAME="${REF_NAME#v}"
+          fi
+          
+          if [ "$BUILD_TYPE" = "release" ]; then
+            ./gradlew assembleRelease --stacktrace
+          else
+            ./gradlew assembleDebug --stacktrace
+          fi
+
+      - name: Prepare APK Output
+        id: apk_prep
+        run: |
+          mkdir -p output_apks
+          ABI_NAME="${{ github.event.inputs.abi || 'arm64-v8a' }}"
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
+          TAG_OR_REF="${{ github.ref_name }}"
+          
+          if [ -n "$TAG_OR_REF" ] && [[ "$TAG_OR_REF" == v* ]]; then
+            VER="$TAG_OR_REF"
+          else
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
+            VER="${LATEST_TAG}"
+          fi
+          
+          for apk in $(find app/build/outputs/apk -name "*.apk"); do
+            base=$(basename "$apk")
+            if [ "$BUILD_TYPE" = "release" ]; then
+              new_name="MAAend-Meow-${VER}-${ABI_NAME}.apk"
+            else
+              new_name="MAAend-Meow-${VER}-${ABI_NAME}-debug.apk"
+            fi
+            cp "$apk" "output_apks/${new_name}"
+            echo "Packaged: output_apks/${new_name}"
+          done
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MAAend-Meow-APKs
+          path: output_apks/*.apk
+          retention-days: 14
+
+      - name: Publish GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output_apks/*.apk
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
