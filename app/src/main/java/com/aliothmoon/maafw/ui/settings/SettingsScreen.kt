@@ -653,7 +653,6 @@ private fun FeedbackCard(
             horizontalArrangement = Arrangement.spacedBy(MaaDesignTokens.Spacing.sm),
         ) {
             MaaButton(
-                label = stringResource(R.string.feedback_copy_diagnostic),
                 modifier = Modifier.weight(1f),
                 onClick = {
                     val info = DeviceInfoCollector.collect(context, context.filesDir)
@@ -667,12 +666,15 @@ private fun FeedbackCard(
                     clipboardManager.setText(AnnotatedString(report))
                     Toast.makeText(context, copiedMessage, Toast.LENGTH_SHORT).show()
                 },
-            )
+            ) {
+                Text(stringResource(R.string.feedback_copy_diagnostic))
+            }
             MaaButton(
-                label = stringResource(R.string.feedback_export_logs),
                 modifier = Modifier.weight(1f),
                 onClick = onExportLogs,
-            )
+            ) {
+                Text(stringResource(R.string.feedback_export_logs))
+            }
         }
 
         Spacer(Modifier.height(MaaDesignTokens.Spacing.xs))
