@@ -1344,7 +1344,11 @@ class MaaRunner(private val agentHost: AgentHost) {
         regReco("ListCompleteRecognition", listCompleteRecognitionCallback)
         regReco("ScrollbarCompleteRecognition", scrollbarCompleteRecognitionCallback)
         regReco("ScrollbarRecognition", noopTrueRecognitionCallback)
-        regReco("ScreenshotStableRecognition", noopTrueRecognitionCallback)
+        // 上游 ScreenshotStableRecognition 仅在 Win32-Front 下判定「画面连续三帧不变」，
+        // 其余平台固定返回 false。之前注册成恒 true，会让 __ScenePrivateScreenshotStableAbnormal
+        // 永远命中并把 FalseAction 判失败，直接掐断 SceneAnyEnterWorld 的 next 链，
+        // 导致 __ScenePrivateAnyExit（返回键）根本执行不到——游戏留在菜单里，后续任务全部失败。
+        regReco("ScreenshotStableRecognition", noopFalseRecognitionCallback)
         regReco("ScheduleRecognition", noopTrueRecognitionCallback)
         regReco("ItemQuantitySatisfied", noopTrueRecognitionCallback)
         regReco("ItemDataReady", noopTrueRecognitionCallback)
