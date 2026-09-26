@@ -104,21 +104,25 @@ class AndroidApplicationConventionPlugin : Plugin<Project> {
 
             // Check for project checked-in release keystore as default
             val defaultKeystore = rootProject.file("signing/release.jks")
-            val keystorePath = signingSetting("KEYSTORE_PATH", "KEYSTORE_PATH").ifEmpty {
-                if (defaultKeystore.isFile) defaultKeystore.absolutePath else ""
+            val rawPath = signingSetting("KEYSTORE_PATH", "KEYSTORE_PATH")
+            val keystoreFile = if (rawPath.isNotEmpty()) {
+                val f = java.io.File(rawPath)
+                if (f.isAbsolute && f.exists()) f else rootProject.file(rawPath)
+            } else {
+                defaultKeystore
             }
             val keystorePassword = signingSetting("KEYSTORE_PASSWORD", "KEYSTORE_PASSWORD").ifEmpty {
-                if (defaultKeystore.isFile) "maaendmeow" else ""
+                if (keystoreFile.isFile) "maaendmeow" else ""
             }
             val keyAliasVal = signingSetting("KEY_ALIAS", "KEY_ALIAS").ifEmpty {
-                if (defaultKeystore.isFile) "maaend" else ""
+                if (keystoreFile.isFile) "maaend" else ""
             }
             val keyPasswordVal = signingSetting("KEY_PASSWORD", "KEY_PASSWORD").ifEmpty {
-                if (defaultKeystore.isFile) "maaendmeow" else ""
+                if (keystoreFile.isFile) "maaendmeow" else ""
             }
             val releaseSigning = android.signingConfigs.create("release").apply {
-                if (keystorePath.isNotEmpty()) {
-                    storeFile = file(keystorePath)
+                if (keystoreFile.isFile) {
+                    storeFile = keystoreFile
                     storePassword = keystorePassword
                     keyAlias = keyAliasVal
                     keyPassword = keyPasswordVal
@@ -174,7 +178,7 @@ class AndroidApplicationConventionPlugin : Plugin<Project> {
                         android.getDefaultProguardFile("proguard-android-optimize.txt"),
                         "proguard-rules.pro",
                     )
-                    signingConfig = if (keystorePath.isNotEmpty()) {
+                    signingConfig = if (keystoreFile.isFile) {
                         releaseSigning
                     } else {
                         android.signingConfigs.getByName("debug")

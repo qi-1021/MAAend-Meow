@@ -114,7 +114,7 @@ jobs:
             export BUILD_VERSION_NAME="${REF_NAME#v}"
           fi
           
-          export KEYSTORE_PATH="signing/release.jks"
+          export KEYSTORE_PATH="$GITHUB_WORKSPACE/signing/release.jks"
           export KEYSTORE_PASSWORD="maaendmeow"
           export KEY_ALIAS="maaend"
           export KEY_PASSWORD="maaendmeow"
