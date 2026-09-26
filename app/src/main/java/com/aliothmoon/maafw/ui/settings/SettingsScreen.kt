@@ -628,7 +628,7 @@ private fun FeedbackCard(
     val backendText = settingsState.remoteAccess.configuredBackend.display
     val serviceStateText = state.privilegedService.name
 
-    MaaCard(title = stringResource(R.string.settings_section_feedback), collapsible = true) {
+    MaaCard(title = stringResource(R.string.settings_section_feedback), collapsible = false) {
         MaaInfoRow(
             label = stringResource(R.string.feedback_device_info_title),
             value = "${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE})",

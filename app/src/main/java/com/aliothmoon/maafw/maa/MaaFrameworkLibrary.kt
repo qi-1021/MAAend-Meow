@@ -93,6 +93,14 @@ interface MaaFrameworkLibrary : Library {
         image: Pointer?,
     ): Long
 
+    fun MaaContextRunAction(
+        context: Pointer?,
+        entry: String,
+        pipelineOverride: String,
+        box: Pointer?,
+        detail: String,
+    ): Long
+
     // ── Controller ──
 
     fun MaaAndroidNativeControllerCreate(configJson: String): Pointer?

@@ -45,8 +45,9 @@ internal class GitHubReleasesApi(
         val releases = mutableListOf<Release>()
         val endpoints = listOf(
             buildApiUrl(repository),
-            "https://gh-proxy.com/" + buildApiUrl(repository),
+            "https://ungh.cc/repos/$repository/releases",
             "https://ghfast.top/" + buildApiUrl(repository),
+            "https://gh-proxy.com/" + buildApiUrl(repository),
         )
 
         for (page in 1..MAX_PAGES) {
@@ -74,7 +75,8 @@ internal class GitHubReleasesApi(
                         )
                         continue
                     }
-                    val parsed = parseJsonArray(body)
+                    val parsedObj = parseJsonObject(body)
+                    val parsed = parseJsonArray(body) ?: (parsedObj?.get("releases") as? JsonArray)
                     if (parsed == null) {
                         lastOutcome = UpdateSourceOutcome.Failed(UpdateCheckFailure.INVALID_RESPONSE)
                         continue
@@ -117,26 +119,33 @@ internal class GitHubReleasesApi(
      */
     fun selectAsset(assets: List<Asset>, abi: AndroidAbi): Asset? {
         val apkAssets = assets.filter(Asset::isApk)
-        apkAssets
-            .mapNotNull { asset ->
-                ABI_MARKERS.getValue(abi).indexOfFirst { asset.name.matchesAlias(it) }
-                    .takeIf { it >= 0 }
-                    ?.let { it to asset }
-            }
-            .minByOrNull { it.first }
-            ?.second
-            ?.let { return it }
-        return apkAssets
-            .filterNot { asset -> ALL_ABI_MARKERS.any { asset.name.matchesAlias(it) } }
-            .singleOrNull()
+        if (apkAssets.isEmpty()) return null
+
+        val markers = ABI_MARKERS[abi].orEmpty()
+        if (markers.isNotEmpty()) {
+            val matched = apkAssets
+                .mapNotNull { asset ->
+                    markers.indexOfFirst { asset.name.matchesAlias(it) }
+                        .takeIf { it >= 0 }
+                        ?.let { it to asset }
+                }
+                .minByOrNull { it.first }
+                ?.second
+            if (matched != null) return matched
+        }
+
+        val universal = apkAssets.filterNot { asset -> ALL_ABI_MARKERS.any { asset.name.matchesAlias(it) } }
+        if (universal.size == 1) return universal.first()
+
+        return apkAssets.firstOrNull()
     }
 
     private fun release(raw: JsonObject): Release? {
-        val tag = raw.string("tag_name") ?: return null
+        val tag = raw.string("tag_name") ?: raw.string("tag") ?: return null
         return Release(
             tag = tag,
-            htmlUrl = raw.string("html_url"),
-            body = raw.string("body"),
+            htmlUrl = raw.string("html_url") ?: raw.string("htmlUrl"),
+            body = raw.string("body") ?: raw.string("markdown"),
             assets = (raw["assets"] as? JsonArray)
                 ?.filterIsInstance<JsonObject>()
                 ?.mapNotNull(::asset)
@@ -147,7 +156,7 @@ internal class GitHubReleasesApi(
 
     private fun asset(raw: JsonObject): Asset? {
         val apiUrl = raw.string("url")
-        val browserUrl = raw.string("browser_download_url")
+        val browserUrl = raw.string("browser_download_url") ?: raw.string("downloadUrl")
         val downloadUrl = browserUrl ?: apiUrl ?: return null
         return Asset(
             name = raw.string("name") ?: downloadUrl.substringAfterLast('/'),
@@ -224,7 +233,12 @@ internal class GitHubUpdateClient(
 
             is UpdateSourceOutcome.Ok -> outcome.value
         }
-        val candidate = api.latestEligible(releases, request.channel)
+        val effectiveChannel = if (request.channel == UpdateChannel.STABLE && currentVersion.preRelease.isNotEmpty()) {
+            UpdateChannel.BETA
+        } else {
+            request.channel
+        }
+        val candidate = api.latestEligible(releases, effectiveChannel)
             ?: return UpdateCheckResult.SourceFailed(source, UpdateCheckFailure.NO_MATCHING_ASSET)
         val (release, version) = candidate
         if (version <= currentVersion) {
@@ -244,6 +258,7 @@ internal class GitHubUpdateClient(
     }
 
     override suspend fun resolve(request: UpdateResolveRequest): UpdateResolveResult = try {
+        val currentVersion = UpdateVersion.parse(request.currentVersion)
         val repository = api.parseRepository(request.githubRepository)
             ?: return UpdateResolveResult.Failed(source, UpdateCheckFailure.MISSING_CONFIGURATION)
         val releases = when (val outcome = api.releases(repository)) {
@@ -255,7 +270,12 @@ internal class GitHubUpdateClient(
 
             is UpdateSourceOutcome.Ok -> outcome.value
         }
-        val (release, _) = api.latestEligible(releases, request.channel)
+        val effectiveChannel = if (request.channel == UpdateChannel.STABLE && currentVersion?.preRelease?.isNotEmpty() == true) {
+            UpdateChannel.BETA
+        } else {
+            request.channel
+        }
+        val (release, _) = api.latestEligible(releases, effectiveChannel)
             ?: return UpdateResolveResult.Failed(source, UpdateCheckFailure.NO_MATCHING_ASSET)
         val asset = api.selectAsset(release.assets, request.abi)
             ?: return UpdateResolveResult.Failed(source, UpdateCheckFailure.NO_MATCHING_ASSET)

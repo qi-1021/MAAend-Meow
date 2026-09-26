@@ -126,6 +126,7 @@ class SettingsViewModel(
             is SettingsIntent.SetUpdateChannel -> viewModelScope.launch {
                 if (updateSettingsLocked()) return@launch
                 appSettings.setUpdateChannel(intent.channel)
+                checkUpdate()
             }
 
             is SettingsIntent.SetUpdateSource -> viewModelScope.launch {

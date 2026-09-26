@@ -102,6 +102,35 @@ fun HomeScreen(
                     fontWeight = FontWeight.SemiBold,
                 )
             },
+            actions = {
+                TextButton(
+                    onClick = {
+                        val repo = if (BuildConfig.MAFW_GITHUB_REPO.isNotBlank()) {
+                            BuildConfig.MAFW_GITHUB_REPO
+                        } else {
+                            "qi-1021/MAAend-Meow"
+                        }
+                        val info = com.aliothmoon.maafw.device.DeviceInfoCollector.collect(context, context.filesDir)
+                        val body = buildString {
+                            append("### 简要描述\n\n\n")
+                            append("### 复现步骤\n1. \n2. \n3. \n\n")
+                            append("### 诊断信息\n```\n")
+                            append(com.aliothmoon.maafw.device.DeviceInfoText.render(info))
+                            append("Backend     : ").append(state.backend.name).append('\n')
+                            append("RunMode     : ").append(state.runMode.name).append('\n')
+                            append("```\n")
+                        }
+                        val url = "https://github.com/$repo/issues/new?title=" +
+                            android.net.Uri.encode("[Feedback] ") +
+                            "&body=" + android.net.Uri.encode(body)
+                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, androidx.core.net.toUri(url))
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        runCatching { context.startActivity(intent) }
+                    }
+                ) {
+                    Text(stringResource(R.string.feedback_open_issue))
+                }
+            },
             // AppRoot 的 Scaffold 已吃掉状态栏顶部 inset，这里不能再加一次
             windowInsets = WindowInsets(0, 0, 0, 0),
             colors = TopAppBarDefaults.topAppBarColors(

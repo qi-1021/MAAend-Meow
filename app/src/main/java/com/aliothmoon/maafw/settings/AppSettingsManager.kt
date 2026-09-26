@@ -279,8 +279,14 @@ class AppSettingsManager(private val context: Context) : AppSettingsGateway {
     private fun parseEventNotificationLevel(raw: String): EventNotificationLevel =
         runCatching { EventNotificationLevel.valueOf(raw) }.getOrDefault(EventNotificationLevel.DEFAULT)
 
-    private fun parseUpdateChannel(raw: String): UpdateChannel =
-        runCatching { UpdateChannel.valueOf(raw) }.getOrDefault(UpdateChannel.STABLE)
+    private fun parseUpdateChannel(raw: String): UpdateChannel {
+        if (com.aliothmoon.maafw.BuildConfig.VERSION_NAME.contains("beta", ignoreCase = true) ||
+            com.aliothmoon.maafw.BuildConfig.VERSION_NAME.contains("alpha", ignoreCase = true)
+        ) {
+            return if (raw.equals("STABLE", ignoreCase = true)) UpdateChannel.BETA else runCatching { UpdateChannel.valueOf(raw) }.getOrDefault(UpdateChannel.BETA)
+        }
+        return runCatching { UpdateChannel.valueOf(raw) }.getOrDefault(UpdateChannel.BETA)
+    }
 
     private fun parseUpdateSource(raw: String): UpdateSource =
         runCatching { UpdateSource.valueOf(raw) }.getOrDefault(UpdateSource.GITHUB)

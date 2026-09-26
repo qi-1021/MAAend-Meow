@@ -195,9 +195,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
-    private val autoAltClickCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, box, _ ->
+    private val autoAltClickCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, box, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
-        val ctrl = controller ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
         try {
             val rect = getBoxRect(lib, box)
             var x = rect.x
@@ -223,9 +223,16 @@ class MaaRunner(private val agentHost: AgentHost) {
             val cx = (if (w > 0) x + w / 2 else x).coerceIn(0, 4000)
             val cy = (if (h > 0) y + h / 2 else y).coerceIn(0, 4000)
             Ln.i("MaaRunner: AutoAltClickAction [$nodeName] click ($cx, $cy)")
-            val clickId = lib.MaaControllerPostClick(ctrl, cx, cy)
-            if (clickId > 0) {
-                lib.MaaControllerWait(ctrl, clickId)
+            val clickBox = lib.MaaRectCreate()
+            try {
+                if (clickBox != null) {
+                    lib.MaaRectSet(clickBox, cx, cy, 1, 1)
+                }
+                lib.MaaContextRunAction(context, "__AutoAltClickMouseClickAction", "{}", clickBox ?: box, "")
+            } finally {
+                if (clickBox != null) {
+                    lib.MaaRectDestroy(clickBox)
+                }
             }
             1
         } catch (t: Throwable) {
@@ -236,9 +243,9 @@ class MaaRunner(private val agentHost: AgentHost) {
 
     private val autoCtrlClickCallback = autoAltClickCallback
 
-    private val autoAltSwipeCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, box, _ ->
+    private val autoAltSwipeCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, box, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
-        val ctrl = controller ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
         try {
             val rect = getBoxRect(lib, box)
             var x1 = rect.x
@@ -267,10 +274,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             x2 = x2.coerceIn(0, 4000)
             y2 = y2.coerceIn(0, 4000)
             Ln.i("MaaRunner: AutoAltSwipeAction [$nodeName] swipe ($x1, $y1)->($x2, $y2) duration=$duration")
-            val swipeId = lib.MaaControllerPostSwipe(ctrl, x1, y1, x2, y2, duration)
-            if (swipeId > 0) {
-                lib.MaaControllerWait(ctrl, swipeId)
-            }
+            val overrideJson = """{"__AutoAltSwipeMouseSwipeAction":{"begin":[$x1,$y1],"end":[$x2,$y2],"duration":$duration}}"""
+            lib.MaaContextRunAction(context, "__AutoAltSwipeMouseSwipeAction", overrideJson, box, "")
             1
         } catch (t: Throwable) {
             Ln.e("MaaRunner: AutoAltSwipeAction error on node=$nodeName", t)
@@ -278,9 +283,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
-    private val menuListClickItemCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, _, _, box, _ ->
+    private val menuListClickItemCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, _, _, box, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
-        val ctrl = controller ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
         try {
             val rect = getBoxRect(lib, box)
             if (rect.w <= 0 && rect.x == 0 && rect.y == 0) {
@@ -290,9 +295,16 @@ class MaaRunner(private val agentHost: AgentHost) {
             val cx = (rect.x + rect.w / 2).coerceIn(0, 4000)
             val cy = (rect.y - 15).coerceIn(0, 4000)
             Ln.i("MaaRunner: SceneManagerMenuListClickItemAction [$nodeName] click ($cx, $cy)")
-            val clickId = lib.MaaControllerPostClick(ctrl, cx, cy)
-            if (clickId > 0) {
-                lib.MaaControllerWait(ctrl, clickId)
+            val clickBox = lib.MaaRectCreate()
+            try {
+                if (clickBox != null) {
+                    lib.MaaRectSet(clickBox, cx, cy, 1, 1)
+                }
+                lib.MaaContextRunAction(context, "__SceneClickAction", "{}", clickBox ?: box, "")
+            } finally {
+                if (clickBox != null) {
+                    lib.MaaRectDestroy(clickBox)
+                }
             }
             1
         } catch (t: Throwable) {
@@ -326,7 +338,6 @@ class MaaRunner(private val agentHost: AgentHost) {
                 ?: innerParamObj?.get("action")?.jsonPrimitive?.contentOrNull
             val customAction = rawJson?.get("custom_action")?.jsonPrimitive?.contentOrNull
                 ?: innerParamObj?.get("custom_action")?.jsonPrimitive?.contentOrNull
-            val innerParam = rawJson?.get("custom_action_param")?.toString() ?: customActionParam
             val ctrl = controller
             val tasker = lib.MaaContextGetTasker(context)
 
@@ -335,8 +346,9 @@ class MaaRunner(private val agentHost: AgentHost) {
                     return@MaaCustomActionCallback 0
                 }
 
-                // 1. 执行内部动作
-                if (customAction == "AutoAltClickAction" || action == "Click" || customAction == "AutoCtrlClickAction" || (customAction == null && action == null)) {
+                // 1. 执行内部动作，通过 MaaContextRunAction 分发，避免直接阻塞 controller
+                val clickBox = lib.MaaRectCreate()
+                try {
                     val rect = getBoxRect(lib, box)
                     var x = rect.x
                     var y = rect.y
@@ -353,18 +365,25 @@ class MaaRunner(private val agentHost: AgentHost) {
                     }
                     val cx = (if (w > 0) x + w / 2 else x).coerceIn(0, 4000)
                     val cy = (if (h > 0) y + h / 2 else y).coerceIn(0, 4000)
-                    if (ctrl != null) {
-                        Ln.i("MaaRunner: RepeatUntilFoundAction [$nodeName] attempt $attempt/$repeatCount click ($cx, $cy)")
-                        val cid = lib.MaaControllerPostClick(ctrl, cx, cy)
-                        if (cid > 0) lib.MaaControllerWait(ctrl, cid)
+                    if (clickBox != null) {
+                        lib.MaaRectSet(clickBox, cx, cy, 1, 1)
                     }
-                } else if (!customAction.isNullOrBlank()) {
-                    lib.MaaContextRunTask(context, customAction, innerParam ?: "{}")
-                } else if (!action.isNullOrBlank()) {
-                    lib.MaaContextRunTask(context, action, "{}")
+
+                    if (customAction == "AutoAltClickAction" || action == "Click" || customAction == "AutoCtrlClickAction" || (customAction == null && action == null)) {
+                        Ln.i("MaaRunner: RepeatUntilFoundAction [$nodeName] attempt $attempt/$repeatCount click ($cx, $cy)")
+                        val innerOverride = """{"__RepeatUntilActionInner":{"pre_delay":0,"post_delay":0,"rate_limit":0,"action":"Click"}}"""
+                        lib.MaaContextRunAction(context, "__RepeatUntilActionInner", innerOverride, clickBox ?: box, "")
+                    } else if (!customAction.isNullOrBlank()) {
+                        val innerOverride = """{"__RepeatUntilActionInner":{"pre_delay":0,"post_delay":0,"rate_limit":0,"action":"Custom","custom_action":"$customAction"}}"""
+                        lib.MaaContextRunAction(context, "__RepeatUntilActionInner", innerOverride, clickBox ?: box, "")
+                    }
+                } finally {
+                    if (clickBox != null) {
+                        lib.MaaRectDestroy(clickBox)
+                    }
                 }
 
-                // 2. 在 intervalMs 时间窗口内轮询等待目标节点命中
+                // 2. 在 intervalMs 时间窗口内轮询等待目标节点命中（仅通过截图和识别检测，绝不递归调用 RunTask）
                 val deadline = System.currentTimeMillis() + intervalMs
                 while (System.currentTimeMillis() < deadline) {
                     if (isStopRequested() || (tasker != null && lib.MaaTaskerStopping(tasker).toInt() != 0)) {
@@ -408,17 +427,6 @@ class MaaRunner(private val agentHost: AgentHost) {
                         if (imgBuf != null) lib.MaaImageBufferDestroy(imgBuf)
                     }
 
-                    if (!matched) {
-                        for (waitNode in waitNodes) {
-                            val taskId = lib.MaaContextRunTask(context, waitNode, "{}")
-                            if (taskId > 0L) {
-                                Ln.i("MaaRunner: RepeatUntilFoundAction [$nodeName] waitNode='$waitNode' matched via task (attempt $attempt)")
-                                matched = true
-                                break
-                            }
-                        }
-                    }
-
                     if (matched) return@MaaCustomActionCallback 1
                 }
             }
@@ -453,7 +461,6 @@ class MaaRunner(private val agentHost: AgentHost) {
                 ?: innerParamObj?.get("action")?.jsonPrimitive?.contentOrNull
             val customAction = rawJson?.get("custom_action")?.jsonPrimitive?.contentOrNull
                 ?: innerParamObj?.get("custom_action")?.jsonPrimitive?.contentOrNull
-            val innerParam = rawJson?.get("custom_action_param")?.toString() ?: customActionParam
             val ctrl = controller
             val tasker = lib.MaaContextGetTasker(context)
 
@@ -461,15 +468,32 @@ class MaaRunner(private val agentHost: AgentHost) {
                 if (isStopRequested() || (tasker != null && lib.MaaTaskerStopping(tasker).toInt() != 0)) {
                     return@MaaCustomActionCallback 0
                 }
-                if (customAction == "AutoAltClickAction" || action == "Click" || customAction == "AutoCtrlClickAction" || (customAction == null && action == null)) {
+
+                // 1. 执行内部动作，通过 MaaContextRunAction 分发
+                val clickBox = lib.MaaRectCreate()
+                try {
                     val rect = getBoxRect(lib, box)
                     val cx = (if (rect.w > 0) rect.x + rect.w / 2 else rect.x).coerceIn(0, 4000)
                     val cy = (if (rect.h > 0) rect.y + rect.h / 2 else rect.y).coerceIn(0, 4000)
-                    if (ctrl != null) {
-                        val cid = lib.MaaControllerPostClick(ctrl, cx, cy)
-                        if (cid > 0) lib.MaaControllerWait(ctrl, cid)
+                    if (clickBox != null) {
+                        lib.MaaRectSet(clickBox, cx, cy, 1, 1)
+                    }
+
+                    if (customAction == "AutoAltClickAction" || action == "Click" || customAction == "AutoCtrlClickAction" || (customAction == null && action == null)) {
+                        Ln.i("MaaRunner: RepeatUntilNotFoundAction [$nodeName] attempt $attempt/$repeatCount click ($cx, $cy)")
+                        val innerOverride = """{"__RepeatUntilActionInner":{"pre_delay":0,"post_delay":0,"rate_limit":0,"action":"Click"}}"""
+                        lib.MaaContextRunAction(context, "__RepeatUntilActionInner", innerOverride, clickBox ?: box, "")
+                    } else if (!customAction.isNullOrBlank()) {
+                        val innerOverride = """{"__RepeatUntilActionInner":{"pre_delay":0,"post_delay":0,"rate_limit":0,"action":"Custom","custom_action":"$customAction"}}"""
+                        lib.MaaContextRunAction(context, "__RepeatUntilActionInner", innerOverride, clickBox ?: box, "")
+                    }
+                } finally {
+                    if (clickBox != null) {
+                        lib.MaaRectDestroy(clickBox)
                     }
                 }
+
+                // 2. 轮询等待目标节点消失
                 val deadline = System.currentTimeMillis() + intervalMs
                 while (System.currentTimeMillis() < deadline) {
                     if (isStopRequested() || (tasker != null && lib.MaaTaskerStopping(tasker).toInt() != 0)) {

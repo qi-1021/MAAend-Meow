@@ -110,8 +110,8 @@ data class AppSettings(
     val autoDownloadUpdate: String = "false",
 
     /** [UpdateChannel] 的 name */
-    @PrefKey(default = "STABLE")
-    val updateChannel: String = "STABLE",
+    @PrefKey(default = "BETA")
+    val updateChannel: String = "BETA",
 
     /** [com.aliothmoon.maafw.update.UpdateSource] 的 name；检查与下载都只走这一个源 */
     @PrefKey(default = "GITHUB")

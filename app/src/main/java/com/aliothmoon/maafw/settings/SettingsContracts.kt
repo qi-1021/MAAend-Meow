@@ -23,7 +23,7 @@ data class SettingsUiState(
 )
 
 data class UpdatePanelState(
-    val channel: UpdateChannel = UpdateChannel.STABLE,
+    val channel: UpdateChannel = UpdateChannel.BETA,
     val updateSource: UpdateSource = UpdateSource.GITHUB,
     val mirrorchyanCdk: String = "",
     val autoCheckUpdate: Boolean = true,
