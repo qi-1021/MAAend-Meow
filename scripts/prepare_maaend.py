@@ -7,10 +7,24 @@ Ensures zero pollution of system /tmp (all caches/temps in project root).
 
 import json
 import os
+import re
 import shutil
 import sys
 import urllib.request
 from pathlib import Path
+
+
+def strip_json_comments(text: str) -> str:
+    """Safely strip // and /* */ comments from JSONC without affecting strings."""
+    def replacer(match):
+        s = match.group(0)
+        return " " if s.startswith("/") else s
+
+    pattern = re.compile(
+        r'//.*?$|/\*.*?\*/|\'(?:\\.|[^\\\'])*\'|"(?:\\.|[^\\"])*"',
+        re.DOTALL | re.MULTILINE
+    )
+    return re.sub(pattern, replacer, text)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TMP_DIR = PROJECT_ROOT / ".tmp"
@@ -135,15 +149,8 @@ def customize_maaend_metadata():
     interface_file = ASSETS_ROOT / "interface.json"
     if interface_file.is_file():
         try:
-            # 兼容带有 JSONC 注释的读取
-            lines = interface_file.read_text(encoding="utf-8").splitlines()
-            cleaned_lines = []
-            for line in lines:
-                stripped = line.strip()
-                if stripped.startswith("//"):
-                    continue
-                cleaned_lines.append(line)
-            data = json.loads("\n".join(cleaned_lines))
+            content = interface_file.read_text(encoding="utf-8")
+            data = json.loads(strip_json_comments(content))
 
             data["github"] = "https://github.com/qi-1021/MAAend-Meow"
             data["description"] = "这是对于MAAend手机端的一种实现，基于 MaaFramework 与 MaaEnd 开源项目。"
@@ -168,6 +175,77 @@ def customize_maaend_metadata():
             log(f"Warning: could not customize interface.json: {e}")
 
 
+def fix_task_controllers():
+    """
+    为所有任务及选项自动补齐 ADB 控制器声明，消除移动端‘不支持当前控制器’警告。
+    """
+    tasks_dir = ASSETS_ROOT / "tasks"
+    if not tasks_dir.exists():
+        return
+    count = 0
+    for p in tasks_dir.rglob("*.json"):
+        if "CloseGamePC" in p.name or "GameSetting" in p.name:
+            continue
+        try:
+            content = p.read_text(encoding="utf-8")
+            data = json.loads(strip_json_comments(content))
+            modified = False
+
+            # 处理 task 节点
+            if "task" in data and isinstance(data["task"], list):
+                for t in data["task"]:
+                    if isinstance(t, dict) and "controller" in t and isinstance(t["controller"], list):
+                        ctrls = t["controller"]
+                        if not any("adb" in c.lower() for c in ctrls):
+                            ctrls.extend(["ADB", "CloudADB"])
+                            modified = True
+
+            # 处理 option 节点
+            if "option" in data and isinstance(data["option"], dict):
+                for opt_name, opt in data["option"].items():
+                    if isinstance(opt, dict) and "controller" in opt and isinstance(opt["controller"], list):
+                        ctrls = opt["controller"]
+                        if not any("adb" in c.lower() for c in ctrls):
+                            ctrls.extend(["ADB", "CloudADB"])
+                            modified = True
+
+            if modified:
+                p.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+                count += 1
+        except Exception as e:
+            log(f"Warning: failed to fix controllers in {p.name}: {e}")
+    log(f"Fixed ADB controller declarations in {count} task files.")
+
+
+def enhance_presets_with_startup():
+    """
+    为预设（DailyFull, QuickDaily）自动在首位注入启动终末地（AndroidOpenGame），实现一键全自动拉起游戏。
+    """
+    preset_files = [
+        ASSETS_ROOT / "tasks" / "preset" / "DailyFull.json",
+        ASSETS_ROOT / "tasks" / "preset" / "QuickDaily.json",
+    ]
+    for pf in preset_files:
+        if not pf.is_file():
+            continue
+        try:
+            data = json.loads(pf.read_text(encoding="utf-8"))
+            presets = data.get("preset", [])
+            for pr in presets:
+                tasks = pr.get("task", [])
+                if not tasks or tasks[0].get("name") != "AndroidOpenGame":
+                    tasks.insert(0, {
+                        "name": "AndroidOpenGame",
+                        "option": {
+                            "ClientVersion": "CN"
+                        }
+                    })
+                    log(f"Inserted AndroidOpenGame as first step into {pf.name} preset.")
+            pf.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+        except Exception as e:
+            log(f"Warning: failed to enhance preset {pf.name}: {e}")
+
+
 def main():
     log("Starting MAAend Android preparation...")
     ensure_maaend_submodule()
@@ -175,6 +253,8 @@ def main():
     ensure_icon()
     ensure_local_properties()
     customize_maaend_metadata()
+    fix_task_controllers()
+    enhance_presets_with_startup()
     log("Preparation complete!")
 
 

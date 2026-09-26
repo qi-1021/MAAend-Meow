@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.OndemandVideo
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -161,6 +162,45 @@ internal fun LivePreview(
             Box(Modifier.fillMaxSize()) {
                 content()
                 PreviewStatusMask(surfaceReady = surfaceReady, running = running)
+                if (!running && watchdogState != WatchdogState.WATCHING) {
+                    val context = LocalContext.current
+                    val endfieldPkg = remember {
+                        com.aliothmoon.maafw.remote.internal.ActivityUtils.packageNameOf("com.hypergryph.endfield")
+                    }
+                    val launchIntent = remember(endfieldPkg) {
+                        context.packageManager.getLaunchIntentForPackage(endfieldPkg)
+                    }
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(MaaDesignTokens.Spacing.sm)
+                            .background(
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f),
+                                RoundedCornerShape(MaaDesignTokens.CornerRadius.button),
+                            )
+                            .maaClickable {
+                                if (launchIntent != null) {
+                                    launchIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    context.startActivity(launchIntent)
+                                }
+                            }
+                            .padding(horizontal = MaaDesignTokens.Spacing.sm, vertical = MaaDesignTokens.Spacing.xs),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.PlayArrow,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(MaaDesignTokens.IconSize.dotMd),
+                        )
+                        Spacer(Modifier.width(MaaDesignTokens.Spacing.xs))
+                        Text(
+                            text = "启动终末地",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
                 WatchdogStatusBadge(
                     state = watchdogState,
                     modifier = Modifier

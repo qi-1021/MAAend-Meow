@@ -198,7 +198,11 @@ object ConfigurationResolver {
         val controllerOk = task.controllers.isEmpty() ||
             task.controllers.any {
                 it.equals(definition.controller.type, ignoreCase = true) ||
-                    it.equals(definition.controller.name, ignoreCase = true)
+                    it.equals(definition.controller.name, ignoreCase = true) ||
+                    it.contains("Linux", ignoreCase = true) ||
+                    it.contains("Win32", ignoreCase = true) ||
+                    it.contains("MacOS", ignoreCase = true) ||
+                    it.contains("PlayCover", ignoreCase = true)
             }
         if (!controllerOk) return UnavailableReasons.controllerMismatch(task.controllers)
         val resourceOk = task.resources.isEmpty() ||

@@ -129,7 +129,13 @@ data class OptionApplicability(
     val resources: List<String> = emptyList(),
 ) {
     fun matches(controllerName: String, resourceName: String?): Boolean =
-        (controllers.isEmpty() || controllerName in controllers) &&
+        (controllers.isEmpty() || controllerName in controllers ||
+            controllers.any {
+                it.contains("Linux", ignoreCase = true) ||
+                    it.contains("Win32", ignoreCase = true) ||
+                    it.contains("MacOS", ignoreCase = true) ||
+                    it.contains("PlayCover", ignoreCase = true)
+            }) &&
                 (resources.isEmpty() || resourceName in resources)
 
     companion object {
