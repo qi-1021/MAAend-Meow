@@ -130,6 +130,17 @@ object RunPlanBuilder {
             if (openGameTask != null) {
                 val patches = mutableListOf<JsonObject>()
                 if (openGameTask.pipelineOverride.isNotEmpty()) patches += openGameTask.pipelineOverride
+                patches += globalPatches
+                patches += resourcePatches
+                compileOptions(
+                    definition = definition,
+                    optionNames = openGameTask.optionNames,
+                    values = emptyMap(),
+                    scopeLabel = "task:${openGameTask.name}",
+                    resourceName = resource.name,
+                    patches = patches,
+                    diagnostics = diagnostics,
+                )
                 runtimeTasks.add(
                     0,
                     RuntimeTask(

@@ -43,29 +43,58 @@ internal class GitHubReleasesApi(
 
     suspend fun releases(repository: String): UpdateSourceOutcome<List<Release>> {
         val releases = mutableListOf<Release>()
+        val endpoints = listOf(
+            buildApiUrl(repository),
+            "https://gh-proxy.com/" + buildApiUrl(repository),
+            "https://ghfast.top/" + buildApiUrl(repository),
+        )
+
         for (page in 1..MAX_PAGES) {
-            val response = helper.get(
-                buildApiUrl(repository),
-                buildMap {
-                    put("per_page", PAGE_SIZE.toString())
-                    put("page", page.toString())
-                }, API_HEADERS
-            )
-            val sc = response.code
-            val body = response.readBody()
-            if (!sc.isSuccess()) {
-                val serverMessage = parseJsonObject(body)?.string("message")
-                return UpdateSourceOutcome.Failed(
-                    apiFailureReason(sc),
-                    detail = serverMessage?.let(::uiTextFromFramework)
-                        ?: uiTextOf(R.string.update_detail_http_status, sc),
-                )
+            var lastOutcome: UpdateSourceOutcome.Failed? = null
+            var parsedArray: JsonArray? = null
+
+            for (endpoint in endpoints) {
+                try {
+                    val response = helper.get(
+                        endpoint,
+                        buildMap {
+                            put("per_page", PAGE_SIZE.toString())
+                            put("page", page.toString())
+                        },
+                        API_HEADERS,
+                    )
+                    val sc = response.code
+                    val body = response.readBody()
+                    if (!sc.isSuccess()) {
+                        val serverMessage = parseJsonObject(body)?.string("message")
+                        lastOutcome = UpdateSourceOutcome.Failed(
+                            apiFailureReason(sc),
+                            detail = serverMessage?.let(::uiTextFromFramework)
+                                ?: uiTextOf(R.string.update_detail_http_status, sc),
+                        )
+                        continue
+                    }
+                    val parsed = parseJsonArray(body)
+                    if (parsed == null) {
+                        lastOutcome = UpdateSourceOutcome.Failed(UpdateCheckFailure.INVALID_RESPONSE)
+                        continue
+                    }
+                    parsedArray = parsed
+                    break
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Timber.tag("GitHubUpdate").w(e, "endpoint %s failed, trying fallback", endpoint)
+                    lastOutcome = UpdateSourceOutcome.Failed(UpdateCheckFailure.NETWORK)
+                }
             }
-            val parsed = parseJsonArray(body)
-                ?: return UpdateSourceOutcome.Failed(UpdateCheckFailure.INVALID_RESPONSE)
-            if (parsed.isEmpty()) break
-            releases += parsed.filterIsInstance<JsonObject>().mapNotNull(::release)
-            if (parsed.size < PAGE_SIZE) break
+
+            if (parsedArray == null) {
+                return lastOutcome ?: UpdateSourceOutcome.Failed(UpdateCheckFailure.NETWORK)
+            }
+
+            if (parsedArray.isEmpty()) break
+            releases += parsedArray.filterIsInstance<JsonObject>().mapNotNull(::release)
+            if (parsedArray.size < PAGE_SIZE) break
         }
         return UpdateSourceOutcome.Ok(releases)
     }

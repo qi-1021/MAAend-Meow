@@ -134,6 +134,12 @@ object ActivityUtils {
         val component = componentOf(packageName)
         val targetPackage = packageNameOf(packageName)
 
+        // 若目标应用已经在目标虚拟显示屏上正常运行，无需重新启动或杀死进程，直接保持存活并返回成功
+        if (displayId != Display.DEFAULT_DISPLAY && isAppOnDisplay(targetPackage, displayId)) {
+            Ln.i("startApp: $targetPackage already running on display $displayId, keeping it alive")
+            return true
+        }
+
         // 1. 优先使用 targetPackage 获取系统当前真实的 LaunchIntent（避免硬编码过时的 Activity 导致启动失败）
         var intent = pm.getLaunchIntentForPackage(targetPackage)
             ?: pm.getLeanbackLaunchIntentForPackage(targetPackage)
@@ -156,7 +162,8 @@ object ActivityUtils {
         }
         intent.addFlags(flag)
 
-        if (forceStop) {
+        // 仅在目标应用未在指定屏幕上时才执行 force-stop（用于清理可能留在主屏的旧进程，确保冷启动落到虚拟屏）
+        if (forceStop && !isAppOnDisplay(targetPackage, displayId)) {
             runCatching {
                 ServiceManager.getActivityManager().forceStopPackage(targetPackage)
             }.onFailure {

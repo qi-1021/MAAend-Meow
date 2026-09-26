@@ -28,14 +28,14 @@ internal object GitHubMirrorRacer {
      *   https://ghproxy.com/https://github.com/owner/repo/releases/download/...
      */
     val DEFAULT_MIRRORS: List<String> = listOf(
-        "https://ghproxy.com/",
-        "https://mirror.ghproxy.com/",
+        "https://gh-proxy.com/",
         "https://ghfast.top/",
+        "https://mirror.ghproxy.com/",
         "https://github.moeyy.xyz/",
+        "https://ghproxy.net/",
         "https://gh.api.99988866.xyz/",
         "https://hub.whtrys.space/",
         "https://download.fastgit.org/",
-        "https://gh-proxy.com/",
     )
 
     /** 单个镜像站 HEAD 探测超时 */

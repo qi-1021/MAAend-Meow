@@ -246,6 +246,64 @@ def enhance_presets_with_startup():
             log(f"Warning: failed to enhance preset {pf.name}: {e}")
 
 
+def enhance_opengame_pipeline():
+    """
+    增强 OpenGame pipeline：
+    1. 在 OpenGame.next 首位注入 AlreadyInGame（主界面/游戏中识别），若游戏已启动则 0.1s 迅速完成，避免卡死。
+    2. 优化 StuckRepairAction，去除对移动端不存在的 SubTask Agent 依赖。
+    """
+    opengame_file = ASSETS_ROOT / "resource" / "pipeline" / "OpenGame.json"
+    if not opengame_file.is_file():
+        return
+    try:
+        content = opengame_file.read_text(encoding="utf-8")
+        data = json.loads(strip_json_comments(content))
+
+        # 1. 注入 AlreadyInGame 节点
+        data["AlreadyInGame"] = {
+            "desc": "游戏已在主界面/游戏中",
+            "recognition": {
+                "type": "TemplateMatch",
+                "param": {
+                    "template": [
+                        "SceneManager/WorldMenu.png",
+                        "SceneManager/ControlNexus.png",
+                        "SceneManager/ControlNexusWithTips.png",
+                        "SceneManager/Backpack.png",
+                        "SceneManager/TaskIcon.png",
+                        "SceneManager/TaskIcon2.png",
+                        "SceneManager/MapOverviewEnter.png"
+                    ]
+                }
+            }
+        }
+
+        # 2. 将 AlreadyInGame 置于 OpenGame 的 next 列表首位
+        if "OpenGame" in data and isinstance(data["OpenGame"], dict):
+            next_list = data["OpenGame"].get("next", [])
+            if "AlreadyInGame" not in next_list:
+                next_list.insert(0, "AlreadyInGame")
+                data["OpenGame"]["next"] = next_list
+
+        # 3. 修复 StuckRepairAction 去除 SubTask
+        if "StuckRepairAction" in data and isinstance(data["StuckRepairAction"], dict):
+            data["StuckRepairAction"] = {
+                "desc": "尝试修复卡死",
+                "next": [
+                    "ResetStartUpGame",
+                    "StartUpGameFailed"
+                ],
+                "focus": {
+                    "Node.Action.Starting": "$task.OpenGame.focus.stuck_repair"
+                }
+            }
+
+        opengame_file.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+        log("Enhanced OpenGame pipeline with AlreadyInGame and agent-free repair.")
+    except Exception as e:
+        log(f"Warning: failed to enhance OpenGame pipeline: {e}")
+
+
 def main():
     log("Starting MAAend Android preparation...")
     ensure_maaend_submodule()
@@ -255,8 +313,10 @@ def main():
     customize_maaend_metadata()
     fix_task_controllers()
     enhance_presets_with_startup()
+    enhance_opengame_pipeline()
     log("Preparation complete!")
 
 
 if __name__ == "__main__":
     main()
+
