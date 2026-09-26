@@ -20,6 +20,7 @@ import com.aliothmoon.maafw.runner.RuntimeTaskPayload
 import com.aliothmoon.maafw.runner.runPlanWireJson
 import com.aliothmoon.maafw.third.Ln
 import com.sun.jna.Memory
+import com.sun.jna.Native
 import com.sun.jna.Pointer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -90,6 +91,7 @@ class MaaRunner(private val agentHost: AgentHost) {
 
     /** JNA 回调必须被强引用住，否则会被 GC，native 回调时踩空 */
     private val eventSink = MaaFrameworkLibrary.MaaEventCallback { _, message, detailsJson, _ ->
+        keepCallbackThread()
         Ln.i("MaaEventCallback on $message")
         runCatching {
             callbackRef.get()?.onEvent(message.orEmpty(), detailsJson.orEmpty())
@@ -1207,18 +1209,47 @@ class MaaRunner(private val agentHost: AgentHost) {
     private val registeredCustomActions = mutableSetOf<String>()
     private val registeredCustomRecognitions = mutableSetOf<String>()
 
+    /**
+     * JNA 会把「首次被 native 回调的线程」自动 attach 到 JVM，并在回调返回后
+     * DetachCurrentThread。问题在于 MaaFramework 的 Custom Action 允许在回调里
+     * 再同步调 `MaaContextRunTask` / `MaaContextRunAction` / `MaaContextRunRecognition`，
+     * 于是同一个 native 线程会在「外层回调还没返回」时嵌套进入内层回调；内层回调
+     * 结束时 JNA 会再次 DetachCurrentThread，而此刻线程上仍有运行中的 Java 栈帧，
+     * ART 直接 `SIGABRT: attempting to detach while still running code`。
+     *
+     * 每个回调入口先调一次 [Native.detach]`(false)`，把该 native 线程标记为
+     * 「不随回调返回而 detach」，从此嵌套再深也不会被 ART 掐断。
+     */
+    private fun keepCallbackThread() {
+        runCatching { Native.detach(false) }
+    }
+
+    /** 包一层后的回调必须被强引用，否则 JNA 侧拿到的函数指针会被 GC 回收 */
+    private val callbackKeepAlive = mutableListOf<Any>()
+
     private fun registerCustomActions(lib: MaaFrameworkLibrary, res: Pointer) {
         registeredCustomActions.clear()
         registeredCustomRecognitions.clear()
         listCompleteInvocations.clear()
+        callbackKeepAlive.clear()
 
         fun regAction(name: String, cb: MaaFrameworkLibrary.MaaCustomActionCallback) {
-            lib.MaaResourceRegisterCustomAction(res, name, cb, null)
+            val wrapped = MaaFrameworkLibrary.MaaCustomActionCallback { context, taskId, nodeName, actionName, actionParam, recoId, box, transArg ->
+                keepCallbackThread()
+                cb(context, taskId, nodeName, actionName, actionParam, recoId, box, transArg)
+            }
+            callbackKeepAlive += wrapped
+            lib.MaaResourceRegisterCustomAction(res, name, wrapped, null)
             registeredCustomActions += name
         }
 
         fun regReco(name: String, cb: MaaFrameworkLibrary.MaaCustomRecognitionCallback) {
-            lib.MaaResourceRegisterCustomRecognition(res, name, cb, null)
+            val wrapped = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, taskId, nodeName, recoName, recoParam, image, roi, transArg, outBox, outDetail ->
+                keepCallbackThread()
+                cb(context, taskId, nodeName, recoName, recoParam, image, roi, transArg, outBox, outDetail)
+            }
+            callbackKeepAlive += wrapped
+            lib.MaaResourceRegisterCustomRecognition(res, name, wrapped, null)
             registeredCustomRecognitions += name
         }
 
@@ -1376,6 +1407,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             registeredCustomActions.clear()
             registeredCustomRecognitions.clear()
             listCompleteInvocations.clear()
+            callbackKeepAlive.clear()
             lib.MaaResourceDestroy(res)
         }
         resource = null
