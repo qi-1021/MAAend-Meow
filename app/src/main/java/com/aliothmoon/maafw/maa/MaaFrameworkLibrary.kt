@@ -46,6 +46,18 @@ interface MaaFrameworkLibrary : Library {
         name: String,
     ): Byte
 
+    fun MaaResourceRegisterCustomRecognition(
+        res: Pointer?,
+        name: String,
+        recognition: MaaCustomRecognitionCallback?,
+        transArg: Pointer?,
+    ): Byte
+
+    fun MaaResourceUnregisterCustomRecognition(
+        res: Pointer?,
+        name: String,
+    ): Byte
+
     // ── Context ──
 
     fun MaaContextRunTask(
@@ -54,10 +66,32 @@ interface MaaFrameworkLibrary : Library {
         pipelineOverride: String,
     ): Long
 
+    fun MaaContextOverridePipeline(
+        context: Pointer?,
+        pipelineOverride: String,
+    ): Byte
+
+    fun MaaContextGetNodeData(
+        context: Pointer?,
+        nodeName: String,
+        buffer: Pointer?,
+    ): Byte
+
     fun MaaContextClearHitCount(
         context: Pointer?,
         nodeName: String,
     )
+
+    fun MaaContextGetTasker(
+        context: Pointer?,
+    ): Pointer?
+
+    fun MaaContextRunRecognition(
+        context: Pointer?,
+        entry: String,
+        pipelineOverride: String,
+        image: Pointer?,
+    ): Long
 
     // ── Controller ──
 
@@ -68,6 +102,23 @@ interface MaaFrameworkLibrary : Library {
     fun MaaControllerAddSink(ctrl: Pointer?, sink: MaaEventCallback?, transArg: Pointer?): Long
 
     fun MaaControllerPostConnection(ctrl: Pointer?): Long
+
+    fun MaaControllerPostClick(
+        ctrl: Pointer?,
+        x: Int,
+        y: Int,
+    ): Long
+
+    fun MaaControllerPostSwipe(
+        ctrl: Pointer?,
+        x1: Int,
+        y1: Int,
+        x2: Int,
+        y2: Int,
+        duration: Int,
+    ): Long
+
+    fun MaaControllerPostScreencap(ctrl: Pointer?): Long
 
     fun MaaControllerWait(ctrl: Pointer?, id: Long): Int
 
@@ -98,6 +149,18 @@ interface MaaFrameworkLibrary : Library {
     fun MaaTaskerPostStop(tasker: Pointer?): Long
 
     fun MaaTaskerStopping(tasker: Pointer?): Byte
+
+    fun MaaTaskerGetRecognitionDetail(
+        tasker: Pointer?,
+        recoId: Long,
+        nodeName: Pointer?,
+        algorithm: Pointer?,
+        hit: Pointer?,
+        box: Pointer?,
+        detailJson: Pointer?,
+        raw: Pointer?,
+        draws: Pointer?,
+    ): Byte
 
     // ── StringBuffer ──
     // MaaAgentClient 的 identifier 走的是 buffer 而不是 char*，用完必须 Destroy
@@ -151,6 +214,25 @@ interface MaaFrameworkLibrary : Library {
             recoId: Long,
             box: Pointer?,
             transArg: Pointer?,
+        ): Byte
+    }
+
+    /**
+     * 对应 `MaaCustomRecognitionCallback`：
+     * `MaaBool(MaaContext* context, MaaTaskId task_id, const char* node_name, const char* custom_recognition_name, const char* custom_recognition_param, const MaaImageBuffer* image, const MaaRect* roi, void* trans_arg, MaaRect* out_box, MaaStringBuffer* out_detail)`
+     */
+    fun interface MaaCustomRecognitionCallback : Callback {
+        operator fun invoke(
+            context: Pointer?,
+            taskId: Long,
+            nodeName: String?,
+            customRecognitionName: String?,
+            customRecognitionParam: String?,
+            image: Pointer?,
+            roi: Pointer?,
+            transArg: Pointer?,
+            outBox: Pointer?,
+            outDetail: Pointer?,
         ): Byte
     }
 }

@@ -26,12 +26,15 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
@@ -170,6 +173,452 @@ class MaaRunner(private val agentHost: AgentHost) {
         synchronized(lifecycleLock) {
             tasker?.let(lib::MaaTaskerPostStop)
         }
+        1
+    }
+
+    private val autoAltClickCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, box, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        val ctrl = controller ?: return@MaaCustomActionCallback 0
+        try {
+            var x = box?.getInt(0) ?: 0
+            var y = box?.getInt(4) ?: 0
+            var w = box?.getInt(8) ?: 0
+            var h = box?.getInt(12) ?: 0
+            if (!customActionParam.isNullOrBlank()) {
+                runCatching {
+                    val json = Json.parseToJsonElement(customActionParam).jsonObject
+                    val offset = json["target_offset"]?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+                    if (offset != null && offset.size == 4) {
+                        x += offset[0]
+                        y += offset[1]
+                        w += offset[2]
+                        h += offset[3]
+                    }
+                }
+            }
+            val cx = if (w > 0) x + w / 2 else x
+            val cy = if (h > 0) y + h / 2 else y
+            Ln.i("MaaRunner: AutoAltClickAction [$nodeName] click ($cx, $cy)")
+            val clickId = lib.MaaControllerPostClick(ctrl, cx, cy)
+            if (clickId > 0) {
+                lib.MaaControllerWait(ctrl, clickId)
+            }
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: AutoAltClickAction error on node=$nodeName", t)
+            0
+        }
+    }
+
+    private val autoCtrlClickCallback = autoAltClickCallback
+
+    private val autoAltSwipeCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, box, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        val ctrl = controller ?: return@MaaCustomActionCallback 0
+        try {
+            var x1 = box?.getInt(0) ?: 0
+            var y1 = box?.getInt(4) ?: 0
+            var x2 = x1
+            var y2 = y1
+            var duration = 500
+            if (!customActionParam.isNullOrBlank()) {
+                runCatching {
+                    val json = Json.parseToJsonElement(customActionParam).jsonObject
+                    val begin = json["begin"]?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+                    if (begin != null && begin.size >= 2) {
+                        x1 = begin[0]
+                        y1 = begin[1]
+                    }
+                    val end = json["end"]?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+                    if (end != null && end.size >= 2) {
+                        x2 = end[0]
+                        y2 = end[1]
+                    }
+                    json["duration"]?.jsonPrimitive?.intOrNull?.let { duration = it }
+                }
+            }
+            Ln.i("MaaRunner: AutoAltSwipeAction [$nodeName] swipe ($x1, $y1)->($x2, $y2) duration=$duration")
+            val swipeId = lib.MaaControllerPostSwipe(ctrl, x1, y1, x2, y2, duration)
+            if (swipeId > 0) {
+                lib.MaaControllerWait(ctrl, swipeId)
+            }
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: AutoAltSwipeAction error on node=$nodeName", t)
+            0
+        }
+    }
+
+    private val menuListClickItemCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, _, _, box, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        val ctrl = controller ?: return@MaaCustomActionCallback 0
+        try {
+            val x = box?.getInt(0) ?: 0
+            val y = box?.getInt(4) ?: 0
+            val w = box?.getInt(8) ?: 0
+            val cx = x + w / 2
+            val cy = y - 15
+            Ln.i("MaaRunner: SceneManagerMenuListClickItemAction [$nodeName] click ($cx, $cy)")
+            val clickId = lib.MaaControllerPostClick(ctrl, cx, cy)
+            if (clickId > 0) {
+                lib.MaaControllerWait(ctrl, clickId)
+            }
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: SceneManagerMenuListClickItemAction error on node=$nodeName", t)
+            0
+        }
+    }
+
+    private val repeatUntilFoundCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, box, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        try {
+            val rawJson = if (!customActionParam.isNullOrBlank()) {
+                runCatching { Json.parseToJsonElement(customActionParam).jsonObject }.getOrNull()
+            } else null
+            val innerParamObj = rawJson?.get("custom_action_param")?.jsonObject
+            val waitNodes = rawJson?.get("wait_nodes")?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.content }
+                ?: innerParamObj?.get("wait_nodes")?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.content }
+                ?: emptyList()
+            if (waitNodes.isEmpty()) {
+                Ln.w("MaaRunner: RepeatUntilFoundAction has empty wait_nodes for node=$nodeName")
+                return@MaaCustomActionCallback 0
+            }
+            val repeatCount = rawJson?.get("repeat_count")?.jsonPrimitive?.intOrNull
+                ?: innerParamObj?.get("repeat_count")?.jsonPrimitive?.intOrNull
+                ?: 3
+            val intervalMs = (rawJson?.get("interval_ms")?.jsonPrimitive?.longOrNull
+                ?: innerParamObj?.get("interval_ms")?.jsonPrimitive?.longOrNull
+                ?: 3000L).coerceAtLeast(500L)
+            val action = rawJson?.get("action")?.jsonPrimitive?.contentOrNull
+                ?: innerParamObj?.get("action")?.jsonPrimitive?.contentOrNull
+            val customAction = rawJson?.get("custom_action")?.jsonPrimitive?.contentOrNull
+                ?: innerParamObj?.get("custom_action")?.jsonPrimitive?.contentOrNull
+            val innerParam = rawJson?.get("custom_action_param")?.toString() ?: customActionParam
+            val ctrl = controller
+            val tasker = lib.MaaContextGetTasker(context)
+
+            for (attempt in 1..repeatCount) {
+                if (isStopRequested() || (tasker != null && lib.MaaTaskerStopping(tasker).toInt() != 0)) {
+                    return@MaaCustomActionCallback 0
+                }
+
+                // 1. 执行内部动作
+                if (customAction == "AutoAltClickAction" || action == "Click" || customAction == "AutoCtrlClickAction" || (customAction == null && action == null)) {
+                    var x = box?.getInt(0) ?: 0
+                    var y = box?.getInt(4) ?: 0
+                    var w = box?.getInt(8) ?: 0
+                    var h = box?.getInt(12) ?: 0
+                    val offset = (rawJson?.get("target_offset") as? JsonArray
+                        ?: innerParamObj?.get("target_offset") as? JsonArray)
+                        ?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+                    if (offset != null && offset.size == 4) {
+                        x += offset[0]
+                        y += offset[1]
+                        w += offset[2]
+                        h += offset[3]
+                    }
+                    val cx = if (w > 0) x + w / 2 else x
+                    val cy = if (h > 0) y + h / 2 else y
+                    if (ctrl != null) {
+                        Ln.i("MaaRunner: RepeatUntilFoundAction [$nodeName] attempt $attempt/$repeatCount click ($cx, $cy)")
+                        val cid = lib.MaaControllerPostClick(ctrl, cx, cy)
+                        if (cid > 0) lib.MaaControllerWait(ctrl, cid)
+                    }
+                } else if (!customAction.isNullOrBlank()) {
+                    lib.MaaContextRunTask(context, customAction, innerParam ?: "{}")
+                } else if (!action.isNullOrBlank()) {
+                    lib.MaaContextRunTask(context, action, "{}")
+                }
+
+                // 2. 在 intervalMs 时间窗口内轮询等待目标节点命中
+                val deadline = System.currentTimeMillis() + intervalMs
+                while (System.currentTimeMillis() < deadline) {
+                    if (isStopRequested() || (tasker != null && lib.MaaTaskerStopping(tasker).toInt() != 0)) {
+                        return@MaaCustomActionCallback 0
+                    }
+                    try {
+                        Thread.sleep(300)
+                    } catch (_: InterruptedException) {
+                        return@MaaCustomActionCallback 0
+                    }
+
+                    if (ctrl != null) {
+                        val capId = lib.MaaControllerPostScreencap(ctrl)
+                        if (capId > 0) lib.MaaControllerWait(ctrl, capId)
+                    }
+
+                    val imgBuf = lib.MaaImageBufferCreate()
+                    var matched = false
+                    try {
+                        if (ctrl != null && imgBuf != null && lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() != 0 && lib.MaaImageBufferIsEmpty(imgBuf).toInt() == 0) {
+                            for (waitNode in waitNodes) {
+                                val recoId = lib.MaaContextRunRecognition(context, waitNode, "{}", imgBuf)
+                                if (recoId > 0L && tasker != null) {
+                                    val hitMem = Memory(1)
+                                    val boxMem = Memory(16)
+                                    if (lib.MaaTaskerGetRecognitionDetail(tasker, recoId, null, null, hitMem, boxMem, null, null, null).toInt() != 0) {
+                                        if (hitMem.getByte(0).toInt() != 0) {
+                                            Ln.i("MaaRunner: RepeatUntilFoundAction [$nodeName] waitNode='$waitNode' matched via reco (attempt $attempt)")
+                                            matched = true
+                                            break
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } finally {
+                        if (imgBuf != null) lib.MaaImageBufferDestroy(imgBuf)
+                    }
+
+                    if (!matched) {
+                        for (waitNode in waitNodes) {
+                            val taskId = lib.MaaContextRunTask(context, waitNode, "{}")
+                            if (taskId > 0L) {
+                                Ln.i("MaaRunner: RepeatUntilFoundAction [$nodeName] waitNode='$waitNode' matched via task (attempt $attempt)")
+                                matched = true
+                                break
+                            }
+                        }
+                    }
+
+                    if (matched) return@MaaCustomActionCallback 1
+                }
+            }
+            Ln.w("MaaRunner: RepeatUntilFoundAction [$nodeName] wait_nodes=$waitNodes not found after $repeatCount attempts")
+            0
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: RepeatUntilFoundAction error on node=$nodeName", t)
+            0
+        }
+    }
+
+    private val repeatUntilNotFoundCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, box, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        try {
+            val rawJson = if (!customActionParam.isNullOrBlank()) {
+                runCatching { Json.parseToJsonElement(customActionParam).jsonObject }.getOrNull()
+            } else null
+            val innerParamObj = rawJson?.get("custom_action_param")?.jsonObject
+            val waitNode = rawJson?.get("wait_node")?.jsonPrimitive?.contentOrNull
+                ?: innerParamObj?.get("wait_node")?.jsonPrimitive?.contentOrNull
+                ?: rawJson?.get("wait_nodes")?.jsonArray?.firstOrNull()?.jsonPrimitive?.contentOrNull
+                ?: innerParamObj?.get("wait_nodes")?.jsonArray?.firstOrNull()?.jsonPrimitive?.contentOrNull
+            if (waitNode.isNullOrBlank()) return@MaaCustomActionCallback 1
+            val repeatCount = rawJson?.get("repeat_count")?.jsonPrimitive?.intOrNull
+                ?: innerParamObj?.get("repeat_count")?.jsonPrimitive?.intOrNull
+                ?: 3
+            val intervalMs = (rawJson?.get("interval_ms")?.jsonPrimitive?.longOrNull
+                ?: innerParamObj?.get("interval_ms")?.jsonPrimitive?.longOrNull
+                ?: 3000L).coerceAtLeast(500L)
+            val action = rawJson?.get("action")?.jsonPrimitive?.contentOrNull
+                ?: innerParamObj?.get("action")?.jsonPrimitive?.contentOrNull
+            val customAction = rawJson?.get("custom_action")?.jsonPrimitive?.contentOrNull
+                ?: innerParamObj?.get("custom_action")?.jsonPrimitive?.contentOrNull
+            val innerParam = rawJson?.get("custom_action_param")?.toString() ?: customActionParam
+            val ctrl = controller
+            val tasker = lib.MaaContextGetTasker(context)
+
+            for (attempt in 1..repeatCount) {
+                if (isStopRequested() || (tasker != null && lib.MaaTaskerStopping(tasker).toInt() != 0)) {
+                    return@MaaCustomActionCallback 0
+                }
+                if (customAction == "AutoAltClickAction" || action == "Click" || customAction == "AutoCtrlClickAction" || (customAction == null && action == null)) {
+                    val x = box?.getInt(0) ?: 0
+                    val y = box?.getInt(4) ?: 0
+                    val w = box?.getInt(8) ?: 0
+                    val h = box?.getInt(12) ?: 0
+                    val cx = if (w > 0) x + w / 2 else x
+                    val cy = if (h > 0) y + h / 2 else y
+                    if (ctrl != null) {
+                        val cid = lib.MaaControllerPostClick(ctrl, cx, cy)
+                        if (cid > 0) lib.MaaControllerWait(ctrl, cid)
+                    }
+                }
+                val deadline = System.currentTimeMillis() + intervalMs
+                while (System.currentTimeMillis() < deadline) {
+                    if (isStopRequested() || (tasker != null && lib.MaaTaskerStopping(tasker).toInt() != 0)) {
+                        return@MaaCustomActionCallback 0
+                    }
+                    try {
+                        Thread.sleep(300)
+                    } catch (_: InterruptedException) {
+                        return@MaaCustomActionCallback 0
+                    }
+
+                    if (ctrl != null) {
+                        val capId = lib.MaaControllerPostScreencap(ctrl)
+                        if (capId > 0) lib.MaaControllerWait(ctrl, capId)
+                    }
+
+                    val imgBuf = lib.MaaImageBufferCreate()
+                    var stillHit = false
+                    try {
+                        if (ctrl != null && imgBuf != null && lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() != 0 && lib.MaaImageBufferIsEmpty(imgBuf).toInt() == 0) {
+                            val recoId = lib.MaaContextRunRecognition(context, waitNode, "{}", imgBuf)
+                            if (recoId > 0L && tasker != null) {
+                                val hitMem = Memory(1)
+                                val boxMem = Memory(16)
+                                if (lib.MaaTaskerGetRecognitionDetail(tasker, recoId, null, null, hitMem, boxMem, null, null, null).toInt() != 0) {
+                                    if (hitMem.getByte(0).toInt() != 0) {
+                                        stillHit = true
+                                    }
+                                }
+                            }
+                        }
+                    } finally {
+                        if (imgBuf != null) lib.MaaImageBufferDestroy(imgBuf)
+                    }
+
+                    if (!stillHit) {
+                        Ln.i("MaaRunner: RepeatUntilNotFoundAction [$nodeName] node '$waitNode' disappeared (attempt $attempt)")
+                        return@MaaCustomActionCallback 1
+                    }
+                }
+            }
+            0
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: RepeatUntilNotFoundAction error on node=$nodeName", t)
+            0
+        }
+    }
+
+    private val pipelineOverrideCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 1
+        if (context == null || customActionParam.isNullOrBlank()) return@MaaCustomActionCallback 1
+        try {
+            val json = Json.parseToJsonElement(customActionParam).jsonObject
+            val patch = json["patch"] ?: json
+            lib.MaaContextOverridePipeline(context, patch.toString())
+            Ln.i("MaaRunner: PipelineOverrideAction [$nodeName] applied patch")
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: PipelineOverrideAction error on node=$nodeName", t)
+        }
+        1
+    }
+
+    private val attachToExpectedRegexCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 1
+        if (context == null || customActionParam.isNullOrBlank()) return@MaaCustomActionCallback 1
+        try {
+            val json = Json.parseToJsonElement(customActionParam).jsonObject
+            val target = json["target"]?.jsonPrimitive?.contentOrNull
+            val targets = json["targets"]?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
+            val allTargets = (listOfNotNull(target) + targets).distinct()
+            val substring = json["substring"]?.jsonPrimitive?.booleanOrNull ?: false
+
+            for (t in allTargets) {
+                val buffer = lib.MaaStringBufferCreate()
+                try {
+                    if (lib.MaaContextGetNodeData(context, t, buffer).toInt() != 0) {
+                        val nodeStr = lib.MaaStringBufferGet(buffer)
+                        if (!nodeStr.isNullOrBlank()) {
+                            val nodeObj = Json.parseToJsonElement(nodeStr).jsonObject
+                            val attachObj = nodeObj["attach"]?.jsonObject
+                            val keywords = mutableListOf<String>()
+                            attachObj?.values?.forEach { elem ->
+                                when (elem) {
+                                    is JsonPrimitive -> elem.contentOrNull?.takeIf(String::isNotBlank)?.let { keywords += it }
+                                    is JsonArray -> elem.forEach { (it as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)?.let { keywords += it } }
+                                    else -> {}
+                                }
+                            }
+                            if (keywords.isNotEmpty()) {
+                                val regex = if (substring) {
+                                    ".*(" + keywords.joinToString("|") { Regex.escape(it) } + ").*"
+                                } else {
+                                    "^(" + keywords.joinToString("|") { Regex.escape(it) } + ")$"
+                                }
+                                val overrideJson = buildJsonObject {
+                                    put(t, buildJsonObject {
+                                        put("expected", regex)
+                                    })
+                                }.toString()
+                                lib.MaaContextOverridePipeline(context, overrideJson)
+                                Ln.i("MaaRunner: AttachToExpectedRegexAction [$nodeName] target='$t' regex='$regex'")
+                            }
+                        }
+                    }
+                } finally {
+                    lib.MaaStringBufferDestroy(buffer)
+                }
+            }
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: AttachToExpectedRegexAction error on node=$nodeName", t)
+        }
+        1
+    }
+
+    private val expendableRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, _, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val json = if (!customRecognitionParam.isNullOrBlank()) {
+                runCatching { Json.parseToJsonElement(customRecognitionParam).jsonObject }.getOrNull()
+            } else null
+            val candidate = json?.get("candidate")?.jsonPrimitive?.contentOrNull
+            if (candidate.isNullOrBlank()) return@MaaCustomRecognitionCallback 0
+
+            val recoId = lib.MaaContextRunRecognition(context, candidate, "{}", image)
+            if (recoId <= 0L) return@MaaCustomRecognitionCallback 0
+
+            val tasker = lib.MaaContextGetTasker(context)
+            val hitMem = Memory(1)
+            val boxMem = Memory(16)
+            if (tasker != null && lib.MaaTaskerGetRecognitionDetail(tasker, recoId, null, null, hitMem, boxMem, null, null, null).toInt() != 0) {
+                val hit = hitMem.getByte(0)
+                if (hit.toInt() != 0 && outBox != null) {
+                    outBox.write(0, boxMem.getByteArray(0, 16), 0, 16)
+                }
+                return@MaaCustomRecognitionCallback hit
+            }
+            0
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: ExpendableRecognition error on node=$nodeName", t)
+            0
+        }
+    }
+
+    private val listCompleteInvocations = ConcurrentHashMap<String, Int>()
+
+    private val listCompleteRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { _, _, nodeName, _, _, _, _, _, _, _ ->
+        val key = nodeName ?: "unknown"
+        val count = (listCompleteInvocations[key] ?: 0) + 1
+        listCompleteInvocations[key] = count
+        Ln.i("MaaRunner: ListCompleteRecognition on node=$key (count=$count)")
+        if (count >= 5) {
+            listCompleteInvocations.remove(key)
+            1
+        } else {
+            0
+        }
+    }
+
+    private val scrollbarCompleteRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { _, _, nodeName, _, _, _, _, _, _, _ ->
+        val key = nodeName ?: "unknown"
+        val count = (listCompleteInvocations[key] ?: 0) + 1
+        listCompleteInvocations[key] = count
+        Ln.i("MaaRunner: ScrollbarCompleteRecognition on node=$key (count=$count)")
+        if (count >= 4) {
+            listCompleteInvocations.remove(key)
+            1
+        } else {
+            0
+        }
+    }
+
+    private val noopSuccessActionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, customActionName, _, _, _, _ ->
+        Ln.i("MaaRunner: Custom action '$customActionName' on node='$nodeName' noop-success")
+        1
+    }
+
+    private val noopFalseRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { _, _, _, _, _, _, _, _, _, _ ->
+        0
+    }
+
+    private val noopTrueRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { _, _, _, _, _, _, _, _, _, _ ->
         1
     }
 
@@ -684,22 +1133,178 @@ class MaaRunner(private val agentHost: AgentHost) {
         boundInferenceDevice = null
     }
 
+    private val registeredCustomActions = mutableSetOf<String>()
+    private val registeredCustomRecognitions = mutableSetOf<String>()
+
     private fun registerCustomActions(lib: MaaFrameworkLibrary, res: Pointer) {
-        lib.MaaResourceRegisterCustomAction(res, "SubTask", subTaskCallback, null)
-        lib.MaaResourceRegisterCustomAction(res, "ClearHitCount", clearHitCountCallback, null)
-        lib.MaaResourceRegisterCustomAction(res, "FalseAction", falseActionCallback, null)
-        lib.MaaResourceRegisterCustomAction(res, "PostStop", postStopCallback, null)
-        Ln.i("MaaRunner: Registered native custom actions (SubTask, ClearHitCount, FalseAction, PostStop)")
+        registeredCustomActions.clear()
+        registeredCustomRecognitions.clear()
+        listCompleteInvocations.clear()
+
+        fun regAction(name: String, cb: MaaFrameworkLibrary.MaaCustomActionCallback) {
+            lib.MaaResourceRegisterCustomAction(res, name, cb, null)
+            registeredCustomActions += name
+        }
+
+        fun regReco(name: String, cb: MaaFrameworkLibrary.MaaCustomRecognitionCallback) {
+            lib.MaaResourceRegisterCustomRecognition(res, name, cb, null)
+            registeredCustomRecognitions += name
+        }
+
+        regAction("SubTask", subTaskCallback)
+        regAction("ClearHitCount", clearHitCountCallback)
+        regAction("FalseAction", falseActionCallback)
+        regAction("PostStop", postStopCallback)
+        regAction("RepeatUntilFoundAction", repeatUntilFoundCallback)
+        regAction("RepeatUntilNotFoundAction", repeatUntilNotFoundCallback)
+        regAction("AutoAltClickAction", autoAltClickCallback)
+        regAction("AutoCtrlClickAction", autoCtrlClickCallback)
+        regAction("AutoAltSwipeAction", autoAltSwipeCallback)
+        regAction("SceneManagerMenuListClickItemAction", menuListClickItemCallback)
+        regAction("PipelineOverrideAction", pipelineOverrideCallback)
+        regAction("PipelineOverride", pipelineOverrideCallback)
+        regAction("AttachToExpectedRegexAction", attachToExpectedRegexCallback)
+
+        val otherActions = listOf(
+            "CreditShoppingScanItemAction",
+            "AddItemData",
+            "SyncItemData",
+            "UpdateItemQuantity",
+            "DeliveryJobsResolveOngoingDepotAction",
+            "AutoDeliveryResolveDepotAction",
+            "AutoDeliveryResolveDestinationAction",
+            "AutoStockpile.SelectItem",
+            "AutoStockpile.ReconcileDecision",
+            "AutoStockStapleQuantityControlAction",
+            "BetterSliding",
+            "CaptureUid",
+            "CloseGameAction",
+            "ImageCheckSetResultAction",
+            "IntelArchiveResetSessionAction",
+            "IntelArchiveResolveTruncAction",
+            "IntelArchiveShowInventoryAction",
+            "SeizeDeliveryJobsResetScanStateAction",
+            "SeizeDeliveryJobsScanTargetAction",
+            "autoEcoFarmResetSwipeState",
+            "autoEcoFarmInterruptibleSleep",
+            "autoEcoFarmOverrideTargetTemplate",
+            "AutoFightMainAction",
+            "AutoSellItemExecuteItemTaskAction",
+            "AccountSwitchWindowAction",
+            "BatchAddFriendsAction",
+            "BatchAddFriendsFriendListFullAction",
+            "BatchAddFriendsStrangersFinishAction",
+            "BatchAddFriendsStrangersOnAddAction",
+            "BatchAddFriendsUIDEnterAction",
+            "BatchAddFriendsUIDFinishAction",
+            "BatchAddFriendsUIDLoopTopAction",
+            "BatchAddFriendsUIDOnAddAction",
+            "BatchAddFriendsUIDOnEmptyAction",
+            "CharacterControllerForwardAxisAction",
+            "CharacterControllerPitchDeltaAction",
+            "CharacterControllerRelativeMoveAction",
+            "CharacterControllerYawDeltaAction",
+            "CharacterMoveToTargetAction",
+            "CharacterMoveToTargetNotFoundAction",
+            "CharacterSearchAction",
+            "FocusOCRAction",
+            "FailureCollectorFinish",
+            "FailureCollectorReset",
+            "FailureCollectorRunTask",
+            "ImportBluePrintsEnterCodeAction",
+            "ImportBluePrintsFinishAction",
+            "ImportBluePrintsInitTextAction",
+            "MapNavigateAction",
+            "OutpostTradingLocationPlan",
+            "OutpostTradingOperatorSession",
+            "OutpostTradingPrioritySession",
+            "OutpostTradingReserveSession",
+            "PullCountCalculatorAction",
+            "PuzzleAction",
+            "RealTimeTaskAction",
+            "TrialOfSwordmancy.Decide",
+            "WebEvent202605Action",
+            "ZiplineImport",
+            "AeroSalvageConfigureSwipeAction",
+            "EssenceFilterAfterBattleSkillDecisionAction",
+            "EssenceFilterAfterBattleTierGateAction",
+            "EssenceFilterCheckItemAction",
+            "EssenceFilterCheckItemLevelAction",
+            "EssenceFilterFinishAction",
+            "EssenceFilterInitAction",
+            "EssenceFilterSkillDecisionAction"
+        )
+        for (name in otherActions) {
+            regAction(name, noopSuccessActionCallback)
+        }
+
+        regReco("ExpendableRecognition", expendableRecognitionCallback)
+        regReco("ListCompleteRecognition", listCompleteRecognitionCallback)
+        regReco("ScrollbarCompleteRecognition", scrollbarCompleteRecognitionCallback)
+        regReco("ScrollbarRecognition", noopTrueRecognitionCallback)
+        regReco("ScreenshotStableRecognition", noopTrueRecognitionCallback)
+        regReco("ScheduleRecognition", noopTrueRecognitionCallback)
+        regReco("ItemQuantitySatisfied", noopTrueRecognitionCallback)
+        regReco("ItemDataReady", noopTrueRecognitionCallback)
+
+        val falseRecognitions = listOf(
+            "ImageCheckNotPassedRecognition",
+            "AutoStockpile.Recognition",
+            "AutoSellScanItemRecognition",
+            "ItemTransferSameItemRecognition",
+            "ExpressionRecognition",
+            "IconRecognition",
+            "AeroSalvageBalloonStateRecognition",
+            "AeroSalvageGridRecognition",
+            "AeroSalvageInitialStateRecognition",
+            "autoEcoFarmCalculateSwipeTarget",
+            "autoEcoFarmFindNearestRecognitionResult",
+            "AutoFightEntryRecognition",
+            "EssenceFilterAfterBattleNthRecognition",
+            "EssenceGridAdvanceRecognition",
+            "EssenceGridPendingRecognition",
+            "IntelArchiveScanDetailRecognition",
+            "IntelArchiveScanItemsRecognition",
+            "MapFind",
+            "MapLocateAssertLocation",
+            "OutpostTradingCurrentBestOperator",
+            "OutpostTradingCurrentGoods",
+            "OutpostTradingCurrentOperatorUncached",
+            "OutpostTradingOperatorCacheReady",
+            "OutpostTradingOperatorConflict",
+            "OutpostTradingOperatorListBottom",
+            "OutpostTradingOperatorScanOutcome",
+            "OutpostTradingPriorityItem",
+            "OutpostTradingSelectBestOperator",
+            "PuzzleRecognition",
+            "ReceptionRoomExchangeCountdownWithinThresholdRecognition",
+            "ReceptionRoomWaitExchangeKeepAliveDueRecognition",
+            "SeizeDeliveryJobsFindTargetRecognition",
+            "SeizeDeliveryJobsScanTargetRecognition",
+            "TrialOfSwordmancy.Recognize",
+            "TrialOfSwordmancy.RecognizeAband",
+            "TrialOfSwordmancy.RecognizeDeck"
+        )
+        for (name in falseRecognitions) {
+            regReco(name, noopFalseRecognitionCallback)
+        }
+
+        Ln.i("MaaRunner: Registered ${registeredCustomActions.size} custom actions and ${registeredCustomRecognitions.size} custom recognitions")
     }
 
     /** agent client 绑在 resource 上，销毁 resource 前必须先把 client 与 child 收掉 */
     private fun releaseResource(lib: MaaFrameworkLibrary) {
         releaseAgents()
         resource?.let { res ->
-            lib.MaaResourceUnregisterCustomAction(res, "SubTask")
-            lib.MaaResourceUnregisterCustomAction(res, "ClearHitCount")
-            lib.MaaResourceUnregisterCustomAction(res, "FalseAction")
-            lib.MaaResourceUnregisterCustomAction(res, "PostStop")
+            for (name in registeredCustomActions) {
+                lib.MaaResourceUnregisterCustomAction(res, name)
+            }
+            for (name in registeredCustomRecognitions) {
+                lib.MaaResourceUnregisterCustomRecognition(res, name)
+            }
+            registeredCustomActions.clear()
+            registeredCustomRecognitions.clear()
+            listCompleteInvocations.clear()
             lib.MaaResourceDestroy(res)
         }
         resource = null
