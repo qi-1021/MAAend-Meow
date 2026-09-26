@@ -34,6 +34,31 @@ interface MaaFrameworkLibrary : Library {
 
     fun MaaResourceClear(res: Pointer?): Byte
 
+    fun MaaResourceRegisterCustomAction(
+        res: Pointer?,
+        name: String,
+        action: MaaCustomActionCallback?,
+        transArg: Pointer?,
+    ): Byte
+
+    fun MaaResourceUnregisterCustomAction(
+        res: Pointer?,
+        name: String,
+    ): Byte
+
+    // ── Context ──
+
+    fun MaaContextRunTask(
+        context: Pointer?,
+        entry: String,
+        pipelineOverride: String,
+    ): Long
+
+    fun MaaContextClearHitCount(
+        context: Pointer?,
+        nodeName: String,
+    )
+
     // ── Controller ──
 
     fun MaaAndroidNativeControllerCreate(configJson: String): Pointer?
@@ -110,6 +135,23 @@ interface MaaFrameworkLibrary : Library {
      */
     fun interface MaaEventCallback : Callback {
         operator fun invoke(handle: Pointer?, message: String?, details: String?, transArg: Pointer?)
+    }
+
+    /**
+     * 对应 `MaaCustomActionCallback`：
+     * `MaaBool(MaaContext* context, MaaTaskId task_id, const char* node_name, const char* custom_action_name, const char* custom_action_param, MaaRecoId reco_id, const MaaRect* box, void* trans_arg)`
+     */
+    fun interface MaaCustomActionCallback : Callback {
+        operator fun invoke(
+            context: Pointer?,
+            taskId: Long,
+            nodeName: String?,
+            customActionName: String?,
+            customActionParam: String?,
+            recoId: Long,
+            box: Pointer?,
+            transArg: Pointer?,
+        ): Byte
     }
 }
 

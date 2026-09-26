@@ -66,6 +66,7 @@ data class ControllerDefinition(
     val displayShortSide: Int? = null,
     val displayLongSide: Int? = null,
     val displayRaw: Boolean = false,
+    val attachResourcePaths: List<String> = emptyList(),
     /**
      * PI 里这一条的原样对象，供 `PI_CONTROLLER` 整条透传（见 PiAgentEnv）
      * 投影只留外壳用得上的字段，而协议要求交给 agent 的是完整条目；空对象表示该条不是 PI 声明的

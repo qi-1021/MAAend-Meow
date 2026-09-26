@@ -21,8 +21,15 @@ import com.aliothmoon.maafw.runner.runPlanWireJson
 import com.aliothmoon.maafw.third.Ln
 import com.sun.jna.Memory
 import com.sun.jna.Pointer
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.io.File
 import java.util.concurrent.Executors
@@ -87,6 +94,83 @@ class MaaRunner(private val agentHost: AgentHost) {
             // 回调穿回 native 会直接崩进程
             Ln.w("MaaRunner: event dispatch failed: ${it.message}")
         }
+    }
+
+    private val subTaskCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null || customActionParam.isNullOrBlank()) {
+            Ln.w("MaaRunner: SubTask received empty context or param for node=$nodeName")
+            return@MaaCustomActionCallback 0
+        }
+        try {
+            val json = Json.parseToJsonElement(customActionParam).jsonObject
+            val subTasks = json["sub"]?.jsonArray?.mapNotNull {
+                (it as? JsonPrimitive)?.content?.takeIf(String::isNotBlank)
+            } ?: emptyList()
+            if (subTasks.isEmpty()) {
+                Ln.w("MaaRunner: SubTask has empty sub task list: $customActionParam")
+                return@MaaCustomActionCallback 0
+            }
+            val continueOnFailure = json["continue"]?.jsonPrimitive?.booleanOrNull ?: false
+            val strict = json["strict"]?.jsonPrimitive?.booleanOrNull ?: true
+            val randomChoice = json["random_choice"]?.jsonPrimitive?.intOrNull
+
+            val targetTasks = if (randomChoice != null && randomChoice > 0 && subTasks.size > randomChoice) {
+                subTasks.shuffled().take(randomChoice)
+            } else {
+                subTasks
+            }
+
+            var hasSubFailure = false
+            for (sub in targetTasks) {
+                if (isStopRequested()) {
+                    Ln.i("MaaRunner: SubTask interrupted by stop request")
+                    return@MaaCustomActionCallback 0
+                }
+                Ln.i("MaaRunner: SubTask [$nodeName] -> executing subtask '$sub'")
+                val subId = lib.MaaContextRunTask(context, sub, "{}")
+                if (subId <= 0L) {
+                    Ln.w("MaaRunner: SubTask subtask '$sub' failed (id=$subId)")
+                    hasSubFailure = true
+                    if (!continueOnFailure) {
+                        break
+                    }
+                } else {
+                    Ln.i("MaaRunner: SubTask subtask '$sub' succeeded (id=$subId)")
+                }
+            }
+            if (hasSubFailure && strict) 0 else 1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: SubTask execution error on node=$nodeName", t)
+            0
+        }
+    }
+
+    private val clearHitCountCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, _, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 1
+        if (context == null || customActionParam.isNullOrBlank()) return@MaaCustomActionCallback 1
+        try {
+            val json = Json.parseToJsonElement(customActionParam).jsonObject
+            val nodes = json["nodes"]?.jsonArray?.mapNotNull { (it as? JsonPrimitive)?.content }
+            nodes?.forEach { node ->
+                lib.MaaContextClearHitCount(context, node)
+            }
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: ClearHitCount error", t)
+        }
+        1
+    }
+
+    private val falseActionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, _, _, _, _, _, _ ->
+        0
+    }
+
+    private val postStopCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, _, _, _, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 1
+        synchronized(lifecycleLock) {
+            tasker?.let(lib::MaaTaskerPostStop)
+        }
+        1
     }
 
     fun setCallback(callback: IMaaRunnerCallback?) {
@@ -351,6 +435,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             releaseResource(lib)
             val res = lib.MaaResourceCreate() ?: return "MaaResourceCreate 失败"
             lib.MaaResourceAddSink(res, eventSink, null)
+            registerCustomActions(lib, res)
             payload.resourcePaths.forEach { path ->
                 val id = lib.MaaResourcePostBundle(res, path)
                 if (id == INVALID_ID || lib.MaaResourceWait(res, id) != MaaStatus.SUCCEEDED) {
@@ -599,10 +684,24 @@ class MaaRunner(private val agentHost: AgentHost) {
         boundInferenceDevice = null
     }
 
+    private fun registerCustomActions(lib: MaaFrameworkLibrary, res: Pointer) {
+        lib.MaaResourceRegisterCustomAction(res, "SubTask", subTaskCallback, null)
+        lib.MaaResourceRegisterCustomAction(res, "ClearHitCount", clearHitCountCallback, null)
+        lib.MaaResourceRegisterCustomAction(res, "FalseAction", falseActionCallback, null)
+        lib.MaaResourceRegisterCustomAction(res, "PostStop", postStopCallback, null)
+        Ln.i("MaaRunner: Registered native custom actions (SubTask, ClearHitCount, FalseAction, PostStop)")
+    }
+
     /** agent client 绑在 resource 上，销毁 resource 前必须先把 client 与 child 收掉 */
     private fun releaseResource(lib: MaaFrameworkLibrary) {
         releaseAgents()
-        resource?.let(lib::MaaResourceDestroy)
+        resource?.let { res ->
+            lib.MaaResourceUnregisterCustomAction(res, "SubTask")
+            lib.MaaResourceUnregisterCustomAction(res, "ClearHitCount")
+            lib.MaaResourceUnregisterCustomAction(res, "FalseAction")
+            lib.MaaResourceUnregisterCustomAction(res, "PostStop")
+            lib.MaaResourceDestroy(res)
+        }
         resource = null
         loadedResourcePaths = emptyList()
     }

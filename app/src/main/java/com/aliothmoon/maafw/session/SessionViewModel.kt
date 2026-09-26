@@ -6,6 +6,7 @@ import com.aliothmoon.maafw.config.ConfigurationResolver
 import com.aliothmoon.maafw.config.UserConfigurationStore
 import com.aliothmoon.maafw.R
 import com.aliothmoon.maafw.domain.ConfiguredTask
+import com.aliothmoon.maafw.domain.OptionValue
 import com.aliothmoon.maafw.domain.DiagnosticSeverity
 import com.aliothmoon.maafw.domain.duplicateTask
 import com.aliothmoon.maafw.domain.renameTask
@@ -215,10 +216,37 @@ class SessionViewModel(
         viewModelScope.launch {
             combine(projectRepository.state, configurationStore.data) { p, c -> p to c }
                 .collect { (project, config) ->
-                    if (project is ProjectState.Ready && !config.initialized) {
-                        configurationStore.update { current ->
-                            if (current.initialized) current
-                            else ConfigurationResolver.initialize(project.definition, current)
+                    if (project is ProjectState.Ready) {
+                        if (!config.initialized) {
+                            configurationStore.update { current ->
+                                if (current.initialized) current
+                                else ConfigurationResolver.initialize(project.definition, current).copy(openGameMigrated = true)
+                            }
+                        } else if (!config.openGameMigrated) {
+                            val hasOpenGameInDef = project.definition.tasks.any { it.name == "AndroidOpenGame" }
+                            configurationStore.update { current ->
+                                if (current.openGameMigrated) return@update current
+                                val updated = if (hasOpenGameInDef) {
+                                    current.configurations.map { cfg ->
+                                        if (cfg.tasks.none { it.taskName.contains("OpenGame", ignoreCase = true) }) {
+                                            cfg.copy(
+                                                tasks = listOf(
+                                                    ConfiguredTask(
+                                                        taskName = "AndroidOpenGame",
+                                                        enabled = true,
+                                                        optionValues = mapOf("ClientVersion" to OptionValue.SingleCase("CN")),
+                                                    ),
+                                                ) + cfg.tasks,
+                                            )
+                                        } else {
+                                            cfg
+                                        }
+                                    }
+                                } else {
+                                    current.configurations
+                                }
+                                current.copy(configurations = updated, openGameMigrated = true)
+                            }
                         }
                     }
                 }

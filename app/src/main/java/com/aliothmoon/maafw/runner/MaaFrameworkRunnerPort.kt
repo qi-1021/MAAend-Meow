@@ -323,8 +323,12 @@ class MaaFrameworkRunnerPort(
 
         bindRunnerCallback(service)
 
+        val baseResourcePaths = plan.resource.paths.map { File(piRoot, it).absolutePath }
+        val attachResourcePaths = plan.controller.attachResourcePaths.map { File(piRoot, it).absolutePath }
+        val effectiveResourcePaths = (baseResourcePaths + attachResourcePaths).distinct().filter { File(it).exists() }
+
         val payload = RunPlanPayload(
-            resourcePaths = plan.resource.paths.map { File(piRoot, it).absolutePath },
+            resourcePaths = effectiveResourcePaths.ifEmpty { baseResourcePaths },
             screenWidth = width,
             screenHeight = height,
             displayMode = mode.displayMode,

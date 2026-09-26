@@ -117,12 +117,31 @@ object ConfigurationResolver {
     ): RunConfiguration? {
         val template = definition.templates.firstOrNull { it.name == templateName } ?: return null
         val included = taskNames?.toSet()
+        val baseTasks = template.distinctTasks
+            .filter { included == null || it.taskName in included }
+            .map { ConfiguredTask(it.taskName, it.enabled, it.optionValues) }
+
+        val hasExplicitOpenGame = baseTasks.any { it.taskName.contains("OpenGame", ignoreCase = true) }
+        val shouldPrependOpenGame = !hasExplicitOpenGame &&
+            (taskNames == null || "AndroidOpenGame" in taskNames) &&
+            definition.tasks.any { it.name == "AndroidOpenGame" }
+
+        val tasks = if (shouldPrependOpenGame) {
+            listOf(
+                ConfiguredTask(
+                    taskName = "AndroidOpenGame",
+                    enabled = true,
+                    optionValues = mapOf("ClientVersion" to OptionValue.SingleCase("CN")),
+                ),
+            ) + baseTasks
+        } else {
+            baseTasks
+        }
+
         return RunConfiguration(
             id = newConfigurationId(),
             name = configurationName?.takeIf { it.isNotBlank() } ?: template.label,
-            tasks = template.distinctTasks
-                .filter { included == null || it.taskName in included }
-                .map { ConfiguredTask(it.taskName, it.enabled, it.optionValues) },
+            tasks = tasks,
         )
     }
 

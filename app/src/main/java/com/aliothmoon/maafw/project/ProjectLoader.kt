@@ -185,6 +185,7 @@ class ProjectLoader(
             displayShortSide = adb.displayShortSide,
             displayLongSide = adb.displayLongSide,
             displayRaw = adb.displayRaw,
+            attachResourcePaths = adb.attachResourcePaths,
             raw = adb.raw,
         )
     }

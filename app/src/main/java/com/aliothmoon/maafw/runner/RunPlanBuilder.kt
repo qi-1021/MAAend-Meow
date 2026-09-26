@@ -121,38 +121,6 @@ object RunPlanBuilder {
             )
         }
 
-        // 终末地自启动兜底：若任务计划中未显式包含启动游戏任务，自动在首位注入启动任务
-        val hasStartGame = runtimeTasks.any {
-            it.taskName.contains("OpenGame", ignoreCase = true) || it.entry.contains("OpenGame", ignoreCase = true)
-        }
-        if (!hasStartGame && runtimeTasks.isNotEmpty()) {
-            val openGameTask = definition.tasks.firstOrNull { it.name.contains("OpenGame", ignoreCase = true) }
-            if (openGameTask != null) {
-                val patches = mutableListOf<JsonObject>()
-                if (openGameTask.pipelineOverride.isNotEmpty()) patches += openGameTask.pipelineOverride
-                patches += globalPatches
-                patches += resourcePatches
-                compileOptions(
-                    definition = definition,
-                    optionNames = openGameTask.optionNames,
-                    values = emptyMap(),
-                    scopeLabel = "task:${openGameTask.name}",
-                    resourceName = resource.name,
-                    patches = patches,
-                    diagnostics = diagnostics,
-                )
-                runtimeTasks.add(
-                    0,
-                    RuntimeTask(
-                        taskName = openGameTask.name,
-                        entry = openGameTask.entry,
-                        pipelineOverrides = patches,
-                        label = openGameTask.label.ifBlank { "启动终末地" },
-                    ),
-                )
-            }
-        }
-
         // 有可执行任务才让整轮级诊断参与判定：任务全禁用的配置该报 NoExecutableTasks，
         // 不该因为一个跑不到的 global / resource option 缺 default_case 变成 Invalid
         if (runtimeTasks.isNotEmpty()) {
