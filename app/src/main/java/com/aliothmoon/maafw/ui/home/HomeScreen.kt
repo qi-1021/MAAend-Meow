@@ -110,20 +110,18 @@ fun HomeScreen(
                         } else {
                             "qi-1021/MAAend-Meow"
                         }
-                        val info = com.aliothmoon.maafw.device.DeviceInfoCollector.collect(context, context.filesDir)
+                        val info = com.aliothmoon.maafw.log.DeviceInfoCollector.collect(context, context.filesDir)
                         val body = buildString {
                             append("### 简要描述\n\n\n")
                             append("### 复现步骤\n1. \n2. \n3. \n\n")
                             append("### 诊断信息\n```\n")
-                            append(com.aliothmoon.maafw.device.DeviceInfoText.render(info))
-                            append("Backend     : ").append(state.backend.name).append('\n')
-                            append("RunMode     : ").append(state.runMode.name).append('\n')
+                            append(com.aliothmoon.maafw.log.DeviceInfoText.render(info))
                             append("```\n")
                         }
                         val url = "https://github.com/$repo/issues/new?title=" +
                             android.net.Uri.encode("[Feedback] ") +
                             "&body=" + android.net.Uri.encode(body)
-                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, androidx.core.net.toUri(url))
+                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
                             .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                         runCatching { context.startActivity(intent) }
                     }
