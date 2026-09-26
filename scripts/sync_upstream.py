@@ -80,8 +80,6 @@ def check_maafw_update(current_release: str) -> tuple[bool, str]:
 def update_maaend_submodule(target_commit: str):
     log(f"Updating MaaEnd submodule to {target_commit[:7]}...")
     run_cmd(["git", "checkout", target_commit], cwd=MAAEND_ROOT)
-    import prepare_maaend
-    prepare_maaend.main()
 
 
 def update_records(new_maaend_commit: str, new_maafw_tag: str | None = None):
