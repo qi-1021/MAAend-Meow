@@ -695,6 +695,239 @@ class MaaRunner(private val agentHost: AgentHost) {
         1
     }
 
+    /** 售卖扫描按 region 缓存的物资名（对齐上游 autosell.regionItemMap） */
+    private val regionItemMap = ConcurrentHashMap<String, List<String>>()
+
+    private data class RecoResult(val hit: Boolean, val detailJson: String?, val box: IntArray?)
+
+    private fun runRecognitionOnce(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        image: Pointer,
+        nodeName: String,
+    ): RecoResult? {
+        val recoId = lib.MaaContextRunRecognition(context, nodeName, "{}", image)
+        if (recoId <= 0L) return null
+        val tasker = lib.MaaContextGetTasker(context) ?: return null
+        val hitMem = Memory(1)
+        val tempRect = lib.MaaRectCreate()
+        val detailBuf = lib.MaaStringBufferCreate()
+        return try {
+            if (lib.MaaTaskerGetRecognitionDetail(tasker, recoId, null, null, hitMem, tempRect, detailBuf, null, null).toInt() == 0) {
+                return null
+            }
+            val hit = hitMem.getByte(0).toInt() != 0
+            val detailJson = detailBuf?.let { lib.MaaStringBufferGet(it) }
+            val box = tempRect?.let {
+                val r = getBoxRect(lib, it)
+                intArrayOf(r.x, r.y, r.w, r.h)
+            }
+            RecoResult(hit, detailJson, box)
+        } finally {
+            if (tempRect != null) lib.MaaRectDestroy(tempRect)
+            if (detailBuf != null) lib.MaaStringBufferDestroy(detailBuf)
+        }
+    }
+
+    private fun nodeDefinitionJson(lib: MaaFrameworkLibrary, context: Pointer, nodeName: String): String? {
+        val buf = lib.MaaStringBufferCreate() ?: return null
+        return try {
+            if (lib.MaaContextGetNodeData(context, nodeName, buf).toInt() == 0) null
+            else lib.MaaStringBufferGet(buf)
+        } finally {
+            lib.MaaStringBufferDestroy(buf)
+        }
+    }
+
+    /** 对齐上游 expressionrecognition.runNumericRecognition：解析节点 OCR 数字 */
+    private fun recognitionNumber(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        image: Pointer,
+        nodeName: String,
+    ): Int {
+        val res = runRecognitionOnce(lib, context, image, nodeName)
+            ?: throw IllegalArgumentException("run recognition failed: $nodeName")
+        val nodeJson = nodeDefinitionJson(lib, context, nodeName)
+        val text = selectOcrText(res.detailJson, nodeJson)
+            ?: throw IllegalArgumentException("no ocr text for $nodeName")
+        return OcrNum.parse(text)
+    }
+
+    /** 按节点形状（And/box_index）从 detail 里取目标 OCR 文本 */
+    private fun selectOcrText(detailJson: String?, nodeJson: String?): String? {
+        if (detailJson.isNullOrBlank()) return null
+        return try {
+            val root = Json.parseToJsonElement(detailJson).jsonObject
+            val shape = RecoDetail.parseNodeShape(nodeJson)
+            val target = if (shape?.type == "And") {
+                val all = root["all"]?.jsonArray
+                if (all != null && all.isNotEmpty()) {
+                    all[shape.boxIndex.coerceIn(0, all.size - 1)].jsonObject
+                } else root
+            } else root
+            val inner = target["detail"]?.jsonObject ?: target
+            val texts = RecoDetail.collectOcrTexts(inner.toString())
+            // 价格/数量场景优先取含数字的，否则取第一个文本
+            texts.firstOrNull { it.any(Char::isDigit) } ?: texts.firstOrNull()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 对齐上游 ExpressionRecognition：`{节点}` 数字表达式求值 */
+    private val expressionRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, roi, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val paramObj = runCatching {
+                Json.parseToJsonElement(customRecognitionParam.orEmpty()).jsonObject
+            }.getOrNull() ?: return@MaaCustomRecognitionCallback 0
+            val expression = paramObj["expression"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            val boxNode = paramObj["box_node"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            if (expression.isEmpty()) return@MaaCustomRecognitionCallback 0
+            val matched: Boolean = try {
+                BoolExpr.evaluate(expression) { name ->
+                    recognitionNumber(lib, context, image, name)
+                }
+            } catch (_: Exception) {
+                // 上游同样语义：画面/节点结果不稳定时本次不匹配，等下一次重试
+                return@MaaCustomRecognitionCallback 0
+            }
+            Ln.i("MaaRunner: ExpressionRecognition [$nodeName] expr='$expression' matched=$matched")
+            if (!matched) return@MaaCustomRecognitionCallback 0
+            if (outBox != null) {
+                val box: IntArray? = if (boxNode.isNotEmpty()) {
+                    runRecognitionOnce(lib, context, image, boxNode)?.box
+                } else {
+                    val r = getBoxRect(lib, roi)
+                    intArrayOf(r.x, r.y, r.w, r.h)
+                }
+                if (box != null) lib.MaaRectSet(outBox, box[0], box[1], box[2], box[3])
+            }
+            1
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: ExpressionRecognition error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** 对齐上游 autosell.AutoSellScanItemRecognition：OCR 物资名并按 region 缓存 */
+    private val autoSellScanItemRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, roi, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val region = runCatching {
+                Json.parseToJsonElement(customRecognitionParam.orEmpty()).jsonObject["region"]?.jsonPrimitive?.contentOrNull
+            }.getOrNull().orEmpty()
+            if (region.isBlank()) {
+                Ln.w("MaaRunner: AutoSellScanItemRecognition empty region on node=$nodeName")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val res = runRecognitionOnce(lib, context, image, "AutoSellStockRedistributionItemText")
+                ?: return@MaaCustomRecognitionCallback 0
+            if (!res.hit) {
+                Ln.w("MaaRunner: AutoSellScanItemRecognition item text not hit")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val names = RecoDetail.collectOcrTexts(res.detailJson)
+            if (names.isEmpty()) {
+                Ln.w("MaaRunner: AutoSellScanItemRecognition no item names")
+                return@MaaCustomRecognitionCallback 0
+            }
+            regionItemMap[region] = names
+            Ln.i("MaaRunner: AutoSellScanItemRecognition region=$region items=$names")
+            if (outBox != null) {
+                val r = getBoxRect(lib, roi)
+                lib.MaaRectSet(outBox, r.x, r.y, r.w, r.h)
+            }
+            1
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: AutoSellScanItemRecognition error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** 对齐上游 autosell.AutoSellItemExecuteItemTaskAction：按关键词定价并逐件执行售卖子任务 */
+    private val autoSellItemExecuteItemTaskActionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        try {
+            val json = Json.parseToJsonElement(customActionParam.orEmpty()).jsonObject
+            val region = json["region"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val moderatePrice = json["moderate_price"]?.jsonPrimitive?.intOrNull ?: 0
+            val largePrice = json["large_price"]?.jsonPrimitive?.intOrNull ?: 0
+            val massivePrice = json["massive_price"]?.jsonPrimitive?.intOrNull ?: 0
+            if (region.isBlank()) {
+                Ln.w("MaaRunner: AutoSellItemExecuteItemTaskAction empty region on node=$nodeName")
+                return@MaaCustomActionCallback 0
+            }
+            val names = regionItemMap[region] ?: return@MaaCustomActionCallback 1
+            for (name in names) {
+                if (isStopRequested()) return@MaaCustomActionCallback 0
+                val modKey = AutoSellKeywords.firstContainedKeyword(name, AutoSellKeywords.moderate)
+                val largeKey = AutoSellKeywords.firstContainedKeyword(name, AutoSellKeywords.large)
+                val massiveKey = AutoSellKeywords.firstContainedKeyword(name, AutoSellKeywords.massive)
+                val targetPrice: Int
+                val targetName: String
+                when {
+                    modKey.isNotEmpty() -> { targetPrice = moderatePrice; targetName = modKey }
+                    largeKey.isNotEmpty() -> { targetPrice = largePrice; targetName = largeKey }
+                    massiveKey.isNotEmpty() -> { targetPrice = massivePrice; targetName = massiveKey }
+                    else -> {
+                        Ln.w("MaaRunner: AutoSellItemExecuteItemTaskAction unknown item '$name', skip")
+                        continue
+                    }
+                }
+                Ln.i("MaaRunner: AutoSellItemExecuteItemTaskAction [$nodeName] sell '$name' as '$targetName' price>=$targetPrice")
+                val override = buildJsonObject {
+                    put("AutoSellStockRedistributionItemOpenPrepareRegionalDevelopmentValleyIV", buildJsonObject {
+                        put("enabled", region == "ValleyIV")
+                    })
+                    put("AutoSellStockRedistributionItemOpenPrepareRegionalDevelopmentWuling", buildJsonObject {
+                        put("enabled", region == "Wuling")
+                    })
+                    put("AutoSellStockRedistributionItemOpenPrepareFriendsSwitchValleyIV", buildJsonObject {
+                        put("enabled", region == "ValleyIV")
+                    })
+                    put("AutoSellStockRedistributionItemOpenPrepareFriendsSwitchWuling", buildJsonObject {
+                        put("enabled", region == "Wuling")
+                    })
+                    put("AutoSellStockRedistributionItemOpenPrepareFriendsFailedToValleyIV", buildJsonObject {
+                        put("enabled", region == "ValleyIV")
+                    })
+                    put("AutoSellStockRedistributionItemOpenPrepareFriendsFailedToWuling", buildJsonObject {
+                        put("enabled", region == "Wuling")
+                    })
+                    put("AutoSellFriendsPricesExpected", buildJsonObject {
+                        put("custom_recognition_param", buildJsonObject {
+                            put("expression", "{AutoSellFriendsPriceRecognition} >= $targetPrice")
+                            put("focus_matched_resolved_expression", true)
+                            put("focus_unmatched_resolved_expression", true)
+                        })
+                    })
+                    put("AutoSellFriendsPricesExpectedBuy", buildJsonObject {
+                        put("custom_recognition_param", buildJsonObject {
+                            put("expression", "{AutoSellFriendsPriceCurrentRecognition} >= $targetPrice")
+                        })
+                    })
+                    put("AutoSellStockRedistributionItemFindTextRecognition", buildJsonObject {
+                        put("expected", targetName)
+                    })
+                }.toString()
+                val subId = lib.MaaContextRunTask(context, "AutoSellStockRedistributionItemOpenPrepare", override)
+                if (subId <= 0L) {
+                    Ln.w("MaaRunner: AutoSellItemExecuteItemTaskAction prepare failed for '$name'")
+                    return@MaaCustomActionCallback 0
+                }
+            }
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: AutoSellItemExecuteItemTaskAction error on node=$nodeName", t)
+            0
+        }
+    }
+
     fun setCallback(callback: IMaaRunnerCallback?) {
         callbackRef.set(callback)
     }
@@ -1266,6 +1499,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         regAction("PipelineOverrideAction", pipelineOverrideCallback)
         regAction("PipelineOverride", pipelineOverrideCallback)
         regAction("AttachToExpectedRegexAction", attachToExpectedRegexCallback)
+        regAction("AutoSellItemExecuteItemTaskAction", autoSellItemExecuteItemTaskActionCallback)
 
         val otherActions = listOf(
             "CreditShoppingScanItemAction",
@@ -1291,7 +1525,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "autoEcoFarmInterruptibleSleep",
             "autoEcoFarmOverrideTargetTemplate",
             "AutoFightMainAction",
-            "AutoSellItemExecuteItemTaskAction",
             "AccountSwitchWindowAction",
             "BatchAddFriendsAction",
             "BatchAddFriendsFriendListFullAction",
@@ -1352,13 +1585,13 @@ class MaaRunner(private val agentHost: AgentHost) {
         regReco("ScheduleRecognition", noopTrueRecognitionCallback)
         regReco("ItemQuantitySatisfied", noopTrueRecognitionCallback)
         regReco("ItemDataReady", noopTrueRecognitionCallback)
+        regReco("AutoSellScanItemRecognition", autoSellScanItemRecognitionCallback)
+        regReco("ExpressionRecognition", expressionRecognitionCallback)
 
         val falseRecognitions = listOf(
             "ImageCheckNotPassedRecognition",
             "AutoStockpile.Recognition",
-            "AutoSellScanItemRecognition",
             "ItemTransferSameItemRecognition",
-            "ExpressionRecognition",
             "IconRecognition",
             "AeroSalvageBalloonStateRecognition",
             "AeroSalvageGridRecognition",
