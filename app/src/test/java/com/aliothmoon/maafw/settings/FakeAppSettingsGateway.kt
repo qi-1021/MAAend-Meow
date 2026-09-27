@@ -115,4 +115,17 @@ class FakeAppSettingsGateway : AppSettingsGateway {
     override suspend fun setPipOnHome(enabled: Boolean) {
         pipOnHome.value = enabled
     }
+
+    // 默认值对齐 AppSettings 的 defaults，别让 fake 偏离生产默认
+    override val inferenceDevice = MutableStateFlow("cpu")
+
+    override suspend fun setInferenceDevice(device: String) {
+        inferenceDevice.value = device
+    }
+
+    override val retryFailedTasks = MutableStateFlow(false)
+
+    override suspend fun setRetryFailedTasks(enabled: Boolean) {
+        retryFailedTasks.value = enabled
+    }
 }
