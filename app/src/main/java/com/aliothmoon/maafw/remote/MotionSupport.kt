@@ -69,7 +69,7 @@ object MotionSupport {
     private fun ctrl() = MaaRunner.currentController
         ?: error("controller 未连接")
 
-    private fun wait(id: Long) {
+    private fun waitCtrl(id: Long) {
         if (id > 0) lib().MaaControllerWait(ctrl(), id)
     }
 
@@ -84,15 +84,15 @@ object MotionSupport {
     // ── 基础原语 ──
 
     fun touchDown(contact: Int, x: Int, y: Int, pressure: Int = 0) {
-        wait(lib().MaaControllerPostTouchDown(ctrl(), contact, x.coerceIn(0, FRAME_W - 1), y.coerceIn(0, FRAME_H - 1), pressure))
+        waitCtrl(lib().MaaControllerPostTouchDown(ctrl(), contact, x.coerceIn(0, FRAME_W - 1), y.coerceIn(0, FRAME_H - 1), pressure))
     }
 
     fun touchMove(contact: Int, x: Int, y: Int, pressure: Int = 0) {
-        wait(lib().MaaControllerPostTouchMove(ctrl(), contact, x.coerceIn(0, FRAME_W - 1), y.coerceIn(0, FRAME_H - 1), pressure))
+        waitCtrl(lib().MaaControllerPostTouchMove(ctrl(), contact, x.coerceIn(0, FRAME_W - 1), y.coerceIn(0, FRAME_H - 1), pressure))
     }
 
     fun touchUp(contact: Int) {
-        wait(lib().MaaControllerPostTouchUp(ctrl(), contact))
+        waitCtrl(lib().MaaControllerPostTouchUp(ctrl(), contact))
     }
 
     /** 点击动作按钮（交互/跳跃/冲刺/攻击共用）：按下→保持→抬起 */
