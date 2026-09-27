@@ -819,10 +819,12 @@ class MaaRunner(private val agentHost: AgentHost) {
         if (context == null) return@MaaCustomActionCallback 0
         try {
             val p = motionParam(customActionParam)
-            // 区域文本优先取参数显式传入，否则用当前节点 reco detail 的 OCR 文本
+            // 区域文本优先取参数显式传入，否则用当前节点定义里的 OCR expected 文本
             val areaText = p["area_text"]?.jsonPrimitive?.contentOrNull
-                ?: nodeDefinitionJson(lib, context, nodeName)?.let { RecoDetail.collectOcrTexts(it).firstOrNull() }
-                ?: throw AutoDeliverySupport.ResolveException("区域 OCR 文本缺失")
+                ?: nodeDefinitionJson(lib, context, nodeName).orEmpty()
+                    .let { RecoDetail.collectOcrTexts(it).firstOrNull() }
+                    .orEmpty()
+            if (areaText.isBlank()) throw AutoDeliverySupport.ResolveException("区域 OCR 文本缺失")
             val (area, match) = AutoDeliverySupport.resolveArea(areaText)
             val route = AutoDeliverySupport.depotOf(area.depotId)
             // zip 优先取 action 参数，其次读全局滑索偏好节点（auto→true）
@@ -852,8 +854,10 @@ class MaaRunner(private val agentHost: AgentHost) {
         try {
             val p = motionParam(customActionParam)
             val destText = p["destination_text"]?.jsonPrimitive?.contentOrNull
-                ?: nodeDefinitionJson(lib, context, nodeName)?.let { RecoDetail.collectOcrTexts(it).firstOrNull() }
-                ?: throw AutoDeliverySupport.ResolveException("目标 OCR 文本缺失")
+                ?: nodeDefinitionJson(lib, context, nodeName).orEmpty()
+                    .let { RecoDetail.collectOcrTexts(it).firstOrNull() }
+                    .orEmpty()
+            if (destText.isBlank()) throw AutoDeliverySupport.ResolveException("目标 OCR 文本缺失")
             val (dest, match) = AutoDeliverySupport.resolveDestination(destText)
             val zip = p["zip"]?.jsonPrimitive?.booleanOrNull ?: readZiplinePreference(lib, context)
             if (dest.ziplineOnly && !zip) {
