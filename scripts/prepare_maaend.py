@@ -348,6 +348,46 @@ def tag_unimplemented_tasks():
     log(f"Tagged unimplemented tasks in {count} task files.")
 
 
+def override_rigid_template_nodes():
+    """
+    把脆弱小模板的页签切换/校验换成 OCR 点选/检查（移动端分辨率下模板易失配）。
+    仅覆盖已在真机验证的节点。
+    """
+    entry = ASSETS_ROOT / "resource" / "pipeline" / "AutoStockpile" / "Entry.json"
+    if not entry.is_file():
+        return
+    try:
+        data = json.loads(strip_json_comments(entry.read_text(encoding="utf-8")))
+        modified = False
+        # 切到弹性页签：OCR 找字点，而非 30px 小模板
+        node = data.get("AutoStockpileGotoElasticGoods")
+        if isinstance(node, dict):
+            node["action"] = {
+                "type": "Custom",
+                "param": {
+                    "custom_action": "OcrTapAction",
+                    "custom_action_param": {"text": "弹性需求物资"},
+                },
+            }
+            modified = True
+        # 校验：OCR 确认页签存在（顶栏常驻，比侧栏小图标稳）
+        node = data.get("AutoStockpileEnaureElasticClicked")
+        if isinstance(node, dict):
+            node["recognition"] = {
+                "type": "Custom",
+                "param": {
+                    "custom_recognition": "OcrCheckRecognition",
+                    "custom_recognition_param": {"text": "弹性需求物资"},
+                },
+            }
+            modified = True
+        if modified:
+            entry.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+            log("Overrode AutoStockpile elastic-tab nodes with OCR actions.")
+    except Exception as e:
+        log(f"Warning: failed to override rigid template nodes: {e}")
+
+
 def main():
     log("Starting MAAend Android preparation...")
     ensure_maaend_submodule()
@@ -359,6 +399,7 @@ def main():
     enhance_presets_with_startup()
     enhance_opengame_pipeline()
     tag_unimplemented_tasks()
+    override_rigid_template_nodes()
     log("Preparation complete!")
 
 
