@@ -353,45 +353,42 @@ def tag_unimplemented_tasks():
 
 def override_rigid_template_nodes():
     """
-    把脆弱小模板的页签切换/校验换成 OCR 点选/检查（移动端分辨率下模板易失配）。
-    仅覆盖已在真机验证的节点。
+    把脆弱小模板的页签切换换成按位置点击（移动端分辨率下模板易失配）。
+
+    为什么不用 OCR 找「弹性需求物资」这五个字：真机实测这一行 OCR 是
+    `艳定需求物资提性需深情物 03`——稳→艳、弹→提、求→深，还把两个页签并成一句、
+    重复三份。720p 下这个字号这套字体认不准，模糊匹配也救不回来。
+    页签位置是固定 UI，直接按坐标点更可靠。
     """
-    # 顶部「稳定需求物资 / 弹性需求物资」页签条的范围（1280×720）。
-    # 不限 ROI 的话整屏彩色货卡插画会把 OCR 淹掉，实测只回几个偏旁。
-    elastic_tab_roi = [60, 60, 760, 110]
+    # 「弹性需求物资」页签的范围（1280×720，取自真机截图）。
+    # 左边那个「稳定需求物资」是白底约 x∈[75,435]，弹性页签深色底 x∈[440,800]。
+    elastic_tab_roi = [445, 80, 350, 66]
     entry = ASSETS_ROOT / "resource" / "pipeline" / "AutoStockpile" / "Entry.json"
     if not entry.is_file():
         return
     try:
         data = json.loads(strip_json_comments(entry.read_text(encoding="utf-8")))
         modified = False
-        # 切到弹性页签：OCR 找字点，而非 30px 小模板。
-        # 注意 recognition 也要一起换掉，否则模板 And 先失败导致 action 跑不到。
+        # 切到弹性页签：DirectHit 直接命中页签矩形，自带的 Click 点它的中心。
+        # 进购买页默认是稳定物资，这一步是必须的。
         node = data.get("AutoStockpileGotoElasticGoods")
         if isinstance(node, dict):
             node["recognition"] = "DirectHit"
-            node["action"] = {
-                "type": "Custom",
-                "param": {
-                    "custom_action": "OcrTapAction",
-                    "custom_action_param": {"text": "弹性需求物资", "roi": elastic_tab_roi},
-                },
-            }
+            node["roi"] = elastic_tab_roi
+            node["action"] = {"type": "Click", "param": {}}
             modified = True
-        # 校验：OCR 确认页签存在（顶栏常驻，比侧栏小图标稳）
+        # 这里不再校验页签：真正的校验是决策节点的货物识别。
+        # 货组名（…货组）只出现在弹性页签上，点歪了就在决策里认不出货、
+        # 按 Skip 收尾，不会拿着稳定物资当弹性货去买。
         node = data.get("AutoStockpileEnaureElasticClicked")
         if isinstance(node, dict):
-            node["recognition"] = {
-                "type": "Custom",
-                "param": {
-                    "custom_recognition": "OcrCheckRecognition",
-                    "custom_recognition_param": {"text": "弹性需求物资", "roi": elastic_tab_roi},
-                },
-            }
+            node["recognition"] = "DirectHit"
+            node["roi"] = elastic_tab_roi
+            node["action"] = {"type": "DoNothing", "param": {}}
             modified = True
         if modified:
             entry.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
-            log("Overrode AutoStockpile elastic-tab nodes with OCR actions.")
+            log("Overrode AutoStockpile elastic-tab nodes with a positional click.")
     except Exception as e:
         log(f"Warning: failed to override rigid template nodes: {e}")
 
