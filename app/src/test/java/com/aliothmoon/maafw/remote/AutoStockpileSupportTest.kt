@@ -117,7 +117,7 @@ class AutoStockpileSupportTest {
 
         listOf(1, 2).forEach {
             val pick = AutoStockpileSupport.Session.decide("Wuling", "AutoStockpileDecisionWuling", candidates)
-            assertNotNull("第 $it 轮应有候选", pick)
+            assertTrue("第 $it 轮应有候选", pick != null)
             AutoStockpileSupport.Session.select(pick!!)
             AutoStockpileSupport.Session.reject()
         }
