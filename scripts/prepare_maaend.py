@@ -359,9 +359,11 @@ def override_rigid_template_nodes():
     try:
         data = json.loads(strip_json_comments(entry.read_text(encoding="utf-8")))
         modified = False
-        # 切到弹性页签：OCR 找字点，而非 30px 小模板
+        # 切到弹性页签：OCR 找字点，而非 30px 小模板。
+        # 注意 recognition 也要一起换掉，否则模板 And 先失败导致 action 跑不到。
         node = data.get("AutoStockpileGotoElasticGoods")
         if isinstance(node, dict):
+            node["recognition"] = "DirectHit"
             node["action"] = {
                 "type": "Custom",
                 "param": {
