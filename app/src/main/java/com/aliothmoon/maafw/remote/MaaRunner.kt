@@ -1064,6 +1064,74 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    /** 通用 OCR 点选：识别指定文本并点击首个命中（替代脆弱的小模板点选） */
+    private val ocrTapActionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        try {
+            val p = Json.parseToJsonElement(customActionParam.orEmpty()).jsonObject
+            val text = p["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            if (text.isBlank()) return@MaaCustomActionCallback 0
+            val ctrl = controller ?: return@MaaCustomActionCallback 0
+            val capId = lib.MaaControllerPostScreencap(ctrl)
+            if (capId > 0) lib.MaaControllerWait(ctrl, capId)
+            val imgBuf = lib.MaaImageBufferCreate() ?: return@MaaCustomActionCallback 0
+            try {
+                if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return@MaaCustomActionCallback 0
+                if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return@MaaCustomActionCallback 0
+                val items = ocrProbe(lib, context, imgBuf, null)
+                val m = items.firstOrNull { it.text.contains(text) || text.contains(it.text) }
+                    ?: return@MaaCustomActionCallback 0
+                val b = m.box ?: return@MaaCustomActionCallback 0
+                val cx = (b[0] + b[2] / 2).coerceIn(0, 4000)
+                val cy = (b[1] + b[3] / 2).coerceIn(0, 4000)
+                Ln.i("MaaRunner: OcrTapAction [$nodeName] '$text' -> '${m.text}' ($cx,$cy)")
+                val clickBox = lib.MaaRectCreate()
+                try {
+                    if (clickBox != null) lib.MaaRectSet(clickBox, cx, cy, 1, 1)
+                    lib.MaaContextRunAction(context, "__OcrTapInner", "{\"__OcrTapInner\":{\"action\":\"Click\"}}", clickBox, "")
+                } finally {
+                    if (clickBox != null) lib.MaaRectDestroy(clickBox)
+                }
+                1
+            } finally {
+                lib.MaaImageBufferDestroy(imgBuf)
+            }
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: OcrTapAction error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** 通用 OCR 存在性检查：找到指定文本即命中（用于替代脆弱模板校验） */
+    private val ocrCheckRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, _, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val p = runCatching {
+                Json.parseToJsonElement(customRecognitionParam.orEmpty()).jsonObject
+            }.getOrNull() ?: return@MaaCustomRecognitionCallback 0
+            val text = p["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            if (text.isBlank()) return@MaaCustomRecognitionCallback 0
+            // 全图 OCR 探针（复用 __GoodsOcrProbe 名，覆盖为全图）
+            lib.MaaContextOverridePipeline(context, "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"only_rec\":true}}")
+            val res = runRecognitionOnce(lib, context, image, "__GoodsOcrProbe")
+                ?: return@MaaCustomRecognitionCallback 0
+            if (!res.hit) return@MaaCustomRecognitionCallback 0
+            val m = GoodsSupport.collectOcrItems(res.detailJson)
+                .firstOrNull { it.text.contains(text) || text.contains(it.text) }
+                ?: return@MaaCustomRecognitionCallback 0
+            if (outBox != null && m.box != null) {
+                lib.MaaRectSet(outBox, m.box[0], m.box[1], m.box[2], m.box[3])
+            }
+            Ln.i("MaaRunner: OcrCheckRecognition [$nodeName] '$text' found as '${m.text}'")
+            1
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: OcrCheckRecognition error on node=$nodeName", t)
+            0
+        }
+    }
+
     fun setCallback(callback: IMaaRunnerCallback?) {
         callbackRef.set(callback)
     }
@@ -1637,6 +1705,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         regAction("AttachToExpectedRegexAction", attachToExpectedRegexCallback)
         regAction("AutoSellItemExecuteItemTaskAction", autoSellItemExecuteItemTaskActionCallback)
         regAction("AutoStockpile.SelectItem", autoStockpileSelectItemCallback)
+        regAction("OcrTapAction", ocrTapActionCallback)
 
         val otherActions = listOf(
             "CreditShoppingScanItemAction",
@@ -1725,6 +1794,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         regReco("ExpressionRecognition", expressionRecognitionCallback)
         regReco("OutpostTradingPriorityItem", outpostTradingPriorityItemCallback)
         regReco("OutpostTradingCurrentGoods", outpostTradingCurrentGoodsCallback)
+        regReco("OcrCheckRecognition", ocrCheckRecognitionCallback)
 
         val falseRecognitions = listOf(
             "ImageCheckNotPassedRecognition",
