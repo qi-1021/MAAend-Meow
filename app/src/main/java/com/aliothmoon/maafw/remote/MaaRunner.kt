@@ -1448,50 +1448,172 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
-    /** 对齐上游 AutoStockpile.SelectItem：按货组名 OCR 查找并返回框 */
-    private val autoStockpileSelectItemCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, box, _ ->
+    /**
+     * 对齐上游 AutoStockpile.Recognition：OCR 本页货组、绑价、选货。
+     *
+     * 上游把整页货组、配额、阈值都算完塞进 detail；移动端没有那套配置，退化成
+     * 「本页可见货组里挑最便宜的」，选中项放 [AutoStockpileSupport.Session]，
+     * 由 SelectItem 把它接到 SelectedGoodsClick 上。
+     *
+     * region 从节点名 AutoStockpileDecision<Region> 取，与上游
+     * resolveGoodsRegionFromTaskNode 同源。
+     */
+    private val autoStockpileRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, _, _, _, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val node = nodeName.orEmpty()
+            val region = node.removePrefix("AutoStockpileDecision")
+            if (AutoStockpileSupport.itemDefsFor(region).isEmpty()) {
+                Ln.w("MaaRunner: AutoStockpile.Recognition unknown region '$region' on node=$node")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val ctrl = controller ?: return@MaaCustomRecognitionCallback 0
+            val items = cachedOcrProbe(lib, ctrl, context, AutoStockpileSupport.goodsRoi)
+            val candidates = AutoStockpileSupport.scan(items, region)
+            val pick = AutoStockpileSupport.Session.decide(region, node, candidates)
+            if (pick == null) {
+                // 本区候选已试完：把中继指向 Skip，本区就此收尾而不是把整任务判失败
+                Ln.i("MaaRunner: AutoStockpile.Recognition [$nodeName] no candidate left (${candidates.size} seen), route to skip")
+                lib.MaaContextOverridePipeline(
+                    context,
+                    "{\"AutoStockpileRelayNodeDecision\":{\"next\":[\"AutoStockpileSkip\"]}," +
+                        "\"AutoStockpileSkip\":{\"enabled\":true}}",
+                )
+                return@MaaCustomRecognitionCallback 1
+            }
+            AutoStockpileSupport.Session.select(pick)
+            if (outBox != null) {
+                lib.MaaRectSet(outBox, pick.box[0], pick.box[1], pick.box[2], pick.box[3])
+            }
+            Ln.i(
+                "MaaRunner: AutoStockpile.Recognition [$nodeName] pick '${pick.name}' " +
+                    "price=${pick.price ?: -1} box=${pick.box.joinToString(",")} of ${candidates.size} candidates",
+            )
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: AutoStockpile.Recognition error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * SelectedGoodsClick 的识别替身：把 Session 里选中的货组框交回给流水线，
+     * 好让这个节点自带的 Click 动作点下去。
+     *
+     * 上游这里是 TemplateMatch（Go 在运行时覆盖 template 指向选中商品），
+     * 移动端没有按商品切模板的资源，用 Session 里的 OCR 框替代。
+     */
+    private val autoStockpileSelectedGoodsHitCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { _, _, nodeName, _, _, _, _, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        val pick = AutoStockpileSupport.Session.selection() ?: return@MaaCustomRecognitionCallback 0
+        if (outBox != null) {
+            lib.MaaRectSet(outBox, pick.box[0], pick.box[1], pick.box[2], pick.box[3])
+        }
+        Ln.i("MaaRunner: AutoStockpile.SelectedGoodsHit [$nodeName] hit '${pick.name}'")
+        1
+    }
+
+    /**
+     * 对齐上游 AutoStockpile.SelectItem：上游只做决策不点击（点击归 SelectedGoodsClick），
+     * 这里同样不直接点，而是把 SelectedGoodsClick 打开并换成我们的识别，
+     * 让它自带的 Click 点中 Session 里的选择。
+     */
+    private val autoStockpileSelectItemCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, _, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        val pick = AutoStockpileSupport.Session.selection()
+        if (pick == null) {
+            Ln.w("MaaRunner: AutoStockpile.SelectItem [$nodeName] no selection in session")
+            return@MaaCustomActionCallback 0
+        }
+        runCatching {
+            lib.MaaContextOverridePipeline(
+                context,
+                "{\"AutoStockpileSelectedGoodsClick\":{\"enabled\":true,\"recognition\":{\"type\":\"Custom\"," +
+                    "\"param\":{\"custom_recognition\":\"AutoStockpile.SelectedGoodsHit\"," +
+                    "\"custom_recognition_param\":{}}}},\"AutoStockpileSkip\":{\"enabled\":false}}",
+            )
+            Ln.i("MaaRunner: AutoStockpile.SelectItem [$nodeName] armed click for '${pick.name}'")
+        }.onFailure { Ln.e("MaaRunner: AutoStockpile.SelectItem override failed on node=$nodeName", it) }
+        1
+    }
+
+    /**
+     * 对齐上游 AutoStockpile.ReconcileDecision：拿详情页价格校正选择，然后决定
+     * 「进入购买链」还是「回列表换下一个货」。
+     *
+     * 上游比较的是「详情页实价 vs 列表页 OCR 价」，超阈值就重算决策；移动端没有阈值配置，
+     * 保留可比的那部分：详情页价比列表页价高出 50% 以上就认为看错/涨价，换下一个候选。
+     *
+     * 购买链的闸门是 AutoStockpileRelayNodeDecisionReady，它在基础流水线里 enabled=false，
+     * 只有这里放行才会继续到 CheckBuy/SwipeMax，所以这一步必须成功。
+     */
+    private val autoStockpileReconcileDecisionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, _, _, box, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
         if (context == null) return@MaaCustomActionCallback 0
         try {
-            // 参数里若带目标名则优先，否则在全部货组名里找
-            val want = runCatching {
-                val o = Json.parseToJsonElement(customActionParam.orEmpty()).jsonObject
-                o["item_name"]?.jsonPrimitive?.contentOrNull
-                    ?: o["name"]?.jsonPrimitive?.contentOrNull
-                    ?: o["target"]?.jsonPrimitive?.contentOrNull
-            }.getOrNull().orEmpty()
-            val names = if (want.isNotBlank()) listOf(want) else GoodsSupport.autoStockGroups
-            val r = getBoxRect(lib, box)
-            // 用当前帧做 OCR（box 为空则全图）；先刷一帧避免缓存过期
-            val ctrl = controller ?: return@MaaCustomActionCallback 0
-            val capId = lib.MaaControllerPostScreencap(ctrl)
-            if (capId > 0) lib.MaaControllerWait(ctrl, capId)
-            val imgBuf = lib.MaaImageBufferCreate() ?: return@MaaCustomActionCallback 0
-            try {
-                if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return@MaaCustomActionCallback 0
-                if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return@MaaCustomActionCallback 0
-                val roiBox = if (r.w > 0 && r.h > 0) intArrayOf(r.x, r.y, r.w, r.h) else null
-                val items = ocrProbe(lib, context, imgBuf, roiBox)
-                val m = GoodsSupport.findFirstMatch(items, names)
-                    ?: return@MaaCustomActionCallback 0
-                val cx = (m.box!![0] + m.box[2] / 2).coerceIn(0, 4000)
-                val cy = (m.box[1] + m.box[3] / 2).coerceIn(0, 4000)
-                Ln.i("MaaRunner: AutoStockpile.SelectItem [$nodeName] '${m.text}' click ($cx,$cy)")
-                val clickBox = lib.MaaRectCreate()
-                try {
-                    if (clickBox != null) lib.MaaRectSet(clickBox, cx, cy, 1, 1)
-                    lib.MaaContextRunAction(context, "__AutoStockpileClickInner", "{\"__AutoStockpileClickInner\":{\"action\":\"Click\"}}", clickBox ?: box, "")
-                } finally {
-                    if (clickBox != null) lib.MaaRectDestroy(clickBox)
-                }
-                1
-            } finally {
-                lib.MaaImageBufferDestroy(imgBuf)
+            val pick = AutoStockpileSupport.Session.selection()
+            if (pick == null) {
+                Ln.w("MaaRunner: AutoStockpile.ReconcileDecision [$nodeName] no selection, skip region")
+                lib.MaaContextOverridePipeline(
+                    context,
+                    "{\"AutoStockpileRelayNodeDecisionReady\":{\"enabled\":false},\"AutoStockpileSkip\":{\"enabled\":true}}",
+                )
+                return@MaaCustomActionCallback 1
             }
+            val r = getBoxRect(lib, box)
+            val detailPrice = if (r.w > 0 && r.h > 0) ocrPriceIn(lib, context, r) else null
+            val listed = pick.price
+            val tooExpensive = detailPrice != null && listed != null && detailPrice > listed * 3 / 2
+            if (tooExpensive) {
+                Ln.i(
+                    "MaaRunner: AutoStockpile.ReconcileDecision [$nodeName] '${pick.name}' detail=$detailPrice " +
+                        "listed=$listed too expensive, retry another candidate",
+                )
+                AutoStockpileSupport.Session.reject()
+                val decisionNode = AutoStockpileSupport.Session.decisionNode()
+                val retryNext = decisionNode?.let { "\"$it\",\"AutoStockpileSkip\"" } ?: "\"AutoStockpileSkip\""
+                lib.MaaContextOverridePipeline(
+                    context,
+                    "{\"AutoStockpileRelayNodeDecisionReady\":{\"enabled\":false},\"AutoStockpileSkip\":{\"enabled\":true}," +
+                        "\"AutoStockpileRelayNodeDecision\":{\"next\":[$retryNext]}}",
+                )
+            } else {
+                Ln.i(
+                    "MaaRunner: AutoStockpile.ReconcileDecision [$nodeName] '${pick.name}' detail=$detailPrice " +
+                        "listed=$listed accepted, proceed to purchase",
+                )
+                // 放行购买链：DecisionReady 走到 CheckBuy/CheckQuota，SwipeMax 负责买满
+                lib.MaaContextOverridePipeline(
+                    context,
+                    "{\"AutoStockpileRelayNodeDecisionReady\":{\"enabled\":true}," +
+                        "\"AutoStockpileSwipeMax\":{\"enabled\":true}," +
+                        "\"AutoStockpileSwipeSpecificQuantity\":{\"enabled\":false}," +
+                        "\"AutoStockpileSkip\":{\"enabled\":false}}",
+                )
+            }
+            1
         } catch (t: Throwable) {
-            Ln.e("MaaRunner: AutoStockpile.SelectItem error on node=$nodeName", t)
+            Ln.e("MaaRunner: AutoStockpile.ReconcileDecision error on node=$nodeName", t)
             0
         }
+    }
+
+    /** 在给定小 ROI 里 OCR 一个价格（详情页实价），认不出返回 null */
+    private fun ocrPriceIn(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        r: RectData,
+    ): Int? {
+        val ctrl = controller ?: return null
+        val items = cachedOcrProbe(lib, ctrl, context, intArrayOf(r.x, r.y, r.w, r.h))
+        for (item in items) {
+            val digits = item.text.replace("[^\\d]".toRegex(), "")
+            val value = digits.toIntOrNull() ?: continue
+            if (value in 1..9999) return value
+        }
+        return null
     }
 
     /** 通用 OCR 点选：识别指定文本并点击首个命中（替代脆弱的小模板点选） */
@@ -2162,6 +2284,8 @@ class MaaRunner(private val agentHost: AgentHost) {
         regAction("AttachToExpectedRegexAction", attachToExpectedRegexCallback)
         regAction("AutoSellItemExecuteItemTaskAction", autoSellItemExecuteItemTaskActionCallback)
         regAction("AutoStockpile.SelectItem", autoStockpileSelectItemCallback)
+        // AutoStockpile.ReconcileDecision 不在下面的 noop 列表：它放行 AutoStockpileRelayNodeDecisionReady
+        regAction("AutoStockpile.ReconcileDecision", autoStockpileReconcileDecisionCallback)
         regAction("OcrTapAction", ocrTapActionCallback)
 
         val otherActions = listOf(
@@ -2171,7 +2295,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "UpdateItemQuantity",
             "DeliveryJobsResolveOngoingDepotAction",
             // AutoDeliveryResolveDepot/Destination 不在此列：已注册为真实实现
-            "AutoStockpile.ReconcileDecision",
             "AutoStockStapleQuantityControlAction",
             "BetterSliding",
             "CaptureUid",
@@ -2246,10 +2369,13 @@ class MaaRunner(private val agentHost: AgentHost) {
         regReco("OutpostTradingCurrentGoods", outpostTradingCurrentGoodsCallback)
         regAction("OutpostTradingPrioritySession", outpostPrioritySessionCallback)
         regReco("OcrCheckRecognition", ocrCheckRecognitionCallback)
+        // AutoStockpile 的两个识别不再返回恒假：Recognition 恒假会让
+        // AutoStockpileDecision<Region> 永不命中，整条决策—购买链直接断掉
+        regReco("AutoStockpile.Recognition", autoStockpileRecognitionCallback)
+        regReco("AutoStockpile.SelectedGoodsHit", autoStockpileSelectedGoodsHitCallback)
 
         val falseRecognitions = listOf(
             "ImageCheckNotPassedRecognition",
-            "AutoStockpile.Recognition",
             "ItemTransferSameItemRecognition",
             "IconRecognition",
             "AeroSalvageBalloonStateRecognition",

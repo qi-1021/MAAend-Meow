@@ -17,16 +17,6 @@ object GoodsSupport {
 
     data class OcrItem(val text: String, val box: IntArray?)
 
-    /** 囤货货组名（由 autostockpile/item_map.json 生成） */
-    val autoStockGroups: List<String> = listOf(
-        "岳研避瘴茶货组", "冬虫夏草货组", "武陵冻梨货组", "武侠电影货组",
-        "天师龙泡泡货组", "息壤净水芯货组", "清波筏货组", "息壤色烟花货组",
-        "飞天迎宾员货组", "选剑铸炉货组", "息壤桥梁货组", "界石锁货组",
-        "锚点厨具货组", "悬空兽骨雕货组", "巫木矿钻货组", "天使罐头货组",
-        "谷地水培肉货组", "团结牌口服液货组", "塞什卡髀石货组", "星体晶块货组",
-        "源石树幼苗货组", "警戒者矿镐货组", "硬脑壳头盔货组", "边角料积木货组",
-    )
-
     /** 从 OCR detail JSON 里收集 (文本, 包围盒) */
     fun collectOcrItems(detailJson: String?): List<OcrItem> {
         if (detailJson.isNullOrBlank()) return emptyList()
