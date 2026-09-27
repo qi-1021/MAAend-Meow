@@ -47,7 +47,7 @@
 
 | 组件名称 | 来源仓库 | 当前锚定版本 / Commit | 作用说明 |
 | :--- | :--- | :--- | :--- |
-| **MaaEnd** | [MaaEnd/MaaEnd](https://github.com/MaaEnd/MaaEnd) | Commit [`ae43a18`](https://github.com/MaaEnd/MaaEnd/commit/ae43a184c02408410061c858a46205cf90606a26)<br>(Branch: `v2`) | 业务资源仓库，提供 `interface.json`、Pipeline 流水线、图片模板、据点/基建等核心任务 |
+| **MaaEnd** | [MaaEnd/MaaEnd](https://github.com/MaaEnd/MaaEnd) | Commit [`9f90c71`](https://github.com/MaaEnd/MaaEnd/commit/9f90c719237d0bb1988197292296671851d54e8f)<br>(Branch: `v2`) | 业务资源仓库，提供 `interface.json`、Pipeline 流水线、图片模板、据点/基建等核心任务 |
 | **MaaFramework** | [MaaXYZ/MaaFramework](https://github.com/MaaXYZ/MaaFramework) | Tag `v5.14.0`<br>(向前兼容 `v5.13.1`+) | 核心自动化框架动态库（`libMaaFramework.so`、`libMaaUtils.so`、`libMaaAndroidNativeControlUnit.so`） |
 | **MaaCommonAssets (OCR)** | [MaaXYZ/MaaCommonAssets](https://github.com/MaaXYZ/MaaCommonAssets) | `OCR/ppocr_v6/small`<br>(ONNX 格式) | 轻量级 PP-OCR v6 模型文件（`det.onnx`, `rec.onnx`, `keys.txt`） |
 | **Android 宿主工程** | [Aliothmoon/MaaFwApp](https://github.com/Aliothmoon/MaaFwApp) | 基于 MAA-Meow 通用架构分支 | 提供 Jetpack Compose 界面、Shizuku 进程代理、虚拟显示屏与多点触控控制器 |
