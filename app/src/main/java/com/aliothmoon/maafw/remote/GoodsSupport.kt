@@ -82,6 +82,28 @@ object GoodsSupport {
         return null
     }
 
+    /**
+     * 带优先序的匹配：先按 [preferOrder] 顺序（如套利价升序）找首个未尝试命中，
+     * 全部落空再退回 [findFirstMatch] 的阅读顺序贪心。
+     */
+    fun findBestMatch(
+        items: List<OcrItem>,
+        names: List<String>,
+        tried: Set<String> = emptySet(),
+        preferOrder: List<String>? = null,
+    ): OcrItem? {
+        if (preferOrder != null) {
+            for (name in preferOrder) {
+                if (name.isEmpty() || name in tried) continue
+                val item = items.firstOrNull { o ->
+                    o.box != null && (o.text.contains(name) || name.contains(o.text))
+                }
+                if (item != null) return item
+            }
+        }
+        return findFirstMatch(items, names, tried)
+    }
+
     /** 按名称反查其在候选表中的标准名（用于标记 tried） */
     fun standardName(text: String, names: List<String>): String? {
         for (name in names) {

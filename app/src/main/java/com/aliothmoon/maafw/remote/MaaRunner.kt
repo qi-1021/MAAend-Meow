@@ -931,12 +931,38 @@ class MaaRunner(private val agentHost: AgentHost) {
     /** 据点各 location 已尝试过的货物名（select 去重；exhausted 确认后清空） */
     private val outpostTried = ConcurrentHashMap<String, MutableSet<String>>()
 
+    /** 任务 option 注入的选品策略（对齐上游 configure_strategy：price/rarity/stock） */
+    @Volatile
+    private var outpostStrategy: String = ""
+
+    /**
+     * 低买高卖套利排序：对每个候选货物算跨据点价差
+     * V = max(他据点卖价) − 本据点买价，价差大者优先（买得相对便宜、卖得相对最贵）。
+     * 无价差数据的货物排最后；排序稳定，同价差保持原表顺序。
+     */
+    private fun outpostArbitrageOrder(names: List<String>, location: String): List<String> {
+        val buyPrices = OutpostData.unitPriceByLocation[location]
+        if (buyPrices.isNullOrEmpty()) return names
+        fun spread(name: String): Int {
+            val buy = buyPrices[name] ?: return Int.MIN_VALUE
+            var bestSell = Int.MIN_VALUE
+            for ((_, sellPrices) in OutpostData.unitPriceByLocation) {
+                if (sellPrices === buyPrices) continue
+                val p = sellPrices[name] ?: continue
+                if (p > bestSell) bestSell = p
+            }
+            return if (bestSell == Int.MIN_VALUE) Int.MIN_VALUE else bestSell - buy
+        }
+        return names.sortedWith(compareByDescending { spread(it) })
+    }
+
     /** 用临时 OCR 探针节点识别指定区域，返回 (文本, 框) */
     private fun ocrProbe(
         lib: MaaFrameworkLibrary,
         context: Pointer,
         image: Pointer,
         roiBox: IntArray?,
+        allowRetry: Boolean = true,
     ): List<GoodsSupport.OcrItem> {
         val roiPart = if (roiBox != null && roiBox[2] > 0 && roiBox[3] > 0) {
             ",\"roi\":[${roiBox[0]},${roiBox[1]},${roiBox[2]},${roiBox[3]}]"
@@ -945,7 +971,45 @@ class MaaRunner(private val agentHost: AgentHost) {
         lib.MaaContextOverridePipeline(context, override)
         val res = runRecognitionOnce(lib, context, image, "__GoodsOcrProbe") ?: return emptyList()
         if (!res.hit) return emptyList()
-        return GoodsSupport.collectOcrItems(res.detailJson)
+        val items = GoodsSupport.collectOcrItems(res.detailJson)
+        if (!isSuspiciousOcr(items) || !allowRetry) return items
+        // 坏帧防御：撕裂帧的 OCR 会整体空掉或只剩全帧噪声（如仅一个低分「手」字且框盖住全帧），
+        // 此时空结果或单条全框结果时刷帧重探；cachedOcrProbe 内部调 ocrProbe 时关掉重试防递归
+        val ctrl = controller ?: return items
+        return cachedOcrProbe(lib, ctrl, context, roiBox)
+    }
+
+    /** 可疑 OCR 结果：空，或只有一条框盖住近全帧的噪声（正常小 ROI 探针单条结果不该被判坏） */
+    private fun isSuspiciousOcr(items: List<GoodsSupport.OcrItem>): Boolean {
+        if (items.isEmpty()) return true
+        if (items.size != 1) return false
+        val b = items[0].box ?: return true
+        return b[2] >= 1200 && b[3] >= 640
+    }
+
+    /** 从 controller 缓存帧做 OCR 探针；空结果时刷帧重试一次（坏帧防御） */
+    private fun cachedOcrProbe(
+        lib: MaaFrameworkLibrary,
+        ctrl: Pointer,
+        context: Pointer,
+        roiBox: IntArray?,
+        attempts: Int = 2,
+    ): List<GoodsSupport.OcrItem> {
+        var items: List<GoodsSupport.OcrItem> = emptyList()
+        repeat(attempts) {
+            val capId = lib.MaaControllerPostScreencap(ctrl)
+            if (capId > 0) lib.MaaControllerWait(ctrl, capId)
+            val imgBuf = lib.MaaImageBufferCreate() ?: return emptyList()
+            try {
+                if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return@repeat
+                if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return@repeat
+                items = ocrProbe(lib, context, imgBuf, roiBox, allowRetry = false)
+                if (!isSuspiciousOcr(items)) return items
+            } finally {
+                lib.MaaImageBufferDestroy(imgBuf)
+            }
+        }
+        return items
     }
 
     /** 对齐上游 OutpostTradingPriorityItem：按 location 贪心选首个未尝试货物 */
@@ -956,16 +1020,25 @@ class MaaRunner(private val agentHost: AgentHost) {
             val p = Json.parseToJsonElement(customRecognitionParam.orEmpty()).jsonObject
             val location = p["location"]?.jsonPrimitive?.contentOrNull.orEmpty()
             val result = p["result"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            // 低买：custom_recognition_param.bias（价升序优先表）优先，其次 strategy=price 时查价排序
+            val bias = runCatching {
+                p["bias"]?.jsonPrimitive?.contentOrNull
+            }.getOrNull().orEmpty()
             val names = OutpostData.locationItems[location]
             if (location.isBlank() || names.isNullOrEmpty()) {
                 Ln.w("MaaRunner: OutpostTradingPriorityItem unknown location='$location' on node=$nodeName")
                 return@MaaCustomRecognitionCallback 0
             }
+            val prefer: List<String>? = when {
+                bias.isNotBlank() -> bias.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                outpostStrategy == "price" -> outpostArbitrageOrder(names, location)
+                else -> null
+            }
             val r = getBoxRect(lib, roi)
             val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h))
             if (result == "exhausted") {
                 val tried = outpostTried[location].orEmpty()
-                val m = GoodsSupport.findFirstMatch(items, names, tried)
+                val m = GoodsSupport.findBestMatch(items, names, tried, prefer)
                 if (m == null) {
                     outpostTried.remove(location)
                     Ln.i("MaaRunner: OutpostTradingPriorityItem [$nodeName] location=$location exhausted")
@@ -975,7 +1048,7 @@ class MaaRunner(private val agentHost: AgentHost) {
                 return@MaaCustomRecognitionCallback 0
             }
             val tried = outpostTried.getOrPut(location) { ConcurrentHashMap.newKeySet() }
-            val m = GoodsSupport.findFirstMatch(items, names, tried)
+            val m = GoodsSupport.findBestMatch(items, names, tried, prefer)
                 ?: return@MaaCustomRecognitionCallback 0
             GoodsSupport.standardName(m.text, names)?.let { tried += it }
             if (outBox != null && m.box != null) {
@@ -1015,6 +1088,36 @@ class MaaRunner(private val agentHost: AgentHost) {
         } catch (t: Throwable) {
             Ln.w("MaaRunner: OutpostTradingCurrentGoods error on node=$nodeName", t)
             0
+        }
+    }
+
+    /**
+     * OutpostTradingPrioritySession：对齐上游据点交易会话 action。Android 侧已移植
+     * configure_strategy：接收任务 option 注入的选品策略（price = 价升序，低买高卖用），
+     * 买侧 OutpostTradingPriorityItem 识别回调按该策略重排候选优先序。
+     * 其余 operation（reset_goods_selection/adopt/configure）尚未移植，保持 noop 成功。
+     */
+    private val outpostPrioritySessionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, _, _ ->
+        try {
+            val p = runCatching {
+                Json.parseToJsonElement(customActionParam.orEmpty()).jsonObject
+            }.getOrNull()
+            when (p?.get("operation")?.jsonPrimitive?.contentOrNull.orEmpty()) {
+                "configure_strategy" -> {
+                    val strategy = p?.get("strategy")?.jsonPrimitive?.contentOrNull.orEmpty()
+                    if (strategy in listOf("price", "rarity", "stock", "")) {
+                        outpostStrategy = strategy
+                        Ln.i("MaaRunner: OutpostTradingPrioritySession [$nodeName] configure_strategy=$strategy")
+                    } else {
+                        Ln.w("MaaRunner: OutpostTradingPrioritySession [$nodeName] unknown strategy=$strategy, keep=$outpostStrategy")
+                    }
+                }
+                else -> {}
+            }
+            1
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: OutpostTradingPrioritySession error on node=$nodeName", t)
+            1
         }
     }
 
@@ -1079,7 +1182,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             try {
                 if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return@MaaCustomActionCallback 0
                 if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return@MaaCustomActionCallback 0
-                val items = ocrProbe(lib, context, imgBuf, null)
+                val items = cachedOcrProbe(lib, ctrl, context, null)
                 val m = items.firstOrNull { it.text.contains(text) || text.contains(it.text) }
                     ?: return@MaaCustomActionCallback 0
                 val b = m.box ?: return@MaaCustomActionCallback 0
@@ -1757,7 +1860,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             "MapNavigateAction",
             "OutpostTradingLocationPlan",
             "OutpostTradingOperatorSession",
-            "OutpostTradingPrioritySession",
+            // OutpostTradingPrioritySession 不在此列：已显式注册为 outpostPrioritySessionCallback
             "OutpostTradingReserveSession",
             "PullCountCalculatorAction",
             "PuzzleAction",
@@ -1794,6 +1897,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         regReco("ExpressionRecognition", expressionRecognitionCallback)
         regReco("OutpostTradingPriorityItem", outpostTradingPriorityItemCallback)
         regReco("OutpostTradingCurrentGoods", outpostTradingCurrentGoodsCallback)
+        regAction("OutpostTradingPrioritySession", outpostPrioritySessionCallback)
         regReco("OcrCheckRecognition", ocrCheckRecognitionCallback)
 
         val falseRecognitions = listOf(

@@ -10,4 +10,14 @@ object OutpostData {
         "CardiacRemediationStation" to listOf("重息壤龙泡泡","息壤龙泡泡","重息壤","低容武陵电池","优质锦草软饮","优质芽针针剂","息壤","中容武陵电池","赫铜零件","灼铜零件"),
         "XiranflowCloudseederStation" to listOf("重息壤龙泡泡","息壤龙泡泡","灼铜零件","中容武陵电池","重息壤","优质锦草软饮","优质芽针针剂","分离芯","息壤"),
     )
+
+    /** location -> zh_cn 商品基础单价（由 selection_data.json 生成，跨据点价差即套利空间） */
+    val unitPriceByLocation: Map<String, Map<String, Int>> = mapOf(
+        "RefugeeCamp" to mapOf("晶体外壳" to 1, "紫晶零件" to 1, "紫晶质瓶" to 2, "荞愈胶囊" to 10, "柑实罐头" to 10, "优质荞愈胶囊" to 27, "优质柑实罐头" to 27, "中容谷地电池" to 30, "精选荞愈胶囊" to 70, "高容谷地电池" to 70, "精选柑实罐头" to 70),
+        "InfraStation" to mapOf("铁制零件" to 1, "柑实罐头" to 10, "低容谷地电池" to 16, "优质荞愈胶囊" to 27, "优质柑实罐头" to 27, "中容谷地电池" to 30, "精选荞愈胶囊" to 70, "高容谷地电池" to 70, "精选柑实罐头" to 70),
+        "ReconstructionHQ" to mapOf("钢制零件" to 3, "柑实罐头" to 10, "优质荞愈胶囊" to 27, "优质柑实罐头" to 27, "中容谷地电池" to 30, "精选荞愈胶囊" to 70, "高容谷地电池" to 70, "精选柑实罐头" to 70),
+        "SkyKingFlatsConstructionSite" to mapOf("息壤" to 1, "赤铜零件" to 1, "芽针针剂" to 16, "锦草软饮" to 16, "优质芽针针剂" to 22, "优质锦草软饮" to 22, "低容武陵电池" to 25, "重息壤" to 27, "赫铜零件" to 48, "中容武陵电池" to 54, "息壤龙泡泡" to 100, "重息壤龙泡泡" to 200),
+        "CardiacRemediationStation" to mapOf("息壤" to 1, "优质锦草软饮" to 22, "优质芽针针剂" to 22, "低容武陵电池" to 25, "重息壤" to 27, "赫铜零件" to 48, "中容武陵电池" to 54, "灼铜零件" to 70, "息壤龙泡泡" to 100, "重息壤龙泡泡" to 200),
+        "XiranflowCloudseederStation" to mapOf("分离芯" to 1, "息壤" to 1, "优质锦草软饮" to 22, "优质芽针针剂" to 22, "重息壤" to 27, "中容武陵电池" to 54, "灼铜零件" to 70, "息壤龙泡泡" to 100, "重息壤龙泡泡" to 200),
+    )
 }
