@@ -143,6 +143,51 @@ class AutoStockpileSupportTest {
     }
 
     @Test
+    fun `价格认得万位写法`() {
+        // 真机截图同屏里就有这几种写法，上游的 ^(\d{3,4})$ 只吃得住其中一种
+        assertEquals(400_000, AutoStockpileSupport.parsePrice("40万"))
+        assertEquals(120_000, AutoStockpileSupport.parsePrice("12万"))
+        assertEquals(12_000, AutoStockpileSupport.parsePrice("1.2万"))
+        assertEquals(400_000, AutoStockpileSupport.parsePrice("40 万"))
+        assertEquals(24000, AutoStockpileSupport.parsePrice("24000"))
+        assertEquals(60000, AutoStockpileSupport.parsePrice("60000"))
+    }
+
+    @Test
+    fun `库存与时长折扣不当价格`() {
+        // 这些和价格同屏出现，只抽数字会把 12 当成价格、然后被「最便宜」选中
+        assertNull(AutoStockpileSupport.parsePrice("库存 12"))
+        assertNull(AutoStockpileSupport.parsePrice("5小时"))
+        assertNull(AutoStockpileSupport.parsePrice("-50%"))
+        assertNull(AutoStockpileSupport.parsePrice("203.1%"))
+        assertNull(AutoStockpileSupport.parsePrice("1320万/3000万"))
+        assertNull(AutoStockpileSupport.parsePrice("12"))
+        assertNull(AutoStockpileSupport.parsePrice("万"))
+        assertNull(AutoStockpileSupport.parsePrice(""))
+        assertNull(AutoStockpileSupport.parsePrice("999999999"))
+    }
+
+    @Test
+    fun `挑最便宜的是真按价格而不是按位置`() {
+        val items = row("锚点厨具货组", "40万", 200) + row("谷地水培肉货组", "24000", 400)
+
+        val pick = AutoStockpileSupport.pick(AutoStockpileSupport.scan(items, "ValleyIV"), emptySet())
+
+        assertEquals("谷地水培肉货组", pick!!.name)
+        assertEquals(24000, pick.price)
+    }
+
+    @Test
+    fun `两遍 OCR 认到同一个货组只留一个`() {
+        val items = listOf(
+            ocr("源石树幼苗货组", 100, 200),
+            ocr("源石树幼苗货组", 103, 202),
+        )
+
+        assertEquals(1, AutoStockpileSupport.scan(items, "ValleyIV").size)
+    }
+
+    @Test
     fun `候选试完返回 null，换 region 才重开 tried`() {
         val items = row("岳研避瘴茶货组", null, 200) + row("冬虫夏草货组", null, 320)
         val candidates = AutoStockpileSupport.scan(items, "Wuling")

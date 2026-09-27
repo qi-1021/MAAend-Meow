@@ -19,9 +19,6 @@ object AutoStockpileSupport {
     /** 上游 maxGoodsPriceDistance */
     private const val MAX_PRICE_DISTANCE = 120
 
-    /** 上游 priceRe：^(\d{3,4})$ */
-    private val priceRe = Regex("^\\d{3,4}$")
-
     data class ItemDef(val name: String, val region: String, val productId: String, val tier: Int)
 
     /** 24 个货组，值同 item_map.json 的 `Region/ProductId.TierN` */
@@ -68,6 +65,44 @@ object AutoStockpileSupport {
 
     /** 上游 matchGoodsName 的阈值：goods_scan.go 里按 2 传 */
     private const val MAX_NAME_DISTANCE = 2
+
+    /** 价格合理区间：超出就当没读到价（单位是信用点，货卡上都是几万到几十万） */
+    private const val MIN_PRICE = 1
+    private const val MAX_PRICE = 10_000_000
+
+    /**
+     * 货卡上的价格不止一种写法，实测同屏里就有 `40万`、`24000`、`12万`。
+     * 上游的 `^(\d{3,4})$` 只吃得住纯 3~4 位数字，所以 `40万` 和 `24000` 都会被丢掉，
+     * 那样「挑最便宜的」其实退化成「挑最靠上的」。这里放宽成：整串就是一个数
+     * （可带一位小数与 万/萬/亿 后缀）。
+     *
+     * 收紧的地方是**必须整串都是价格**：货卡上还有 `库存 12`、`5小时`、`-50%`，
+     * 只抽数字会把 12 当成价格、然后被「最便宜」选中。带位数门槛 + 整串匹配后，
+     * 这类文本进不来。
+     */
+    fun parsePrice(text: String): Int? {
+        val t = text.trim().replace(" ", "").replace(",", "")
+        if (t.isEmpty()) return null
+        val m = priceTextRe.matchEntire(t) ?: return null
+        val number = m.groupValues[1]
+        val unit = m.groupValues[2]
+        val digits = number.filter { it.isDigit() }.length
+        val multiplier = when (unit) {
+            "万", "萬" -> 10_000
+            "亿" -> 100_000_000
+            else -> 1
+        }
+        // 纯数字要 3 位起；带 万/亿 时 2 位就认（40万 是常见写法）
+        if (multiplier == 1 && digits < 3) return null
+        if (multiplier != 1 && digits < 2) return null
+        val base = number.toDoubleOrNull() ?: return null
+        val value = kotlin.math.round(base * multiplier)
+        if (value < MIN_PRICE || value > MAX_PRICE) return null
+        return value.toInt()
+    }
+
+    /** 整串价格：数字（可带一位小数）+ 可选 万/萬/亿 */
+    private val priceTextRe = Regex("^(\\d+(?:\\.\\d)?)([万萬亿]?)$")
 
     /** 货组名匹配：先走子串（整名或 OCR 掉了尾字），再退回上游的编辑距离 ≤2 */
     fun matchName(text: String, defs: List<ItemDef>): ItemDef? {
@@ -117,16 +152,16 @@ object AutoStockpileSupport {
         )
         val prices = items.mapNotNull { o ->
             val b = o.box ?: return@mapNotNull null
-            val text = o.text.replace("[^\\d]".toRegex(), "")
-            if (!priceRe.matches(text)) return@mapNotNull null
-            val value = text.toIntOrNull() ?: return@mapNotNull null
-            b to value
+            parsePrice(o.text)?.let { b to it }
         }
         val usedPrice = BooleanArray(prices.size)
         val out = mutableListOf<Candidate>()
+        val seenNames = mutableSetOf<String>()
         for (o in names) {
             val box = o.box!!
             val def = matchName(o.text, defs) ?: continue
+            // 两遍 OCR 合并后同一个货组可能出现两次（框差几像素），只留最靠上的那个
+            if (!seenNames.add(def.name)) continue
             val price = bindPrice(box, prices, usedPrice)
             out += Candidate(def.name, def.productId, def.tier, price, box)
         }

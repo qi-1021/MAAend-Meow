@@ -1297,7 +1297,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         image: Pointer,
         roiBox: IntArray?,
         allowRetry: Boolean = true,
-        colorFilter: String? = GOODS_COLOR_FILTER,
+        colorFilter: String? = null,
     ): List<GoodsSupport.OcrItem> {
         val roiPart = if (roiBox != null && roiBox[2] > 0 && roiBox[3] > 0) {
             ",\"roi\":[${roiBox[0]},${roiBox[1]},${roiBox[2]},${roiBox[3]}]"
@@ -1306,6 +1306,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         // （实测整屏只回 ['手','手','手']）。上游 AutoStockpileGetGoods 用的就是
         // AutoStockpileGoodsFilter：把灰度 60~150 的像素留下、其余刷黑，等价于
         // 「只保留价格与商品名的浅色文字」。
+        //
+        // 默认关掉：这个过滤是为货卡调的，套到据点交易等别的界面上会把内容刷没。
+        // 只有 [goodsOcrProbe] 显式打开。
         val filterPart = if (colorFilter.isNullOrBlank()) "" else ",\"color_filter\":\"$colorFilter\""
         val override =
             "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\"$roiPart$filterPart,\"only_rec\":true}}"
@@ -1345,6 +1348,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         context: Pointer,
         roiBox: IntArray?,
         attempts: Int = 2,
+        colorFilter: String? = null,
     ): List<GoodsSupport.OcrItem> {
         var items: List<GoodsSupport.OcrItem> = emptyList()
         repeat(attempts) {
@@ -1354,7 +1358,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             try {
                 if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return@repeat
                 if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return@repeat
-                items = ocrProbe(lib, context, imgBuf, roiBox, allowRetry = false)
+                items = ocrProbe(lib, context, imgBuf, roiBox, allowRetry = false, colorFilter = colorFilter)
                 if (!isSuspiciousOcr(items)) return items
             } finally {
                 lib.MaaImageBufferDestroy(imgBuf)
@@ -1493,7 +1497,7 @@ class MaaRunner(private val agentHost: AgentHost) {
                 return@MaaCustomRecognitionCallback 0
             }
             val ctrl = controller ?: return@MaaCustomRecognitionCallback 0
-            val items = cachedOcrProbe(lib, ctrl, context, AutoStockpileSupport.goodsRoi)
+            val items = goodsOcrProbe(lib, ctrl, context, AutoStockpileSupport.goodsRoi, region)
             val candidates = AutoStockpileSupport.scan(items, region)
             val pick = AutoStockpileSupport.Session.decide(region, node, candidates)
             if (pick == null) {
@@ -1536,6 +1540,59 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
         Ln.i("MaaRunner: AutoStockpile.SelectedGoodsHit [$nodeName] hit '${pick.name}'")
         1
+    }
+
+    /**
+     * 货卡 OCR：带颜色过滤读一遍，认不出货组再读一遍不过滤的，两遍合并。
+     *
+     * 为什么要两遍：颜色过滤按上游 AutoStockpileGoodsFilter 只留灰度 60~150，
+     * 本意是压掉货卡插画（不过滤时整屏只回 ['手','手','手']）；但商品名是深色条上的
+     * 白字，白字会被刷成黑、连同深色条一起变成纯黑块，名字反而读不出来。
+     * 哪种更管用要看真机，所以两遍都读、合并，让日志直接给出两遍各认出几个货组名。
+     */
+    private fun goodsOcrProbe(
+        lib: MaaFrameworkLibrary,
+        ctrl: Pointer,
+        context: Pointer,
+        roiBox: IntArray?,
+        region: String,
+    ): List<GoodsSupport.OcrItem> {
+        val filtered = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = GOODS_COLOR_FILTER)
+        val filteredHits = AutoStockpileSupport.scan(filtered, region).size
+        if (filteredHits > 0) {
+            Ln.i(
+                "MaaRunner: goods OCR [$region] filtered hits=$filteredHits texts=${filtered.take(10).map { it.text }}",
+            )
+            return filtered
+        }
+        val plain = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = null)
+        val plainHits = AutoStockpileSupport.scan(plain, region).size
+        Ln.i(
+            "MaaRunner: goods OCR [$region] filtered=$filteredHits plain=$plainHits " +
+                "filteredTexts=${filtered.take(8).map { it.text }} plainTexts=${plain.take(8).map { it.text }}",
+        )
+        if (plainHits == 0) return if (filtered.size >= plain.size) filtered else plain
+        return mergeOcrItems(filtered, plain)
+    }
+
+    /** 两遍 OCR 结果合并去重，过滤那遍优先 */
+    private fun mergeOcrItems(
+        a: List<GoodsSupport.OcrItem>,
+        b: List<GoodsSupport.OcrItem>,
+    ): List<GoodsSupport.OcrItem> {
+        val seen = HashSet<String>()
+        val out = ArrayList<GoodsSupport.OcrItem>(a.size + b.size)
+        for (item in a + b) {
+            val box = item.box
+            val key = if (box == null) {
+                "t:${item.text}"
+            } else {
+                // 框按 8px 量化：两遍之间卡面可能微移几个像素
+                "b:${item.text}:${box[0] / 8},${box[1] / 8},${box[2] / 8},${box[3] / 8}"
+            }
+            if (seen.add(key)) out += item
+        }
+        return out
     }
 
     /**
