@@ -317,8 +317,9 @@ def tag_unimplemented_tasks():
         "AutoCollect": "🧺自动采集【移动端基础版：传送+直走+交互，复杂寻路持续完善】",
         # 滑索导入：桌面端浏览器 MITM 抓取，手机端请在电脑导一次后同步数据
         "ZiplineImport": "🚡导入/更新滑索坐标【暂未实现·需桌面端，后续版本实现】",
-        # 囤货策略：完整选品/配额策略移植中，当前仅基础流程
-        "AutoStockpile": "📦自动囤货【策略完善中，部分物资暂不支持】",
+        # 囤货策略：认货/绑价/选货/点货/校正/购买链已在移动端跑通（见 AutoStockpileSupport），
+        # 但没有上游那套配额与阈值配置，选品规则退化为「本页可见货组里挑最便宜的」
+        "AutoStockpile": "📦自动囤货【移动端基础版：OCR 认货选最低价，无配额阈值策略】",
         "AutoStockStaple": "🏪购买稳定物资【策略完善中】",
     }
     tasks_dir = ASSETS_ROOT / "tasks"
