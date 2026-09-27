@@ -356,6 +356,9 @@ def override_rigid_template_nodes():
     把脆弱小模板的页签切换/校验换成 OCR 点选/检查（移动端分辨率下模板易失配）。
     仅覆盖已在真机验证的节点。
     """
+    # 顶部「稳定需求物资 / 弹性需求物资」页签条的范围（1280×720）。
+    # 不限 ROI 的话整屏彩色货卡插画会把 OCR 淹掉，实测只回几个偏旁。
+    elastic_tab_roi = [60, 60, 760, 110]
     entry = ASSETS_ROOT / "resource" / "pipeline" / "AutoStockpile" / "Entry.json"
     if not entry.is_file():
         return
@@ -371,7 +374,7 @@ def override_rigid_template_nodes():
                 "type": "Custom",
                 "param": {
                     "custom_action": "OcrTapAction",
-                    "custom_action_param": {"text": "弹性需求物资"},
+                    "custom_action_param": {"text": "弹性需求物资", "roi": elastic_tab_roi},
                 },
             }
             modified = True
@@ -382,7 +385,7 @@ def override_rigid_template_nodes():
                 "type": "Custom",
                 "param": {
                     "custom_recognition": "OcrCheckRecognition",
-                    "custom_recognition_param": {"text": "弹性需求物资"},
+                    "custom_recognition_param": {"text": "弹性需求物资", "roi": elastic_tab_roi},
                 },
             }
             modified = True

@@ -1284,17 +1284,31 @@ class MaaRunner(private val agentHost: AgentHost) {
     }
 
     /** 用临时 OCR 探针节点识别指定区域，返回 (文本, 框) */
+    /** 解析 JSON 里的 [x,y,w,h] 数组；不是四个整数就当没给 */
+    private fun intArrayOrNull(el: kotlinx.serialization.json.JsonElement?): IntArray? {
+        val arr = el as? kotlinx.serialization.json.JsonArray ?: return null
+        val nums = arr.mapNotNull { it.jsonPrimitive.intOrNull }
+        return if (nums.size >= 4) intArrayOf(nums[0], nums[1], nums[2], nums[3]) else null
+    }
+
     private fun ocrProbe(
         lib: MaaFrameworkLibrary,
         context: Pointer,
         image: Pointer,
         roiBox: IntArray?,
         allowRetry: Boolean = true,
+        colorFilter: String? = GOODS_COLOR_FILTER,
     ): List<GoodsSupport.OcrItem> {
         val roiPart = if (roiBox != null && roiBox[2] > 0 && roiBox[3] > 0) {
             ",\"roi\":[${roiBox[0]},${roiBox[1]},${roiBox[2]},${roiBox[3]}]"
         } else ""
-        val override = "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\"$roiPart,\"only_rec\":true}}"
+        // 货卡上大片彩色插画，不做颜色过滤的话 OCR 只能读出零星几个偏旁
+        // （实测整屏只回 ['手','手','手']）。上游 AutoStockpileGetGoods 用的就是
+        // AutoStockpileGoodsFilter：把灰度 60~150 的像素留下、其余刷黑，等价于
+        // 「只保留价格与商品名的浅色文字」。
+        val filterPart = if (colorFilter.isNullOrBlank()) "" else ",\"color_filter\":\"$colorFilter\""
+        val override =
+            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\"$roiPart$filterPart,\"only_rec\":true}}"
         lib.MaaContextOverridePipeline(context, override)
         val res = runRecognitionOnce(lib, context, image, "__GoodsOcrProbe") ?: return emptyList()
         if (!res.hit) return emptyList()
@@ -1306,12 +1320,22 @@ class MaaRunner(private val agentHost: AgentHost) {
         return cachedOcrProbe(lib, ctrl, context, roiBox)
     }
 
-    /** 可疑 OCR 结果：空，或只有一条框盖住近全帧的噪声（正常小 ROI 探针单条结果不该被判坏） */
+    /**
+     * 可疑 OCR 结果：空、全帧噪声，或只剩一堆单字偏旁。
+     *
+     * 单字这一条是实测补的：不做颜色过滤时整屏 OCR 稳定回 ['手','手','手']，
+     * 每条都带框、条数不为 1，旧的判断放它过去，于是上层拿着三个偏旁去匹配货组名，
+     * 只会得到「什么都没找到」，看不出是 OCR 根本没读出来。
+     */
     private fun isSuspiciousOcr(items: List<GoodsSupport.OcrItem>): Boolean {
         if (items.isEmpty()) return true
-        if (items.size != 1) return false
-        val b = items[0].box ?: return true
-        return b[2] >= 1200 && b[3] >= 640
+        if (items.size == 1) {
+            val b = items[0].box ?: return true
+            return b[2] >= 1200 && b[3] >= 640
+        }
+        // 全是单字：颜色过滤失效 / 帧上真的没有可读文字
+        if (items.size <= 4 && items.all { it.text.length == 1 }) return true
+        return false
     }
 
     /** 从 controller 缓存帧做 OCR 探针；空结果时刷帧重试一次（坏帧防御） */
@@ -1624,6 +1648,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             val p = Json.parseToJsonElement(customActionParam.orEmpty()).jsonObject
             val text = p["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
             if (text.isBlank()) return@MaaCustomActionCallback 0
+            val roi = intArrayOrNull(p["roi"])
             val ctrl = controller ?: return@MaaCustomActionCallback 0
             val capId = lib.MaaControllerPostScreencap(ctrl)
             if (capId > 0) lib.MaaControllerWait(ctrl, capId)
@@ -1631,9 +1656,13 @@ class MaaRunner(private val agentHost: AgentHost) {
             try {
                 if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return@MaaCustomActionCallback 0
                 if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return@MaaCustomActionCallback 0
-                val items = cachedOcrProbe(lib, ctrl, context, null)
+                // 页签这类小目标必须限 ROI：整屏彩色插画会把 OCR 淹掉，实测只剩几个偏旁
+                val items = cachedOcrProbe(lib, ctrl, context, roi, colorFilter = null)
                 val m = items.firstOrNull { it.text.contains(text) || text.contains(it.text) }
-                    ?: return@MaaCustomActionCallback 0
+                if (m == null) {
+                    Ln.w("MaaRunner: OcrTapAction [$nodeName] '$text' not found, roi=${roi?.joinToString(",")} got=${items.take(8).map { it.text }}")
+                    return@MaaCustomActionCallback 0
+                }
                 val b = m.box ?: return@MaaCustomActionCallback 0
                 val cx = (b[0] + b[2] / 2).coerceIn(0, 4000)
                 val cy = (b[1] + b[3] / 2).coerceIn(0, 4000)
@@ -1665,14 +1694,26 @@ class MaaRunner(private val agentHost: AgentHost) {
             }.getOrNull() ?: return@MaaCustomRecognitionCallback 0
             val text = p["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
             if (text.isBlank()) return@MaaCustomRecognitionCallback 0
-            // 全图 OCR 探针（复用 __GoodsOcrProbe 名，覆盖为全图）
-            lib.MaaContextOverridePipeline(context, "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"only_rec\":true}}")
+            val roi = intArrayOrNull(p["roi"])
+            // 页签文字是浅色，压在深色页签条上；套货卡的颜色过滤会把它刷成全黑，
+            // 所以这里显式关掉过滤，只靠 ROI 把范围收窄
+            lib.MaaContextOverridePipeline(
+                context,
+                buildString {
+                    append("{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"only_rec\":true")
+                    if (roi != null) append(",\"roi\":[${roi[0]},${roi[1]},${roi[2]},${roi[3]}]")
+                    append("}}")
+                },
+            )
             val res = runRecognitionOnce(lib, context, image, "__GoodsOcrProbe")
                 ?: return@MaaCustomRecognitionCallback 0
             if (!res.hit) return@MaaCustomRecognitionCallback 0
-            val m = GoodsSupport.collectOcrItems(res.detailJson)
-                .firstOrNull { it.text.contains(text) || text.contains(it.text) }
-                ?: return@MaaCustomRecognitionCallback 0
+            val items = GoodsSupport.collectOcrItems(res.detailJson)
+            val m = items.firstOrNull { it.text.contains(text) || text.contains(it.text) }
+            if (m == null) {
+                Ln.w("MaaRunner: OcrCheckRecognition [$nodeName] '$text' not found, roi=${roi?.joinToString(",")} got=${items.take(8).map { it.text }}")
+                return@MaaCustomRecognitionCallback 0
+            }
             if (outBox != null && m.box != null) {
                 lib.MaaRectSet(outBox, m.box[0], m.box[1], m.box[2], m.box[3])
             }
@@ -2449,6 +2490,13 @@ class MaaRunner(private val agentHost: AgentHost) {
     }
 
     internal companion object {
+        /**
+         * 货卡 OCR 的颜色过滤，同上游 AutoStockpileGoodsFilter：
+         * 灰度 60~150 留下、其余刷黑，等价于「只保留价格与商品名的浅色文字」。
+         * 顶部页签那种浅色压深色的文字不能用它，会被刷成全黑。
+         */
+        const val GOODS_COLOR_FILTER = "AutoStockpileGoodsFilter"
+
         /** MotionSupport 等外部单例需要拿 controller 发触摸/转向事件（单实例 runner） */
         @Volatile
         var currentController: Pointer? = null
