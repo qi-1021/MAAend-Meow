@@ -66,6 +66,45 @@ object AutoStockpileSupport {
         val box: IntArray,
     )
 
+    /** 上游 matchGoodsName 的阈值：goods_scan.go 里按 2 传 */
+    private const val MAX_NAME_DISTANCE = 2
+
+    /** 货组名匹配：先走子串（整名或 OCR 掉了尾字），再退回上游的编辑距离 ≤2 */
+    fun matchName(text: String, defs: List<ItemDef>): ItemDef? {
+        if (text.isBlank()) return null
+        for (d in defs) {
+            if (text.contains(d.name) || d.name.contains(text)) return d
+        }
+        var best: ItemDef? = null
+        var bestDistance = MAX_NAME_DISTANCE + 1
+        for (d in defs) {
+            val dist = levenshtein(text, d.name)
+            if (dist < bestDistance) {
+                bestDistance = dist
+                best = d
+            }
+        }
+        return if (bestDistance <= MAX_NAME_DISTANCE) best else null
+    }
+
+    /** 编辑距离（上游 pkg/levenshtein 的等价实现，滚动两行） */
+    fun levenshtein(a: String, b: String): Int {
+        if (a == b) return 0
+        if (a.isEmpty()) return b.length
+        if (b.isEmpty()) return a.length
+        var prev = IntArray(b.length + 1) { it }
+        val cur = IntArray(b.length + 1)
+        for (i in 1..a.length) {
+            cur[0] = i
+            for (j in 1..b.length) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                cur[j] = minOf(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
+            }
+            prev = cur.copyOf()
+        }
+        return prev[b.length]
+    }
+
     /**
      * 把一帧 OCR 结果解析成本区可见的货组候选。
      * 名字命中 [itemDefsFor] 里的任一货组即算候选，价格按上游几何规则就近绑到名字上。
@@ -87,7 +126,7 @@ object AutoStockpileSupport {
         val out = mutableListOf<Candidate>()
         for (o in names) {
             val box = o.box!!
-            val def = defs.firstOrNull { o.text.contains(it.name) || it.name.contains(o.text) } ?: continue
+            val def = matchName(o.text, defs) ?: continue
             val price = bindPrice(box, prices, usedPrice)
             out += Candidate(def.name, def.productId, def.tier, price, box)
         }

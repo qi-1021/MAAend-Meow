@@ -111,6 +111,38 @@ class AutoStockpileSupportTest {
     }
 
     @Test
+    fun `货组名匹配容忍 OCR 认错一个字`() {
+        val valley = AutoStockpileSupport.itemDefsFor("ValleyIV")
+        // 上游 matchGoodsName 按编辑距离 2 匹配，子串匹配认不出「认错字」这一种
+        assertEquals("锚点厨具货组", AutoStockpileSupport.matchName("锚点厨具货组", valley)?.name)
+        assertEquals("锚点厨具货组", AutoStockpileSupport.matchName("锚点厨具", valley)?.name)
+        assertEquals("锚点厨具货组", AutoStockpileSupport.matchName("锚点厨俱货组", valley)?.name)
+        assertNull(AutoStockpileSupport.matchName("谷地刻写券", valley))
+        // 跨区不串
+        assertNull(AutoStockpileSupport.matchName("岳研避瘴茶货组", valley))
+        assertNull(AutoStockpileSupport.matchName("锚点厨具货组", AutoStockpileSupport.itemDefsFor("Wuling")))
+    }
+
+    @Test
+    fun `编辑距离与 Levenshtein 一致`() {
+        assertEquals(0, AutoStockpileSupport.levenshtein("abc", "abc"))
+        assertEquals(1, AutoStockpileSupport.levenshtein("abc", "abd"))
+        assertEquals(3, AutoStockpileSupport.levenshtein("kitten", "sitting"))
+        assertEquals(3, AutoStockpileSupport.levenshtein("", "abc"))
+    }
+
+    @Test
+    fun `scan 走编辑距离命中错字货组名`() {
+        val items = listOf(ocr("锚点厨俱货组", 100, 200), ocr("1200", 180, 175))
+
+        val candidates = AutoStockpileSupport.scan(items, "ValleyIV")
+
+        assertEquals(1, candidates.size)
+        assertEquals("锚点厨具货组", candidates[0].name)
+        assertEquals(1200, candidates[0].price)
+    }
+
+    @Test
     fun `候选试完返回 null，换 region 才重开 tried`() {
         val items = row("岳研避瘴茶货组", null, 200) + row("冬虫夏草货组", null, 320)
         val candidates = AutoStockpileSupport.scan(items, "Wuling")
