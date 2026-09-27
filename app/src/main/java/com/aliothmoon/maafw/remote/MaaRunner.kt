@@ -28,6 +28,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -47,6 +48,13 @@ import java.util.concurrent.atomic.AtomicReference
  */
 class MaaRunner(private val agentHost: AgentHost) {
 
+    companion object {
+        /** MotionSupport 等外部单例需要拿 controller 发触摸/转向事件（单实例 runner） */
+        @Volatile
+        var currentController: Pointer? = null
+            private set
+    }
+
     private val worker = Executors.newSingleThreadExecutor { r ->
         Thread(r, "maa-runner").apply { isDaemon = true }
     }
@@ -60,6 +68,10 @@ class MaaRunner(private val agentHost: AgentHost) {
     // native handle
     private var resource: Pointer? = null
     private var controller: Pointer? = null
+        set(value) {
+            field = value
+            currentController = value
+        }
     private var tasker: Pointer? = null
 
     /** 已构建的 resource 对应的路径；变了就重建 */
@@ -544,6 +556,323 @@ class MaaRunner(private val agentHost: AgentHost) {
             0
         } catch (t: Throwable) {
             Ln.e("MaaRunner: RepeatUntilNotFoundAction error on node=$nodeName", t)
+            0
+        }
+    }
+
+    // ── 操控类动作（采集/送货/协议空间共用）：对齐上游 CharacterController ──
+
+    private fun motionParam(customActionParam: String?): JsonObject = runCatching {
+        Json.parseToJsonElement(customActionParam.orEmpty()).jsonObject
+    }.getOrDefault(JsonObject(emptyMap()))
+
+    private val yawDeltaCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, _, _ ->
+        try {
+            val delta = motionParam(customActionParam)["delta"]?.jsonPrimitive?.intOrNull ?: 0
+            MotionSupport.yawDelta(delta % 360)
+            Ln.i("MaaRunner: CharacterControllerYawDelta [$nodeName] delta=$delta")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: CharacterControllerYawDelta error on node=$nodeName", t)
+            0
+        }
+    }
+
+    private val pitchDeltaCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, _, _ ->
+        try {
+            val delta = motionParam(customActionParam)["delta"]?.jsonPrimitive?.intOrNull ?: 0
+            MotionSupport.pitchDelta(delta % 360)
+            Ln.i("MaaRunner: CharacterControllerPitchDelta [$nodeName] delta=$delta")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: CharacterControllerPitchDelta error on node=$nodeName", t)
+            0
+        }
+    }
+
+    private val forwardAxisCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, _, _ ->
+        try {
+            val axis = motionParam(customActionParam)["axis"]?.jsonPrimitive?.intOrNull ?: 0
+            // 上游：1 单位 = 100ms 前进；负值后退
+            val holdMs = (100 * axis).toLong()
+            if (holdMs >= 0) {
+                MotionSupport.setMovement(forward = true, left = false, backward = false, right = false)
+                Thread.sleep(holdMs)
+                MotionSupport.releaseJoystick()
+            } else {
+                MotionSupport.setMovement(forward = false, left = false, backward = true, right = false)
+                Thread.sleep(-holdMs)
+                MotionSupport.releaseJoystick()
+            }
+            Ln.i("MaaRunner: CharacterControllerForwardAxis [$nodeName] axis=$axis")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: CharacterControllerForwardAxis error on node=$nodeName", t)
+            0
+        }
+    }
+
+    private val relativeMoveCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, _, _ ->
+        try {
+            val p = motionParam(customActionParam)
+            val dx = p["dx"]?.jsonPrimitive?.intOrNull ?: 0
+            val dy = p["dy"]?.jsonPrimitive?.intOrNull ?: 0
+            MotionSupport.rotateView(dx, dy)
+            Ln.i("MaaRunner: CharacterControllerRelativeMove [$nodeName] dx=$dx dy=$dy")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: CharacterControllerRelativeMove error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * CharacterMoveToTarget：向识别到的目标走近一步。每步最多 500ms，
+     * 由管线的 next/重复机制驱动逐步逼近；对齐上游 moveToTarget 单步逻辑。
+     */
+    private val moveToTargetCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, box, _ ->
+        try {
+            val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+            val rect = getBoxRect(lib, box)
+            if (rect.w <= 0 && rect.h <= 0) {
+                Ln.w("MaaRunner: CharacterMoveToTarget [$nodeName] no target box")
+                return@MaaCustomActionCallback 0
+            }
+            val targetCx = rect.x + rect.w / 2
+            val targetCy = rect.y + rect.h / 2
+            val offsetX = targetCx - MotionSupport.FRAME_W / 2
+            val alignThreshold = 60
+            when {
+                offsetX < -alignThreshold -> MotionSupport.rotateView(offsetX / 3, 0)
+                offsetX > alignThreshold -> MotionSupport.rotateView(offsetX / 3, 0)
+                targetCy > 480 -> {
+                    // 目标已走到下半屏：走过了，退一步
+                    MotionSupport.setMovement(forward = false, left = false, backward = true, right = false)
+                    Thread.sleep(200)
+                    MotionSupport.releaseJoystick()
+                }
+                else -> {
+                    MotionSupport.setMovement(forward = true, left = false, backward = false, right = false)
+                    Thread.sleep(200)
+                    MotionSupport.releaseJoystick()
+                }
+            }
+            Ln.i("MaaRunner: CharacterMoveToTarget [$nodeName] target=($targetCx,$targetCy) off=$offsetX")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: CharacterMoveToTarget error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** 目标丢失时的收尾：清理摇杆/冲刺状态，返回成功让管线走 not-found 分支 */
+    private val moveToTargetNotFoundCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, _, _, _, _ ->
+        try {
+            MotionSupport.releaseJoystick()
+            MotionSupport.resetSprintState()
+            Ln.i("MaaRunner: CharacterMoveToTargetNotFound [$nodeName] motion reset")
+            1
+        } catch (_: Throwable) {
+            1
+        }
+    }
+
+    /**
+     * CharacterSearch：WASD 环绕一圈找目标（对齐上游固定路径），
+     * 每步用管线注入的 wait_nodes 节点跑一次识别；找到即返回成功。
+     */
+    private val characterSearchCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        try {
+            val waitNodes = motionParam(customActionParam)["wait_nodes"]?.jsonArray
+                ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+                .orEmpty()
+            if (waitNodes.isEmpty()) {
+                Ln.w("MaaRunner: CharacterSearch [$nodeName] wait_nodes empty")
+                return@MaaCustomActionCallback 0
+            }
+            // 上游固定环形路径：前2 左2 后4 右4 前4 左2，每步 100ms
+            val path = listOf(
+                MotionMove(true, false, false, false), MotionMove(true, false, false, false),
+                MotionMove(false, true, false, false), MotionMove(false, true, false, false),
+                MotionMove(false, false, true, false), MotionMove(false, false, true, false),
+                MotionMove(false, false, true, false), MotionMove(false, false, true, false),
+                MotionMove(false, false, false, true), MotionMove(false, false, false, true),
+                MotionMove(false, false, false, true), MotionMove(false, false, false, true),
+                MotionMove(true, false, false, false), MotionMove(true, false, false, false),
+                MotionMove(true, false, false, false), MotionMove(true, false, false, false),
+                MotionMove(false, true, false, false), MotionMove(false, true, false, false),
+            )
+            fun found(): Boolean {
+                if (!MotionSupport.screencapFresh()) return false
+                val imgBuf = lib.MaaImageBufferCreate() ?: return false
+                try {
+                    if (lib.MaaControllerCachedImage(MaaRunner.currentController, imgBuf).toInt() == 0) return false
+                    if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return false
+                    for (node in waitNodes) {
+                        val res = runRecognitionOnce(lib, context, imgBuf, node)
+                        if (res?.hit == true) {
+                            Ln.i("MaaRunner: CharacterSearch [$nodeName] found '$node'")
+                            return true
+                        }
+                    }
+                    return false
+                } finally {
+                    lib.MaaImageBufferDestroy(imgBuf)
+                }
+            }
+            if (found()) return@MaaCustomActionCallback 1
+            for (step in path) {
+                MotionSupport.setMovement(step.forward, step.left, step.backward, step.right)
+                Thread.sleep(100)
+                MotionSupport.releaseJoystick()
+                Thread.sleep(1500) // searchInterval：让视角稳定再识别
+                if (found()) return@MaaCustomActionCallback 1
+            }
+            Ln.i("MaaRunner: CharacterSearch [$nodeName] circle done, target not found")
+            0
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: CharacterSearch error on node=$nodeName", t)
+            0
+        }
+    }
+
+    private data class MotionMove(val forward: Boolean, val left: Boolean, val backward: Boolean, val right: Boolean)
+
+    /**
+     * MapNavigateAction（Android 降级实现）。
+     * 上游语义（navi_domain_types.h）：
+     * - ZONE   无坐标区域声明，等定位稳定（本实现：截图确认画面可读）
+     * - NAVMESH 语义寻路（本实现：脉冲前进近似，精确寻路待 MapLocator 移植）
+     * - COLLECT 行进中检测采集物，停车触发采集子任务（本实现：到点按交互键）
+     * - DIG    精确抵达后触发挖掘（本实现：连按两次交互键）
+     * - INTERACT 到点交互（有文本表时 OCR 找点，本实现：直接按交互键）
+     * - RUN/TRANSFER/PORTAL 经过式/转移式路点（本实现：脉冲前进）
+     */
+    private val mapNavigateCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, _, _ ->
+        try {
+            val p = motionParam(customActionParam)
+            val path = p["path"]?.jsonArray.orEmpty()
+            if (path.isEmpty()) return@MaaCustomActionCallback 1
+            for (raw in path) {
+                val obj = raw as? JsonObject ?: continue
+                val action = obj["action"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                when (action) {
+                    "ZONE" -> {
+                        val zoneId = obj["zone_id"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                        // 声明节点：等待画面稳定再继续（本实现无小地图定位校验）
+                        MotionSupport.screencapFresh()
+                        Thread.sleep(600)
+                        Ln.i("MaaRunner: MapNavigate [$nodeName] ZONE=$zoneId")
+                    }
+                    "HEADING" -> {
+                        val yaw = (obj["yaw"]?.jsonPrimitive?.doubleOrNull ?: 0.0).toInt()
+                        MotionSupport.yawDelta(yaw)
+                    }
+                    "NAVMESH", "RUN" -> {
+                        // 降级：按当前朝向脉冲前进近似走一段；真寻路待 MapLocator 移植
+                        MotionSupport.pulseForward(400)
+                    }
+                    "SPRINT" -> MotionSupport.sprint(true)
+                    "JUMP" -> MotionSupport.jump()
+                    "TRANSFER", "PORTAL" -> {
+                        // 等待机关/跳板把角色转走
+                        MotionSupport.pulseForward(200)
+                        Thread.sleep(1500)
+                    }
+                    "COLLECT", "DIG" -> {
+                        MotionSupport.interact()
+                        Thread.sleep(800)
+                        if (action == "DIG") {
+                            MotionSupport.interact()
+                            Thread.sleep(800)
+                        }
+                    }
+                    "INTERACT" -> {
+                        MotionSupport.interact(holdMs = 120)
+                        Thread.sleep(600)
+                    }
+                }
+            }
+            MotionSupport.releaseJoystick()
+            MotionSupport.resetSprintState()
+            Ln.i("MaaRunner: MapNavigate [$nodeName] path done (${path.size} steps)")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: MapNavigate error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** 读全局滑索偏好（MapNavigatorZiplinePreference.attach.zipline）；auto/true→true */
+    private fun readZiplinePreference(lib: MaaFrameworkLibrary, context: Pointer): Boolean {
+        return try {
+            val nodeJson = nodeDefinitionJson(lib, context, "MapNavigatorZiplinePreference") ?: return true
+            val attach = Json.parseToJsonElement(nodeJson).jsonObject["attach"]?.jsonObject
+            attach?.get("zipline")?.jsonPrimitive?.contentOrNull != "false"
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    /**
+     * AutoDeliveryResolveDepotAction：从任务详情 OCR 的区域文本匹配仓储点，
+     * 生成对应的导航路线 override（对齐上游同名 go action，走路/滑索二选一）。
+     */
+    private val resolveDepotCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        try {
+            val p = motionParam(customActionParam)
+            // 区域文本优先取参数显式传入，否则用当前节点 reco detail 的 OCR 文本
+            val areaText = p["area_text"]?.jsonPrimitive?.contentOrNull
+                ?: selectOcrText(null, nodeDefinitionJson(lib, context, nodeName))
+                ?: throw AutoDeliverySupport.ResolveException("区域 OCR 文本缺失")
+            val (area, match) = AutoDeliverySupport.resolveArea(areaText)
+            val route = AutoDeliverySupport.depotOf(area.depotId)
+            // zip 优先取 action 参数，其次读全局滑索偏好节点（auto→true）
+            val zip = p["zip"]?.jsonPrimitive?.booleanOrNull ?: readZiplinePreference(lib, context)
+            if (route.ziplineOnly && !zip) {
+                throw AutoDeliverySupport.ResolveException("仓储「${route.nameZh}」只能经滑索抵达，请开启滑索偏好")
+            }
+            lib.MaaContextOverridePipeline(
+                context,
+                AutoDeliverySupport.depotNavigationOverride(route, zip).toString(),
+            )
+            Ln.i("MaaRunner: AutoDeliveryResolveDepot [$nodeName] area='${area.id}' sim=%.3f depot='${route.id}' zip=$zip".format(match.similarity))
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: AutoDeliveryResolveDepot error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * AutoDeliveryResolveDestinationAction：OCR 目标文本（或参数指定 destination_id）
+     * 匹配终点，生成导航路线 override。
+     */
+    private val resolveDestinationCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        try {
+            val p = motionParam(customActionParam)
+            val destText = p["destination_text"]?.jsonPrimitive?.contentOrNull
+                ?: selectOcrText(null, nodeDefinitionJson(lib, context, nodeName))
+                ?: throw AutoDeliverySupport.ResolveException("目标 OCR 文本缺失")
+            val (dest, match) = AutoDeliverySupport.resolveDestination(destText)
+            val zip = p["zip"]?.jsonPrimitive?.booleanOrNull ?: readZiplinePreference(lib, context)
+            if (dest.ziplineOnly && !zip) {
+                throw AutoDeliverySupport.ResolveException("终点「${dest.nameTexts.firstOrNull()}」只能经滑索抵达，请开启滑索偏好")
+            }
+            lib.MaaContextOverridePipeline(
+                context,
+                AutoDeliverySupport.destinationNavigationOverride(dest, zip).toString(),
+            )
+            Ln.i("MaaRunner: AutoDeliveryResolveDestination [$nodeName] dest='${dest.id}' sim=%.3f zip=$zip".format(match.similarity))
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: AutoDeliveryResolveDestination error on node=$nodeName", t)
             0
         }
     }
@@ -1495,6 +1824,8 @@ class MaaRunner(private val agentHost: AgentHost) {
 
         if (resource == null || loadedResourcePaths != payload.resourcePaths) {
             releaseResource(lib)
+            // 操控类支持数据：送货目录从 APK 内 assets 读取（data/** 打包白名单已带入）
+            loadDeliveryCatalogFromApk(payload.apkPath)
             val res = lib.MaaResourceCreate() ?: return "MaaResourceCreate 失败"
             lib.MaaResourceAddSink(res, eventSink, null)
             registerCustomActions(lib, res)
@@ -1767,6 +2098,21 @@ class MaaRunner(private val agentHost: AgentHost) {
     /** 包一层后的回调必须被强引用，否则 JNA 侧拿到的函数指针会被 GC 回收 */
     private val callbackKeepAlive = mutableListOf<Any>()
 
+    /** 从 APK 本体读取送货目录；读不到时留空，Resolve 动作会在用到时报清晰错误 */
+    private fun loadDeliveryCatalogFromApk(apkPath: String) {
+        if (apkPath.isBlank()) return
+        try {
+            java.util.zip.ZipFile(apkPath).use { zip ->
+                val entry = zip.getEntry("assets/data/AutoDelivery/catalog.json") ?: return
+                val text = zip.getInputStream(entry).bufferedReader().use { it.readText() }
+                AutoDeliverySupport.ensureLoaded(text)
+                Ln.i("MaaRunner: delivery catalog loaded (${text.length} bytes)")
+            }
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: load delivery catalog failed: ${t.message}")
+        }
+    }
+
     private fun registerCustomActions(lib: MaaFrameworkLibrary, res: Pointer) {
         registeredCustomActions.clear()
         registeredCustomRecognitions.clear()
@@ -1794,6 +2140,16 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
 
         regAction("SubTask", subTaskCallback)
+        regAction("AutoDeliveryResolveDepotAction", resolveDepotCallback)
+        regAction("AutoDeliveryResolveDestinationAction", resolveDestinationCallback)
+        regAction("CharacterControllerYawDeltaAction", yawDeltaCallback)
+        regAction("CharacterControllerPitchDeltaAction", pitchDeltaCallback)
+        regAction("CharacterControllerForwardAxisAction", forwardAxisCallback)
+        regAction("CharacterControllerRelativeMoveAction", relativeMoveCallback)
+        regAction("CharacterMoveToTargetAction", moveToTargetCallback)
+        regAction("CharacterMoveToTargetNotFoundAction", moveToTargetNotFoundCallback)
+        regAction("CharacterSearchAction", characterSearchCallback)
+        regAction("MapNavigateAction", mapNavigateCallback)
         regAction("ClearHitCount", clearHitCountCallback)
         regAction("FalseAction", falseActionCallback)
         regAction("PostStop", postStopCallback)
@@ -1816,8 +2172,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             "SyncItemData",
             "UpdateItemQuantity",
             "DeliveryJobsResolveOngoingDepotAction",
-            "AutoDeliveryResolveDepotAction",
-            "AutoDeliveryResolveDestinationAction",
+            // AutoDeliveryResolveDepot/Destination 不在此列：已注册为真实实现
             "AutoStockpile.ReconcileDecision",
             "AutoStockStapleQuantityControlAction",
             "BetterSliding",
@@ -1843,13 +2198,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             "BatchAddFriendsUIDLoopTopAction",
             "BatchAddFriendsUIDOnAddAction",
             "BatchAddFriendsUIDOnEmptyAction",
-            "CharacterControllerForwardAxisAction",
-            "CharacterControllerPitchDeltaAction",
-            "CharacterControllerRelativeMoveAction",
-            "CharacterControllerYawDeltaAction",
-            "CharacterMoveToTargetAction",
-            "CharacterMoveToTargetNotFoundAction",
-            "CharacterSearchAction",
+            // CharacterController*/MapNavigateAction 不在此列：已注册为真实实现
             "FocusOCRAction",
             "FailureCollectorFinish",
             "FailureCollectorReset",
@@ -1857,7 +2206,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             "ImportBluePrintsEnterCodeAction",
             "ImportBluePrintsFinishAction",
             "ImportBluePrintsInitTextAction",
-            "MapNavigateAction",
+
             "OutpostTradingLocationPlan",
             "OutpostTradingOperatorSession",
             // OutpostTradingPrioritySession 不在此列：已显式注册为 outpostPrioritySessionCallback

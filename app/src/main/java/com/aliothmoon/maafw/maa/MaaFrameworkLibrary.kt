@@ -126,6 +126,28 @@ interface MaaFrameworkLibrary : Library {
         duration: Int,
     ): Long
 
+    /** contact = 手指 id；AndroidNativeControlUnit 直接注入输入事件，多指不冲突 */
+    fun MaaControllerPostTouchDown(
+        ctrl: Pointer?,
+        contact: Int,
+        x: Int,
+        y: Int,
+        pressure: Int,
+    ): Long
+
+    fun MaaControllerPostTouchMove(
+        ctrl: Pointer?,
+        contact: Int,
+        x: Int,
+        y: Int,
+        pressure: Int,
+    ): Long
+
+    fun MaaControllerPostTouchUp(
+        ctrl: Pointer?,
+        contact: Int,
+    ): Long
+
     fun MaaControllerPostScreencap(ctrl: Pointer?): Long
 
     fun MaaControllerWait(ctrl: Pointer?, id: Long): Int
