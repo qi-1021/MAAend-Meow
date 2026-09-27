@@ -125,6 +125,20 @@ jobs:
             ./gradlew assembleDebug --stacktrace
           fi
 
+      # 单测不进 assemble，但决策逻辑（据点/囤货选品、送达目录匹配）靠它锁住，
+      # assemble 绿不代表逻辑对，所以单独跑一步，别让单测悄悄烂掉
+      - name: Run unit tests
+        run: |
+          chmod +x ./gradlew
+          # `test` 是生命周期任务，比写死 testReleaseUnitTest 抗 AGP 改名；
+          # 万一 AGP 又改了名字，把真实任务名打出来，别只留一句 not found
+          ./gradlew test --stacktrace || {
+            echo "::group::available test tasks"
+            ./gradlew :app:tasks --all --console=plain | grep -iE "test" || true
+            echo "::endgroup::"
+            exit 1
+          }
+
       - name: Prepare APK Output
         id: apk_prep
         run: |
