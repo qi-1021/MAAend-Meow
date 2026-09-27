@@ -31,6 +31,9 @@ open class FakePrivilegedService : RemoteService {
         private set
     var stopTargetAppCount: Int = 0
         private set
+    var startTargetAppPackages: MutableList<String?> = mutableListOf()
+        private set
+    var startTargetAppResult: Boolean = true
 
     var runnerCallback: IMaaRunnerCallback? = null
         private set
@@ -57,6 +60,11 @@ open class FakePrivilegedService : RemoteService {
     override fun stopTargetApp(): Boolean {
         stopTargetAppCount++
         return true
+    }
+
+    override fun startTargetApp(packageName: String?): Boolean {
+        startTargetAppPackages += packageName
+        return startTargetAppResult
     }
 
     override fun isScreenOn(): Boolean = screenOn
