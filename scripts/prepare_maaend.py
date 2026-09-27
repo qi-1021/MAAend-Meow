@@ -390,6 +390,116 @@ def override_rigid_template_nodes():
         log(f"Warning: failed to override rigid template nodes: {e}")
 
 
+def apply_mobile_resilience_patches():
+    """
+    移动端鲁棒性补丁：
+    1. AutoDelivery 任务缺失节点：从 FalseAction 失败改为 DoNothing 正常收尾。
+       任务列表被剧情任务（如钟鸣人归）占位时属正常游戏状态，不该整任务失败。
+    2. ProtocolSpace 索引页签切换：加 on_error 单次重试（转场/坏帧导致 OCR 落空时兜底）。
+    """
+    common = ASSETS_ROOT / "resource" / "pipeline" / "AutoDelivery" / "Common.json"
+    if common.is_file():
+        try:
+            data = json.loads(strip_json_comments(common.read_text(encoding="utf-8")))
+            node = data.get("AutoDeliveryDeliveryMissionNotFound")
+            if isinstance(node, dict):
+                node["desc"] = "任务列表已经滑到底部但仍未找到送货任务：视为本轮无可送任务，正常收尾而非整任务失败"
+                node["action"] = "DoNothing"
+                node.pop("custom_action", None)
+                node["focus"] = {
+                    "Node.Recognition.Succeeded": "未找到可接取的送货任务（可能被剧情任务占用），跳过"
+                }
+                common.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+                log("Patched AutoDeliveryDeliveryMissionNotFound to graceful skip.")
+        except Exception as e:
+            log(f"Warning: failed to patch AutoDelivery mission-not-found: {e}")
+
+    manual = ASSETS_ROOT / "resource" / "pipeline" / "ProtocolSpace" / "OperationalManual.json"
+    if manual.is_file():
+        try:
+            data = json.loads(strip_json_comments(manual.read_text(encoding="utf-8")))
+            node = data.get("ProtocolSpaceOperationalManualSwitchIndexTab")
+            retry_name = "ProtocolSpaceOperationalManualSwitchIndexTabRetry"
+            if isinstance(node, dict) and retry_name not in data:
+                node["on_error"] = [retry_name]
+                data[retry_name] = {
+                    "desc": "索引页签切换失败后的单次重试（多为转场坏帧/遮挡；max_hit 防死循环）",
+                    "recognition": "DirectHit",
+                    "max_hit": 1,
+                    "pre_delay": 0,
+                    "action": "DoNothing",
+                    "post_delay": 1500,
+                    "rate_limit": 0,
+                    "next": ["ProtocolSpaceOperationalManualSwitchIndexTab"],
+                }
+                manual.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+                log("Patched ProtocolSpace index-tab switch with on_error retry.")
+        except Exception as e:
+            log(f"Warning: failed to patch ProtocolSpace index-tab retry: {e}")
+
+
+def apply_outpost_trading_arbitrage():
+    """
+    低买高卖（自动套利）：给据点交易加 Arbitrage 选品策略档。
+    买侧由 OutpostTradingConfigureSelectionStrategy(strategy=price) 驱动，
+    Android 侧 MaaRunner 回调按各据点基础单价升序重排候选（见 OutpostData.unitPriceByLocation）。
+    """
+    tasks_file = ASSETS_ROOT / "tasks" / "OutpostTrading.json"
+    if not tasks_file.is_file():
+        return
+    try:
+        data = json.loads(strip_json_comments(tasks_file.read_text(encoding="utf-8")))
+        modified = False
+        strategy_cases = data.get("option", {}).get("SellProductSelectionStrategy", {}).get("cases")
+        if isinstance(strategy_cases, list) and all(c.get("name") != "Arbitrage" for c in strategy_cases if isinstance(c, dict)):
+            strategy_cases.append({
+                "name": "Arbitrage",
+                "label": "$task.OutpostTrading.SelectionStrategyArbitrage",
+                "description": "$task.OutpostTrading.SelectionStrategyArbitrageDescription",
+                "pipeline_override": {
+                    "OutpostTradingConfigureSelectionStrategy": {
+                        "custom_action_param": {
+                            "operation": "configure_strategy",
+                            "strategy": "price"
+                        }
+                    }
+                },
+            })
+            modified = True
+        if modified:
+            tasks_file.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+            log("Added OutpostTrading Arbitrage selection strategy.")
+    except Exception as e:
+        log(f"Warning: failed to add arbitrage strategy: {e}")
+
+    # i18n 标签（缺哪个语言补哪个，不覆盖上游已有词条）
+    labels = {
+        "zh_cn": ("低买高卖（自动套利）", "买相对价格最低的货，卖相对价格最高的货：按各据点基础单价排序选品，低买高卖赚跨据点价差"),
+        "zh_tw": ("低買高賣（自動套利）", "買相對價格最低的貨，賣相對價格最高的貨：按各據點基礎單價排序選品，低買高賣賺跨據點價差"),
+        "en_us": ("Buy Low, Sell High (Auto Arbitrage)", "Buy the relatively cheapest goods, sell the relatively priciest: ranks candidates by base unit price per outpost to profit from cross-outpost spreads"),
+        "ja_jp": ("安く買って高く売る（自動アービトラージ）", "相対的に最も安い品を買い、最も高い品を売る：拠点ごとの基本単価で候補を並べ、拠点間の価格差で利益を得る"),
+        "ko_kr": ("싸게 사서 비싸게 팔기 (자동 아비트라지)", "상대적으로 가장 싼 물건을 사서 가장 비싼 물건을 팝니다: 거점별 기본 단가로 후보를 정렬해 거점 간 가격 차이로 수익을 냅니다"),
+    }
+    for lang, (label, desc) in labels.items():
+        loc = ASSETS_ROOT / "locales" / "interface" / f"{lang}.json"
+        if not loc.is_file():
+            continue
+        try:
+            ldata = json.loads(loc.read_text(encoding="utf-8"))
+            changed = False
+            for key, value in (
+                ("task.OutpostTrading.SelectionStrategyArbitrage", label),
+                ("task.OutpostTrading.SelectionStrategyArbitrageDescription", desc),
+            ):
+                if key not in ldata:
+                    ldata[key] = value
+                    changed = True
+            if changed:
+                loc.write_text(json.dumps(ldata, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+        except Exception as e:
+            log(f"Warning: failed to add arbitrage labels for {lang}: {e}")
+
+
 def main():
     log("Starting MAAend Android preparation...")
     ensure_maaend_submodule()
@@ -402,6 +512,8 @@ def main():
     enhance_opengame_pipeline()
     tag_unimplemented_tasks()
     override_rigid_template_nodes()
+    apply_mobile_resilience_patches()
+    apply_outpost_trading_arbitrage()
     log("Preparation complete!")
 
 
