@@ -923,7 +923,143 @@ class MaaRunner(private val agentHost: AgentHost) {
             }
             1
         } catch (t: Throwable) {
-            Ln.e("MaaRunner: AutoSellItemExecuteItemTaskAction error on node=$nodeName", t)
+                Ln.e("MaaRunner: AutoSellItemExecuteItemTaskAction error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** 据点各 location 已尝试过的货物名（select 去重；exhausted 确认后清空） */
+    private val outpostTried = ConcurrentHashMap<String, MutableSet<String>>()
+
+    /** 用临时 OCR 探针节点识别指定区域，返回 (文本, 框) */
+    private fun ocrProbe(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        image: Pointer,
+        roiBox: IntArray?,
+    ): List<GoodsSupport.OcrItem> {
+        val roiPart = if (roiBox != null && roiBox[2] > 0 && roiBox[3] > 0) {
+            ",\"roi\":[${roiBox[0]},${roiBox[1]},${roiBox[2]},${roiBox[3]}]"
+        } else ""
+        val override = "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\"$roiPart,\"only_rec\":true}}"
+        lib.MaaContextOverridePipeline(context, override)
+        val res = runRecognitionOnce(lib, context, image, "__GoodsOcrProbe") ?: return emptyList()
+        if (!res.hit) return emptyList()
+        return GoodsSupport.collectOcrItems(res.detailJson)
+    }
+
+    /** 对齐上游 OutpostTradingPriorityItem：按 location 贪心选首个未尝试货物 */
+    private val outpostTradingPriorityItemCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, roi, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val p = Json.parseToJsonElement(customRecognitionParam.orEmpty()).jsonObject
+            val location = p["location"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val result = p["result"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val names = OutpostData.locationItems[location]
+            if (location.isBlank() || names.isNullOrEmpty()) {
+                Ln.w("MaaRunner: OutpostTradingPriorityItem unknown location='$location' on node=$nodeName")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val r = getBoxRect(lib, roi)
+            val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h))
+            if (result == "exhausted") {
+                val tried = outpostTried[location].orEmpty()
+                val m = GoodsSupport.findFirstMatch(items, names, tried)
+                if (m == null) {
+                    outpostTried.remove(location)
+                    Ln.i("MaaRunner: OutpostTradingPriorityItem [$nodeName] location=$location exhausted")
+                    if (outBox != null) lib.MaaRectSet(outBox, r.x, r.y, r.w, r.h)
+                    return@MaaCustomRecognitionCallback 1
+                }
+                return@MaaCustomRecognitionCallback 0
+            }
+            val tried = outpostTried.getOrPut(location) { ConcurrentHashMap.newKeySet() }
+            val m = GoodsSupport.findFirstMatch(items, names, tried)
+                ?: return@MaaCustomRecognitionCallback 0
+            GoodsSupport.standardName(m.text, names)?.let { tried += it }
+            if (outBox != null && m.box != null) {
+                lib.MaaRectSet(outBox, m.box[0], m.box[1], m.box[2], m.box[3])
+            }
+            Ln.i("MaaRunner: OutpostTradingPriorityItem [$nodeName] location=$location select='${m.text}'")
+            1
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: OutpostTradingPriorityItem error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** OutpostTradingCurrentGoods：返回当前可见的首个货物框 */
+    private val outpostTradingCurrentGoodsCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, roi, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val p = runCatching {
+                Json.parseToJsonElement(customRecognitionParam.orEmpty()).jsonObject
+            }.getOrNull()
+            val location = p?.get("location")?.jsonPrimitive?.contentOrNull.orEmpty()
+            val names = if (location.isNotBlank()) {
+                OutpostData.locationItems[location]
+            } else {
+                OutpostData.locationItems.values.flatten().distinct()
+            } ?: return@MaaCustomRecognitionCallback 0
+            val r = getBoxRect(lib, roi)
+            val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h))
+            val m = GoodsSupport.findFirstMatch(items, names)
+                ?: return@MaaCustomRecognitionCallback 0
+            if (outBox != null && m.box != null) {
+                lib.MaaRectSet(outBox, m.box[0], m.box[1], m.box[2], m.box[3])
+            }
+            Ln.i("MaaRunner: OutpostTradingCurrentGoods [$nodeName] '${m.text}'")
+            1
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: OutpostTradingCurrentGoods error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** 对齐上游 AutoStockpile.SelectItem：按货组名 OCR 查找并返回框 */
+    private val autoStockpileSelectItemCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, box, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        try {
+            // 参数里若带目标名则优先，否则在全部货组名里找
+            val want = runCatching {
+                val o = Json.parseToJsonElement(customActionParam.orEmpty()).jsonObject
+                o["item_name"]?.jsonPrimitive?.contentOrNull
+                    ?: o["name"]?.jsonPrimitive?.contentOrNull
+                    ?: o["target"]?.jsonPrimitive?.contentOrNull
+            }.getOrNull().orEmpty()
+            val names = if (want.isNotBlank()) listOf(want) else GoodsSupport.autoStockGroups
+            val r = getBoxRect(lib, box)
+            // 用当前帧做 OCR（box 为空则全图）；先刷一帧避免缓存过期
+            val ctrl = controller ?: return@MaaCustomActionCallback 0
+            val capId = lib.MaaControllerPostScreencap(ctrl)
+            if (capId > 0) lib.MaaControllerWait(ctrl, capId)
+            val imgBuf = lib.MaaImageBufferCreate() ?: return@MaaCustomActionCallback 0
+            try {
+                if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return@MaaCustomActionCallback 0
+                if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return@MaaCustomActionCallback 0
+                val roiBox = if (r.w > 0 && r.h > 0) intArrayOf(r.x, r.y, r.w, r.h) else null
+                val items = ocrProbe(lib, context, imgBuf, roiBox)
+                val m = GoodsSupport.findFirstMatch(items, names)
+                    ?: return@MaaCustomActionCallback 0
+                val cx = (m.box!![0] + m.box[2] / 2).coerceIn(0, 4000)
+                val cy = (m.box[1] + m.box[3] / 2).coerceIn(0, 4000)
+                Ln.i("MaaRunner: AutoStockpile.SelectItem [$nodeName] '${m.text}' click ($cx,$cy)")
+                val clickBox = lib.MaaRectCreate()
+                try {
+                    if (clickBox != null) lib.MaaRectSet(clickBox, cx, cy, 1, 1)
+                    lib.MaaContextRunAction(context, "__AutoStockpileClickInner", "{\"__AutoStockpileClickInner\":{\"action\":\"Click\"}}", clickBox ?: box, "")
+                } finally {
+                    if (clickBox != null) lib.MaaRectDestroy(clickBox)
+                }
+                1
+            } finally {
+                lib.MaaImageBufferDestroy(imgBuf)
+            }
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: AutoStockpile.SelectItem error on node=$nodeName", t)
             0
         }
     }
@@ -1500,6 +1636,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         regAction("PipelineOverride", pipelineOverrideCallback)
         regAction("AttachToExpectedRegexAction", attachToExpectedRegexCallback)
         regAction("AutoSellItemExecuteItemTaskAction", autoSellItemExecuteItemTaskActionCallback)
+        regAction("AutoStockpile.SelectItem", autoStockpileSelectItemCallback)
 
         val otherActions = listOf(
             "CreditShoppingScanItemAction",
@@ -1509,7 +1646,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "DeliveryJobsResolveOngoingDepotAction",
             "AutoDeliveryResolveDepotAction",
             "AutoDeliveryResolveDestinationAction",
-            "AutoStockpile.SelectItem",
             "AutoStockpile.ReconcileDecision",
             "AutoStockStapleQuantityControlAction",
             "BetterSliding",
@@ -1587,6 +1723,8 @@ class MaaRunner(private val agentHost: AgentHost) {
         regReco("ItemDataReady", noopTrueRecognitionCallback)
         regReco("AutoSellScanItemRecognition", autoSellScanItemRecognitionCallback)
         regReco("ExpressionRecognition", expressionRecognitionCallback)
+        regReco("OutpostTradingPriorityItem", outpostTradingPriorityItemCallback)
+        regReco("OutpostTradingCurrentGoods", outpostTradingCurrentGoodsCallback)
 
         val falseRecognitions = listOf(
             "ImageCheckNotPassedRecognition",
@@ -1607,13 +1745,11 @@ class MaaRunner(private val agentHost: AgentHost) {
             "MapFind",
             "MapLocateAssertLocation",
             "OutpostTradingCurrentBestOperator",
-            "OutpostTradingCurrentGoods",
             "OutpostTradingCurrentOperatorUncached",
             "OutpostTradingOperatorCacheReady",
             "OutpostTradingOperatorConflict",
             "OutpostTradingOperatorListBottom",
             "OutpostTradingOperatorScanOutcome",
-            "OutpostTradingPriorityItem",
             "OutpostTradingSelectBestOperator",
             "PuzzleRecognition",
             "ReceptionRoomExchangeCountdownWithinThresholdRecognition",
