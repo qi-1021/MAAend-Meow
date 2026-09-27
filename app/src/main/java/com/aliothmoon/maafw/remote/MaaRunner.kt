@@ -816,7 +816,7 @@ class MaaRunner(private val agentHost: AgentHost) {
      */
     private val resolveDepotCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
-        if (context == null) return@MaaCustomActionCallback 0
+        if (context == null || nodeName == null) return@MaaCustomActionCallback 0
         try {
             val p = motionParam(customActionParam)
             // 区域文本优先取参数显式传入，否则用当前节点定义里的 OCR expected 文本
@@ -850,7 +850,7 @@ class MaaRunner(private val agentHost: AgentHost) {
      */
     private val resolveDestinationCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
-        if (context == null) return@MaaCustomActionCallback 0
+        if (context == null || nodeName == null) return@MaaCustomActionCallback 0
         try {
             val p = motionParam(customActionParam)
             val destText = p["destination_text"]?.jsonPrimitive?.contentOrNull
