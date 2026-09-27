@@ -63,7 +63,7 @@ object AutoDeliverySupport {
     private val destinations = mutableListOf<Destination>()
     private val areas = mutableListOf<Area>()
 
-    /** 从 APK assets 里的 data/AutoDelivery/catalog.json 加载（由打包白名单 data/** 带入） */
+    /** 从 APK assets 里的 data/AutoDelivery/catalog.json 加载（打包白名单 data/ 目录已带入） */
     fun ensureLoaded(catalogJsonText: String) {
         if (loaded) return
         synchronized(this) {

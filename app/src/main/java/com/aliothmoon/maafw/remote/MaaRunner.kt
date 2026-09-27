@@ -24,6 +24,7 @@ import com.sun.jna.Native
 import com.sun.jna.Pointer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
@@ -47,13 +48,6 @@ import java.util.concurrent.atomic.AtomicReference
  * 单工作线程串行：MaaFramework 的一个 Tasker 同时只跑一轮
  */
 class MaaRunner(private val agentHost: AgentHost) {
-
-    companion object {
-        /** MotionSupport 等外部单例需要拿 controller 发触摸/转向事件（单实例 runner） */
-        @Volatile
-        var currentController: Pointer? = null
-            private set
-    }
 
     private val worker = Executors.newSingleThreadExecutor { r ->
         Thread(r, "maa-runner").apply { isDaemon = true }
@@ -1824,7 +1818,7 @@ class MaaRunner(private val agentHost: AgentHost) {
 
         if (resource == null || loadedResourcePaths != payload.resourcePaths) {
             releaseResource(lib)
-            // 操控类支持数据：送货目录从 APK 内 assets 读取（data/** 打包白名单已带入）
+            // 操控类支持数据：送货目录从 APK 内 assets 读取（data/ 目录打包白名单已带入）
             loadDeliveryCatalogFromApk(payload.apkPath)
             val res = lib.MaaResourceCreate() ?: return "MaaResourceCreate 失败"
             lib.MaaResourceAddSink(res, eventSink, null)
@@ -2324,7 +2318,12 @@ class MaaRunner(private val agentHost: AgentHost) {
         else -> "invalid($status)"
     }
 
-    private companion object {
+    internal companion object {
+        /** MotionSupport 等外部单例需要拿 controller 发触摸/转向事件（单实例 runner） */
+        @Volatile
+        var currentController: Pointer? = null
+            private set
+
         /** MaaInvalidId */
         const val INVALID_ID = 0L
         const val BRIDGE_LIBRARY_NAME = "libbridge.so"
