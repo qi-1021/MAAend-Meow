@@ -13,6 +13,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -76,12 +77,12 @@ class SupplementPackInstaller(
     )
 
     data class UiState(
-        val manifest: SupplementPack.Manifest?,
+        val manifest: SupplementPack.Manifest? = null,
         /** manifest?.source?.commit.orEmpty()，给界面显示来源版本 */
-        val sourceCommit: String,
-        val packs: List<PackState>,
+        val sourceCommit: String = "",
+        val packs: List<PackState> = emptyList(),
         /** 已安装包占用之和 */
-        val totalInstalledBytes: Long,
+        val totalInstalledBytes: Long = 0L,
     )
 
     private val _state = MutableStateFlow(UiState(null, "", emptyList(), 0L))
