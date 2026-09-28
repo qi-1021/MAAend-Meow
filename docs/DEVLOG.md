@@ -15,7 +15,7 @@
 ### 做了什么
 
 MapNavigator 是 18934 行 C++，还依赖 Navmesh(11757) + MapLocator(4859) + Zipline(1562)，
-且 BNAV 寻路数据不在本 checkout。所以按已产出的分期方案做 **P1（参数与动作编排，不含定位）**。
+且 BNAV/ONNX 资产不在本 checkout（可从公开仓库下载，见下文更正）。所以先按已产出的分期方案做 **P1（参数与动作编排，不含定位）**。
 
 **1. `MapNaviParam`：完整参数解析（44 条测试）**
 
@@ -60,14 +60,39 @@ MapNavigator 是 18934 行 C++，还依赖 Navmesh(11757) + MapLocator(4859) + Z
 4. **JUnit 桩要补齐重载**：`assertEquals(double, double, double)` 与 `@After`/`@Before`
    都不是"顺手就有"的，缺了会报 unresolved。
 
-### 未做
+### 未做（**并更正一处此前的错误判断**）
 
-| 项 | 规模 | 原因 |
+此前我把 P2/P3 记作「被不在 checkout 的资产阻塞」。**这个说法不准确**——资产是可取的，
+只是没有任何构建步骤去下载它们。实际情况（已用匿名 HTTP 206 实测确认可达）：
+
+| 资产 | 大小 | 用途 |
 |---|---|---|
-| MapNavigator P2（定位） | 2.5k–4k 行 | 需要 MapLocator(4859) + ONNX 模型 + 底图资产，且资产不在本 checkout |
-| MapNavigator P3（真寻路） | 6.5k–10k 行 | 需要 Navmesh(11757)，且 BNAV 数据来自 MAAend-AI 子模块（本 checkout 没有） |
-| MapNavigator P5（滑索） | 2.2k–3.8k 行 | 上游对触屏后端直接禁用滑索（没有独立鼠标左右键），优先级最低 |
-| `CaptureUid` | ~420 行 Go | 纯遥测 + 供 cpp-algo 读账号标识；无消费者、无功能影响 |
+| `MaaEnd-AI/map/navmesh/base.nav.gz` | **98 MB** | P3 寻路（BNAV） |
+| `.../base.fields.nav.gz` + `base.occluder.gz` | 22 + 20 MB | P3 清洗网格 / 遮挡 |
+| `MaaEnd-AI/map/cls.onnx` | **23 MB** | P2 区域分类 |
+| `.../map/cameraorientation/preprocess.onnx` + `polar_with_ref.onnx` | 254 KB + 390 KB | P2 镜头朝向 |
+| `.../map/tile_mapping.json` | 55 KB | P2 底图切片 |
+| `MaaEnd-AI/detect/AutoFight/autofightv12.onnx` | **38 MB** | 自动战斗 |
+| `MaaEnd-AI/detect/ProtocolSpace/best.onnx` | **10 MB** | 协议空间 |
+
+仓库：`MaaEnd/MaaEnd-AI`（公开，默认分支 main，约 1.6 GB）。
+本 checkout 的 `assets/resource/model/` 下**只有 OCR 模型**（`det.onnx` / `rec.onnx`），
+其余一个都没有——而 `prepare_maaend.py` 已经从 `MaaCommonAssets` 下载 OCR 模型，
+所以「构建期下载」这个模式是现成的，照做即可。
+
+引用出处：`upstream/maaend/tools/pipeline-generate/data/scripts/navzone_utils.py:36-41`
+（`NAV_REMOTE_TEMPLATE` / `NAV_SUBMODULE_API`）。
+
+**所以 P2/P3 不是"能不能写"的问题，是"要不要把这些资产打进去"的问题**：
+P2+P3 合计约 163 MB，再加两个检测模型约 48 MB。这会把 APK 体积推高数倍，
+是需要产品决策的取舍，不是纯技术问题——所以没有擅自加进构建。
+
+| 项 | 状态 |
+|---|---|
+| MapNavigator P2（定位） | **可做**：需下载 cls.onnx + cameraorientation（≈23.6 MB）+ 底图资产 |
+| MapNavigator P3（真寻路） | **可做**：需下载 base.nav.gz 三件套（≈140 MB） |
+| 自动战斗 / 协议空间模型 | **可做**：需下载 autofightv12.onnx / best.onnx（≈48 MB） |
+| `CaptureUid` | ~420 行 Go；纯遥测，无消费者、无功能影响 |
 
 ---
 
@@ -127,7 +152,7 @@ MaaRunner 侧只做适配：七个识别 + 一个 action 从 noop 换成真实�
 
 | 项 | 规模 | 原因 |
 |---|---|---|
-| MapNavigator 完整移植 | 18934 行 C++ + Navmesh 11757 + MapLocator 4859 + Zipline 1562 | 已产出分期方案；BNAV 寻路数据不在本 checkout（来自 MAAend-AI 子模块）。P1（参数与动作编排，不含定位）约 1.2k–1.8k 行可先交付 |
+| MapNavigator P2–P6 | 18934 行 C++ + Navmesh 11757 + MapLocator 4859 + Zipline 1562 | P1 已交付。P2/P3 的资产可从公开仓库 `MaaEnd/MaaEnd-AI` 下载（见本日 P1 条目的更正说明），但合计约 163 MB，需先定 APK 体积取舍 |
 | `CaptureUid` | ~420 行 Go | 纯遥测 + 供 cpp-algo 读账号标识；无消费者、无功能影响，且需真机验证 |
 
 ---
@@ -186,8 +211,8 @@ MaaRunner 侧只做适配：七个识别 + 一个 action 从 noop 换成真实�
 
 - operator 子系统：2967 行 Go，可移植（四层已完成）
 - MapNavigator：18934 行 C++，且还依赖 Navmesh(11757) + MapLocator(4859) + Zipline(1562)；
-  其 BNAV 寻路数据**不在本 checkout**（来自 MAAend-AI 子模块）。已产出分期方案，
-  P1（参数与动作编排，不含定位）约 1.2k–1.8k 行即可交付
+  其 BNAV 与 ONNX 资产不在本 checkout，但可从公开仓库 `MaaEnd/MaaEnd-AI` 下载
+  （详见本日 P1 条目的更正说明）。已产出分期方案，P1（参数与动作编排，不含定位）已交付
 - 顺带发现一个独立的真 bug：`mapNavigateCallback` 只处理 `JsonObject`，
   **数组路点被整段跳过**——而 `[x,y,"COLLECT"]` 是最高频形态（376 处）
 
