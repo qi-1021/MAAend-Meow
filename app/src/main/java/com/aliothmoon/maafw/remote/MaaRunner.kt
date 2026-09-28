@@ -3969,6 +3969,12 @@ class MaaRunner(private val agentHost: AgentHost) {
          */
         const val GOODS_COLOR_FILTER = "AutoStockpileGoodsFilter"
 
+        /**
+         * controller 配置里的 library_path 用裸名：bridge 已在本进程 System.loadLibrary 过，
+         * 控制单元按名 dlopen 才会命中同一份。名字必须与 NativeBridgeLib 初始化时一致。
+         */
+        const val BRIDGE_LIBRARY_NAME = "bridge"
+
         /** MotionSupport 等外部单例需要拿 controller 发触摸/转向事件（单实例 runner） */
         @Volatile
         var currentController: Pointer? = null
