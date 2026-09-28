@@ -8,6 +8,67 @@
 
 ---
 
+## 2026-09-28 · 据点交易「干员智能选择」（operator 子系统）纯逻辑层
+
+**状态**：纯逻辑四层完成，胶水层与剩余三层进行中。
+
+### 做了什么
+
+上游 `outposttrading/operator` 是 2967 行 Go + 391 行依赖包，负责「据点派驻哪个干员最优」。
+按既有分层模式（纯逻辑可本地单测 / JNA 只做胶水）拆成 Kotlin：
+
+| Kotlin | 移植自 | 行数 |
+|---|---|---|
+| `OperatorOcrMatch.kt` | `internal/ocrmatch/match.go` (171) | 110 |
+| `OperatorDataset.kt` | `internal/selectiondata/data.go` (220) + `operator/data.go` (248) | 290 |
+| `OperatorSelection.kt` | `operator/selection.go` (543) | 450 |
+| `OperatorCache.kt` | `operator/cache.go` (479) | 380 |
+
+测试 209 条（本批新增 53 条），本机与 CI 双通道验证。
+
+### 为什么
+
+当前 Android 侧这七个识别器/动作全是 stub（`MaaRunner.kt:2738-2744` 恒 false、
+`OutpostTradingOperatorSession` noop），实际后果不是「少个功能」而是**据点内的干员列表扫描
+永远到不了底、会一直滑**。同时 `OutpostTradingLocationPlan` noop 使据点计划缺 operator 字段。
+
+### 三处最容易写错、且错了只表现为「选人变了」的地方
+
+1. **DFS 的平局方向**：`buildRestoreAssignmentPlan` 每个据点的分支是
+   {分配任一候选} ∪ {跳过}，跳过分支必须排在候选循环**之后**，才能保证平局时
+   「新地区先锁定」。测试用一个「两据点抢同一人」的用例把它钉住。
+2. **字典序比较**：`isBetterRestorePlan` 是 覆盖数 → 沿用数 → 可复用数（大者优），
+   然后**只有据点集合相同时**才比总成本（小者优）；集合不同直接判否。
+   所以「平局保留先到者」是在比较函数里实现的，不是入口前置校验。
+3. **`OutpostProsperityMaxBonusTier` 的口径**：它不是「比较时取 max」，而是
+   「据点发展值已满、发展值词条失效后」的档位；用哪个由据点是否在
+   `outpostProsperityMaxLocations` 里决定，方向始终越小越好。
+
+### 另一个必须保留的语义：缓存里 nil 与空数组不是一回事
+
+`operators == null` = 从未扫描 / 已被判失效；`ids == []` = 扫过且该账号确实没有相关干员。
+把空数组当成「没缓存」，会让每轮任务都全量滚动列表且**永远选不出人**。
+测试同时覆盖了读取侧的分级容错（顶层坏 → 整份当不存在；单账号坏 → 只丢该账号）
+与写入侧的反向策略（先规范化再整份校验，任一账号非法则整份不写、旧文件保持原样）。
+
+### 数据来源（一条容易踩的坑）
+
+`selection_data.json` 经打包链路进的是 `assets/pi.zip`，App 解包到 `<externalFilesDir>/pi/`，
+所以运行时路径是 `projectRoot/data/OutpostTrading/selection_data.json`。
+**不要**照抄 `MaaRunner.loadDeliveryCatalogFromApk()` 的 `assets/data/...`——
+当前打包方式下 APK 根 assets 里没有散装 data 目录。
+
+### 已验证的规模判断
+
+- operator 子系统：2967 行 Go，可移植（四层已完成）
+- MapNavigator：18934 行 C++，且还依赖 Navmesh(11757) + MapLocator(4859) + Zipline(1562)；
+  其 BNAV 寻路数据**不在本 checkout**（来自 MAAend-AI 子模块）。已产出分期方案，
+  P1（参数与动作编排，不含定位）约 1.2k–1.8k 行即可交付
+- 顺带发现一个独立的真 bug：`mapNavigateCallback` 只处理 `JsonObject`，
+  **数组路点被整段跳过**——而 `[x,y,"COLLECT"]` 是最高频形态（376 处）
+
+---
+
 ## 2026-09-28 · 补齐三条功能链的共同阻塞点（BetterSliding / 稳定物资 / 执行周期）
 
 **提交**：`8f4d050`、`a97bffc`、`e174b9c`（均已推送，CI 三次全绿）
