@@ -162,7 +162,15 @@ def customize_maaend_metadata():
             if "import" in data and isinstance(data["import"], list):
                 data["import"] = [
                     item for item in data["import"]
-                    if item not in ["tasks/pretasks/GameSetting.json", "tasks/CloseGamePC.json"]
+                    if item not in [
+                        "tasks/pretasks/GameSetting.json",
+                        "tasks/CloseGamePC.json",
+                        # Keymap 是键盘快捷键（hotkey）配置：PiParser 在 Android 端
+                        # 明确不支持该类型（会报 error 并丢弃 option），而它的
+                        # global_option 引用因此悬空，再报一条 error。手机上本来也没有
+                        # 键盘，字段留着只会让加载产生 Error 诊断。
+                        "tasks/setting/Keymap.json",
+                    ]
                 ]
 
             # 暂时移除 agent 节点声明，因为纯 Pipeline 任务无需外挂 agent 即可在移动端原生执行
@@ -507,6 +515,54 @@ def apply_outpost_trading_arbitrage():
             log(f"Warning: failed to add arbitrage labels for {lang}: {e}")
 
 
+def patch_missing_upstream_i18n_keys():
+    """
+    补上游漏声明的 i18n key。
+
+    PI 引用了 `$task.BatchUseDetector.option.Times.input.error`（Times 输入框的校验
+    提示），但上游五种语言文件里都没有它——运行时会把 key 原文显示给用户。
+    已在 MaaEnd 仓库确认这是**上游遗漏**，不是我们同步滞后。
+
+    在这里补而不是改 submodule 里的语言文件：那些文件随上游同步整体覆盖，直接改会被冲掉。
+    """
+    missing = {
+        "task.BatchUseDetector.option.Times.input.error": {
+            "zh_cn": "请输入有效数字",
+            "zh_tw": "請輸入有效數字",
+            "en_us": "Enter a valid number",
+            "ja_jp": "有効な数値を入力してください",
+            "ko_kr": "유효한 숫자를 입력하세요",
+        },
+    }
+    locales_dir = ASSETS_ROOT / "locales" / "interface"
+    if not locales_dir.is_dir():
+        return
+    patched = 0
+    for lang in ("zh_cn", "zh_tw", "en_us", "ja_jp", "ko_kr"):
+        path = locales_dir / f"{lang}.json"
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(strip_json_comments(path.read_text(encoding="utf-8")))
+        except Exception as e:
+            log(f"Warning: failed to read {path.name}: {e}")
+            continue
+        modified = False
+        for key, by_lang in missing.items():
+            text = by_lang.get(lang)
+            if not text or key in data:
+                continue
+            data[key] = text
+            modified = True
+        if modified:
+            path.write_text(
+                json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            patched += 1
+    if patched:
+        log(f"Patched {patched} locale file(s) with upstream-missing i18n keys.")
+
+
 def main():
     log("Starting MAAend Android preparation...")
     ensure_maaend_submodule()
@@ -518,6 +574,7 @@ def main():
     enhance_presets_with_startup()
     enhance_opengame_pipeline()
     tag_unimplemented_tasks()
+    patch_missing_upstream_i18n_keys()
     override_rigid_template_nodes()
     apply_mobile_resilience_patches()
     apply_outpost_trading_arbitrage()
