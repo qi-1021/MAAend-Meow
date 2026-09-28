@@ -1,10 +1,15 @@
 name: Auto-Sync Upstream MAAend
 
+# 只在手动触发时运行。
+#
+# 原先挂了两条 cron（每天两次）自动检查上游、直接提交并触发打包，已移除：
+#   1. 上游一改，我们依赖的东西就可能跟着变——节点名、资产路径、语言文件的
+#      key。prepare_maaend.py 里那些补丁是**按名字**打的，上游改名后它们会
+#      静默失效：照样编得过、照样出包，只是行为悄悄变了。这类失败最难发现。
+#   2. 上游更新应该是有意识的行为：想要哪个特性，我们自己挑进来。
+#
+# 需要跟上游时手动跑这个 workflow，它照旧同步 + 提交；提交推送本身会触发构建。
 on:
-  schedule:
-    # 每天北京时间 10:00 与 22:00 自动检查上游更新
-    - cron: '0 2 * * *'
-    - cron: '0 14 * * *'
   workflow_dispatch:
     inputs:
       force_build:
@@ -44,6 +49,7 @@ jobs:
           python scripts/sync_upstream.py
 
       - name: Commit & Push Updates
+        id: push
         if: steps.sync.outputs.has_changes == 'true'
         env:
           SUMMARY: ${{ steps.sync.outputs.summary }}
@@ -57,13 +63,17 @@ jobs:
           if ! git diff --staged --quiet; then
             git commit -m "chore(auto-sync): ${SUMMARY}"
             git push origin main
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
             echo "[INFO] Successfully pushed upstream sync commit."
           else
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
             echo "[INFO] Working tree clean, nothing to commit."
           fi
 
+      # 只有「没推送任何东西」时才需要显式触发：build-apk 已经监听 main 的 push，
+      # 有推送时再显式触发一次会白白打两遍包。
       - name: Trigger APK Cloud Build
-        if: steps.sync.outputs.has_changes == 'true'
+        if: steps.sync.outputs.has_changes == 'true' && steps.push.outputs.pushed != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
