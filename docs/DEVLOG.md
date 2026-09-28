@@ -8,6 +8,67 @@
 
 ---
 
+## 2026-09-28 · 据点交易干员子系统完成 + MapNavigate 数组路点修复
+
+**提交**：`20f9b90`、`de39848`、`e225871`（均已推送，CI 全绿）
+
+### 做了什么
+
+**1. 干员选择子系统全部八层落地**
+
+| Kotlin | 移植自 | 说明 |
+|---|---|---|
+| `OperatorOcrMatch` | `internal/ocrmatch` (171) | 两层严格相等匹配 |
+| `OperatorDataset` | `selectiondata` (220) + `operator/data.go` (248) | 数据加载/校验/候选派生 |
+| `OperatorSelection` | `operator/selection.go` (543) | 分档/完美候选/偏好/DFS 全局分配 |
+| `OperatorCache` | `operator/cache.go` (479) | 快照持久化、分级容错、原子写 |
+| `OperatorMatching` | `operator/matching.go` (119) | 三种匹配 + 前缀噪声回退 |
+| `OperatorSession` | `operator/session.go` (413) | 任务级会话、7 种 operation |
+| `OperatorScan` | `operator/scan.go` (393) | 跨帧扫描状态机、OCR 交接槽 |
+| `OperatorRecognitions` | `recognition.go` (404) + `conflict.go` (174) | 六个识别 + 冲突识别 |
+| `OperatorRuntime` | — | 运行时聚合（数据/缓存/会话/扫描），不依赖 Android，可本地测 |
+
+MaaRunner 侧只做适配：七个识别 + 一个 action 从 noop 换成真实实现。
+
+**2. 修掉 MapNavigateAction 的一个静默 bug**
+
+上游路点有两种形态（对象与数组 `[x, y, "ACTION"?, strict?, "zone_id"?]`），
+而实现只处理 `JsonObject`，数组路点被 `continue` 整段跳过。
+数组是最高频写法——实测 376 处 COLLECT、322 处 NAVMESH、264 处 ZONE 都用它，
+**一个都没执行**，日志却照样打印「path done (N steps)」。
+
+### 为什么
+
+这七个识别是恒假、会话 action 是 noop。实际后果不只是「少个功能」：
+据点内的干员列表扫描（next 里含 `OperatorListBottom`）**永远到不了底、会一直滑**，
+而且 `OutpostTradingLocationPlan` 缺 operator 字段。
+
+### 怎么验的
+
+- 纯逻辑八层 → 本机反射执行 JUnit（新增 112 条，累计 277 条）
+- MaaRunner 接线 → CI 编译（`build-apk.yml` + `gradlew test`，两次推送两次绿）
+
+### 教训
+
+1. **`Ln` 依赖 `android.util.Log`**，所以引用它的类无法本地编译。
+   把日志改成可注入的 `var logger: (String) -> Unit = {}` 之后，
+   `OperatorRuntime` 这一层就保持可测——分层时「谁能碰 Android」要提前定死。
+2. **`?: fail(...)` 会推断出公共父类型**，导致 `val x = f() ?: fail(...)` 里
+   `x` 变成 `Any`。改成显式 `if (x == null) return fail(...)`。
+3. **我用 `replace` 全局改测试 fixture 时误伤了另一个测试**
+   （`host.currentItems = listOf(item("char_a"))` 被连带改成 `item("A")`）。
+   批量改测试要用更精确的锚点，或者改完逐条看差异。
+4. **JUnit 桩要补齐注解**：只桩 `@Test` 会在用到 `@After` 时报「unresolved reference」。
+
+### 未做
+
+| 项 | 规模 | 原因 |
+|---|---|---|
+| MapNavigator 完整移植 | 18934 行 C++ + Navmesh 11757 + MapLocator 4859 + Zipline 1562 | 已产出分期方案；BNAV 寻路数据不在本 checkout（来自 MAAend-AI 子模块）。P1（参数与动作编排，不含定位）约 1.2k–1.8k 行可先交付 |
+| `CaptureUid` | ~420 行 Go | 纯遥测 + 供 cpp-algo 读账号标识；无消费者、无功能影响，且需真机验证 |
+
+---
+
 ## 2026-09-28 · 据点交易「干员智能选择」（operator 子系统）纯逻辑层
 
 **状态**：纯逻辑四层完成，胶水层与剩余三层进行中。
