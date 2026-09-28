@@ -24,6 +24,7 @@ import com.sun.jna.Native
 import com.sun.jna.Pointer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -1237,21 +1238,20 @@ class MaaRunner(private val agentHost: AgentHost) {
             val path = p["path"]?.jsonArray.orEmpty()
             if (path.isEmpty()) return@MaaCustomActionCallback 1
             for (raw in path) {
-                val obj = raw as? JsonObject ?: continue
-                val action = obj["action"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                val step = parseMapNavigateStep(raw) ?: continue
+                val action = step.action
                 when (action) {
                     "ZONE" -> {
-                        val zoneId = obj["zone_id"]?.jsonPrimitive?.contentOrNull.orEmpty()
                         // 声明节点：等待画面稳定再继续（本实现无小地图定位校验）
                         MotionSupport.screencapFresh()
                         Thread.sleep(600)
-                        Ln.i("MaaRunner: MapNavigate [$nodeName] ZONE=$zoneId")
+                        Ln.i("MaaRunner: MapNavigate [$nodeName] ZONE=${step.zoneId}")
                     }
                     "HEADING" -> {
-                        val yaw = (obj["yaw"]?.jsonPrimitive?.doubleOrNull ?: 0.0).toInt()
-                        MotionSupport.yawDelta(yaw)
+                        MotionSupport.yawDelta(step.yaw)
                     }
-                    "NAVMESH", "RUN" -> {
+                    // 空 action 的裸坐标点等价于「走到那里」：降级为前进
+                    "", "NAVMESH", "RUN" -> {
                         // 降级：按当前朝向脉冲前进近似走一段；真寻路待 MapLocator 移植
                         MotionSupport.pulseForward(400)
                     }
@@ -1274,6 +1274,10 @@ class MaaRunner(private val agentHost: AgentHost) {
                         MotionSupport.interact(holdMs = 120)
                         Thread.sleep(600)
                     }
+                    else -> {
+                        // 动作是数组形态时也可能带 target/angle 等简写；未识别的动作不要静默吞掉
+                        Ln.w("MaaRunner: MapNavigate [$nodeName] 未识别的路点动作 '$action'（已跳过）")
+                    }
                 }
             }
             MotionSupport.releaseJoystick()
@@ -1284,6 +1288,38 @@ class MaaRunner(private val agentHost: AgentHost) {
             Ln.e("MaaRunner: MapNavigate error on node=$nodeName", t)
             0
         }
+    }
+
+    /** 地图导航的单个路点。 */
+    private data class MapNavStep(val action: String, val zoneId: String, val yaw: Int)
+
+    /**
+     * 解析 MapNavigateAction 的单个路点。上游支持两种形态：
+     *  - 对象：`{action|actions, target|x,y, zone_id, yaw|angle|heading, strict, ...}`
+     *  - 数组：`[x, y, "ACTION"?, strict?, "zone_id"?]`
+     *
+     * 数组是最高频写法（实测 376 处 COLLECT 都用它）。之前只处理 `JsonObject`，
+     * 数组路点会被 `continue` 整段跳过——动作一个都不执行，而日志只显示
+     * 「path done (N steps)」，看起来一切正常。
+     */
+    private fun parseMapNavigateStep(raw: JsonElement): MapNavStep? {
+        (raw as? JsonObject)?.let { obj ->
+            val action = obj["action"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: obj["actions"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.contentOrNull.orEmpty()
+            val yaw = obj["yaw"]?.jsonPrimitive?.doubleOrNull
+                ?: obj["angle"]?.jsonPrimitive?.doubleOrNull
+                ?: obj["heading"]?.jsonPrimitive?.doubleOrNull
+                ?: 0.0
+            return MapNavStep(action, obj["zone_id"]?.jsonPrimitive?.contentOrNull.orEmpty(), yaw.toInt())
+        }
+        (raw as? JsonArray)?.let { arr ->
+            // 位置固定：[x, y, action?, strict?, zone_id?]
+            if (arr.size < 2) return null
+            val action = (arr.getOrNull(2) as? JsonPrimitive)?.contentOrNull.orEmpty()
+            val zoneId = (arr.getOrNull(4) as? JsonPrimitive)?.contentOrNull.orEmpty()
+            return MapNavStep(action, zoneId, 0)
+        }
+        return null
     }
 
     /** 读全局滑索偏好（MapNavigatorZiplinePreference.attach.zipline）；auto/true→true */
