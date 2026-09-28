@@ -98,6 +98,8 @@ class MaaRunner(private val agentHost: AgentHost) {
         // 据点交易干员子系统按相对路径读 selection_data.json 与写快照缓存
         OperatorRuntime.projectRoot = path
         OperatorRuntime.logger = { message -> Ln.w(message) }
+        // 情报档案目录也随 PI 根解析；PI 重装后必须重读，不能沿用旧缓存
+        IntelArchiveSupport.clearCatalogCache()
     }
 
     /** JNA 回调必须被强引用住，否则会被 GC，native 回调时踩空 */
@@ -2626,6 +2628,259 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    // ───────────────────────── itemTransfer（物品转移）─────────────────────────
+    // 上游 itemtransfer 整包（1078 行）的纯逻辑收在 [ItemTransferSupport]。
+    //
+    // 三个注册名里**只有** `ItemTransferSameItemRecognition` 仍被 pipeline 引用
+    // （节点 `ItemTransferSkipSameItem`），所以只有它必须真实实现。
+    // `ItemTransferFallbackAction` / `ItemTransferOCRAction` 是上游 README 明说的兼容实现：
+    // pipeline 已不再引用，且它们依赖的 `ItemTransferDetectAllItems` /
+    // `ItemTransferDetectAllItemsBag` / `ItemTransferTooltipOCR` 三个节点在当前上游 assets
+    // 里根本不存在，故不在此注册假成功（详见 devlog / 报告）。
+    private val itemTransferSameItemRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, _, roi, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val params = ItemTransferSupport.parseSameItemParams(customRecognitionParam)
+            if (params == null || params.forwardItemNode.isEmpty() || params.returnItemNode.isEmpty()) {
+                Ln.w("MaaRunner: ItemTransferSameItem [$nodeName] 参数非法或缺 item 节点: $customRecognitionParam")
+                return@MaaCustomRecognitionCallback 0
+            }
+            // 读取最终节点的 item_ids，可避免两个下拉选项争抢同一个参数对象（上游注释）
+            val forward = ItemTransferSupport.parseSelectedItemId(
+                nodeDefinitionJson(lib, context, params.forwardItemNode),
+            )
+            if (forward == null) {
+                Ln.w("MaaRunner: ItemTransferSameItem [$nodeName] 去程节点无唯一 item_id: ${params.forwardItemNode}")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val ret = ItemTransferSupport.parseSelectedItemId(
+                nodeDefinitionJson(lib, context, params.returnItemNode),
+            )
+            if (ret == null) {
+                Ln.w("MaaRunner: ItemTransferSameItem [$nodeName] 返程节点无唯一 item_id: ${params.returnItemNode}")
+                return@MaaCustomRecognitionCallback 0
+            }
+            if (forward != ret) return@MaaCustomRecognitionCallback 0
+            // 上游命中时把入参 ROI 原样作为结果框
+            if (outBox != null) {
+                val r = getBoxRect(lib, roi)
+                lib.MaaRectSet(outBox, r.x, r.y, r.w, r.h)
+            }
+            Ln.i("MaaRunner: ItemTransferSameItem [$nodeName] forward=$forward == return=$ret，命中")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: ItemTransferSameItem error on node=$nodeName", t)
+            0
+        }
+    }
+
+    // ───────────────────────── intelarchive（情报档案库）─────────────────────────
+    // 上游 intelarchive 整包（904 行）的纯逻辑收在 [IntelArchiveSupport]。5 个注册名
+    // 原先全在 noop 名单里，等于功能不存在；这里全部接成真实实现。
+    //
+    // 降级点：上游的 maafocus 浮层提示在本项目没有通道，改为 Ln 日志；上游
+    // ShowInventoryAction 用系统浏览器打开导入链接，而 MaaRunner 拿不到 app Context，
+    // 改为把链接写入日志（链接本身照常生成）。
+    //
+    // 交接点：列表识别本应把「待点开条目」经识别详情 detail 传给动作，但本项目 JNA 库
+    // 未绑定 MaaStringBufferSet，无法回写 out_detail，改为 [IntelArchiveSupport] 内存交接；
+    // 两个回调同线程相邻执行，取走即清空，不会串屏。
+
+    /** 从 pi.zip 解包根读取目录；读不到返回 null，调用方按节点失败处理。 */
+    private fun loadIntelArchiveCatalog(): IntelArchiveSupport.CatalogIndex? {
+        IntelArchiveSupport.loadedCatalog()?.let { return it }
+        val root = projectRoot
+        if (root.isNullOrBlank()) {
+            Ln.w("MaaRunner: IntelArchive 缺少 PI 根，无法读取目录")
+            return null
+        }
+        val catalogFile = File(root, IntelArchiveSupport.CATALOG_RELATIVE)
+        val itemsFile = File(root, IntelArchiveSupport.ITEMS_RELATIVE)
+        if (!catalogFile.isFile || !itemsFile.isFile) {
+            Ln.w("MaaRunner: IntelArchive 缺少数据文件 ${catalogFile.path} / ${itemsFile.path}")
+            return null
+        }
+        return when (val outcome = IntelArchiveSupport.ensureLoaded(catalogFile.readText(), itemsFile.readText())) {
+            is IntelArchiveSupport.CatalogOutcome.Ok -> outcome.index
+            is IntelArchiveSupport.CatalogOutcome.Invalid -> {
+                Ln.e("MaaRunner: IntelArchive 目录加载失败：${outcome.reason}")
+                null
+            }
+        }
+    }
+
+    /** 跑一段组合识别并取第 [index] 段的 filtered 条目（对齐上游 recognizeFiltered）。 */
+    private fun intelArchiveFilteredItems(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        image: Pointer,
+        node: String,
+        index: Int,
+    ): List<IntelArchiveSupport.TruncatedItem> {
+        val res = runRecognitionOnce(lib, context, image, node) ?: return emptyList()
+        if (!res.hit) return emptyList()
+        val tree = MaaJsonTree.parse(res.detailJson) ?: return emptyList()
+        return IntelArchiveSupport.filteredItems(tree, index)
+    }
+
+    /**
+     * `IntelArchiveScanItemsRecognition`：列表页两段组合识别 → 目录比对入库；
+     * 多页 / 省略号对不上 / 非 digital 的无名密文 → 交给 [intelArchiveResolveTruncCallback]。
+     */
+    private val intelArchiveScanItemsCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, roi, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val titles = intelArchiveFilteredItems(
+                lib, context, image,
+                IntelArchiveSupport.ITEM_TEXT_NODE, IntelArchiveSupport.ITEM_OCR_INDEX,
+            )
+            val secret = intelArchiveFilteredItems(
+                lib, context, image,
+                IntelArchiveSupport.ITEM_SECRET_NODE, IntelArchiveSupport.ITEM_SECRET_BOX_INDEX,
+            )
+            val fileCategory = IntelArchiveSupport.parseScanFileCategory(customRecognitionParam)
+            IntelArchiveSupport.setListFileCategory(fileCategory)
+            val idx = loadIntelArchiveCatalog() ?: return@MaaCustomRecognitionCallback 0
+
+            val classified = IntelArchiveSupport.classifyListItems(idx, titles, secret, fileCategory)
+            if (classified.secretForceUnlock) {
+                for (id in IntelArchiveSupport.unlockItems(listOf(IntelArchiveSupport.SECRET_UNLOCK_ID))) {
+                    Ln.i("MaaRunner: IntelArchive 解锁密文档案 ${IntelArchiveSupport.SECRET_UNLOCK_NAME} ($id)")
+                }
+            }
+            val match = IntelArchiveSupport.matchNames(idx, classified.names, fileCategory)
+            val added = IntelArchiveSupport.unlockItems(match.ids)
+            for (id in added) {
+                Ln.i("MaaRunner: IntelArchive 解锁 ${match.idToName[id] ?: id} ($id)")
+            }
+            for (miss in match.misses) {
+                Ln.i("MaaRunner: IntelArchive 目录未命中 '$miss' (file_category='$fileCategory')")
+            }
+            IntelArchiveSupport.storePendingTruncated(classified.truncated)
+
+            if (outBox != null) {
+                val r = getBoxRect(lib, roi)
+                lib.MaaRectSet(outBox, r.x, r.y, r.w, r.h)
+            }
+            Ln.i(
+                "MaaRunner: IntelArchiveScanItems [$nodeName] file_category='$fileCategory' " +
+                    "titles=${titles.size} secret=${secret.size} unlocked=${added.size} " +
+                    "truncated=${classified.truncated.size}",
+            )
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: IntelArchiveScanItems error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * `IntelArchiveScanDetailRecognition`：详情页标题 OCR 与目录比对入库。
+     * 上游在此节点**始终返回命中**（识别失败也只是不匹配），否则详情子流水线的翻页/关闭会断。
+     */
+    private val intelArchiveScanDetailCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, _, image, roi, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val items = intelArchiveFilteredItems(
+                lib, context, image,
+                IntelArchiveSupport.DETAIL_RECOGNITION_NODE, IntelArchiveSupport.DETAIL_OCR_INDEX,
+            )
+            val idx = loadIntelArchiveCatalog()
+            if (idx != null) {
+                val fileCategory = IntelArchiveSupport.currentListFileCategory()
+                val match = IntelArchiveSupport.matchNames(idx, items.map { it.text }, fileCategory)
+                val added = IntelArchiveSupport.unlockItems(match.ids)
+                for (id in added) {
+                    Ln.i("MaaRunner: IntelArchive 详情解锁 ${match.idToName[id] ?: id} ($id)")
+                }
+                for (miss in match.misses) {
+                    Ln.i("MaaRunner: IntelArchive 详情目录未命中 '$miss' (file_category='$fileCategory')")
+                }
+            }
+            if (outBox != null) {
+                val r = getBoxRect(lib, roi)
+                lib.MaaRectSet(outBox, r.x, r.y, r.w, r.h)
+            }
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: IntelArchiveScanDetail error on node=$nodeName", t)
+            1
+        }
+    }
+
+    /** `IntelArchiveResolveTruncAction`：逐个点开待处理条目并跑详情解析子流水线。 */
+    private val intelArchiveResolveTruncCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, _, recoId, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        val pending = IntelArchiveSupport.takePendingTruncated()
+        // 上游从识别详情 detail 里取待点开条目；本项目回写不了 out_detail，正常情况下 detail 为空，
+        // 退回到 [IntelArchiveSupport] 的内存交接。两条路都试，避免框架形态变化时静默丢条目。
+        val fromDetail = IntelArchiveSupport.parseTruncated(
+            MaaJsonTree.parse(recognitionDetailJson(lib, context, recoId)),
+        )
+        val items = fromDetail.ifEmpty { pending }
+        if (items.isEmpty()) {
+            Ln.d("MaaRunner: IntelArchiveResolveTrunc [$nodeName] 无待点开条目")
+            return@MaaCustomActionCallback 1
+        }
+        for (item in items) {
+            val box = item.box
+            if (box.size != 4 || box[2] <= 0 || box[3] <= 0) {
+                Ln.w("MaaRunner: IntelArchiveResolveTrunc [$nodeName] 条目框非法: text='${item.text}' box=$box")
+                continue
+            }
+            val override = """{"${IntelArchiveSupport.TRUNCATED_ITEM_NODE}":{"target":[${box[0]},${box[1]},${box[2]},${box[3]}]}}"""
+            if (lib.MaaContextOverridePipeline(context, override).toInt() == 0) {
+                Ln.e("MaaRunner: IntelArchiveResolveTrunc [$nodeName] 覆盖点击目标失败 box=$box")
+                continue
+            }
+            val taskId = lib.MaaContextRunTask(context, IntelArchiveSupport.TRUNCATED_ITEM_NODE, "{}")
+            if (taskId <= 0L) {
+                Ln.e("MaaRunner: IntelArchiveResolveTrunc [$nodeName] 详情子流水线失败 text='${item.text}' box=$box")
+                return@MaaCustomActionCallback 0
+            }
+            // 上游查 Status.Success()；MaaContextRunTask 同步返回，失败时状态为 FAILED。
+            val tasker = lib.MaaContextGetTasker(context)
+            if (tasker != null && lib.MaaTaskerStatus(tasker, taskId) == MaaStatus.FAILED) {
+                Ln.e("MaaRunner: IntelArchiveResolveTrunc [$nodeName] 详情子流水线未成功 text='${item.text}' box=$box")
+                return@MaaCustomActionCallback 0
+            }
+        }
+        Ln.i("MaaRunner: IntelArchiveResolveTrunc [$nodeName] 处理 ${items.size} 个待点开条目")
+        1
+    }
+
+    /** `IntelArchiveResetSessionAction`：清空本次扫描会话与内存交接。 */
+    private val intelArchiveResetSessionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, _, _, _, _ ->
+        IntelArchiveSupport.resetSession()
+        Ln.i("MaaRunner: IntelArchiveResetSession [$nodeName] 会话已清空")
+        1
+    }
+
+    /** `IntelArchiveShowInventoryAction`：生成 OEA 导入链接（浏览器打开降级为日志）。 */
+    private val intelArchiveShowInventoryCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, _, _, _, _ ->
+        val collected = IntelArchiveSupport.sessionUnlockedIds()
+        if (collected.isEmpty()) {
+            Ln.w("MaaRunner: IntelArchiveShowInventory [$nodeName] 会话解锁列表为空")
+        }
+        val idx = loadIntelArchiveCatalog() ?: return@MaaCustomActionCallback 0
+        try {
+            val url = IntelArchiveSupport.buildIntelImportUrl(collected, idx.allUnlockIds)
+            Ln.i(
+                "MaaRunner: IntelArchiveShowInventory [$nodeName] collected=${collected.size} " +
+                    "catalog=${idx.allUnlockIds.size} url_len=${url.length}",
+            )
+            Ln.i("MaaRunner: IntelArchive 导入链接（移动端不自动打开浏览器，请手动打开）：$url")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: IntelArchiveShowInventory error on node=$nodeName", t)
+            0
+        }
+    }
+
     fun setCallback(callback: IMaaRunnerCallback?) {
         callbackRef.set(callback)
     }
@@ -3396,6 +3651,19 @@ class MaaRunner(private val agentHost: AgentHost) {
         regAction("autoEcoFarmOverrideTargetTemplate", autoEcoFarmOverrideTargetTemplateCallback)
         regAction("autoEcoFarmInterruptibleSleep", autoEcoFarmInterruptibleSleepCallback)
 
+        // itemTransfer：唯一被 pipeline 引用的 `ItemTransferSameItemRecognition` 不再是恒假，
+        // 必须在下面的 noop 循环之前注册（它已从 falseRecognitions 名单里删除）。
+        // 另外两个动作（OCR/Fallback）上游已弃用且依赖不存在的节点，见回调处注释，不注册假成功。
+        regReco("ItemTransferSameItemRecognition", itemTransferSameItemRecognitionCallback)
+
+        // intelarchive：5 个注册名原先全在 noop 名单里，这里全部换成真实实现。
+        // 两个 Scan 识别 + 三个动作的先后关系见回调处注释；注册必须在 noop 循环之前。
+        regReco("IntelArchiveScanItemsRecognition", intelArchiveScanItemsCallback)
+        regReco("IntelArchiveScanDetailRecognition", intelArchiveScanDetailCallback)
+        regAction("IntelArchiveResolveTruncAction", intelArchiveResolveTruncCallback)
+        regAction("IntelArchiveResetSessionAction", intelArchiveResetSessionCallback)
+        regAction("IntelArchiveShowInventoryAction", intelArchiveShowInventoryCallback)
+
         val otherActions = listOf(
             "CreditShoppingScanItemAction",
             "AddItemData",
@@ -3406,9 +3674,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "CaptureUid",
             "CloseGameAction",
             "ImageCheckSetResultAction",
-            "IntelArchiveResetSessionAction",
-            "IntelArchiveResolveTruncAction",
-            "IntelArchiveShowInventoryAction",
             "SeizeDeliveryJobsResetScanStateAction",
             "SeizeDeliveryJobsScanTargetAction",
             // autoEcoFarmResetSwipeState/InterruptibleSleep/OverrideTargetTemplate 不在此列：
@@ -3499,7 +3764,6 @@ class MaaRunner(private val agentHost: AgentHost) {
 
         val falseRecognitions = listOf(
             "ImageCheckNotPassedRecognition",
-            "ItemTransferSameItemRecognition",
             "IconRecognition",
             "AeroSalvageBalloonStateRecognition",
             "AeroSalvageGridRecognition",
@@ -3508,8 +3772,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "EssenceFilterAfterBattleNthRecognition",
             "EssenceGridAdvanceRecognition",
             "EssenceGridPendingRecognition",
-            "IntelArchiveScanDetailRecognition",
-            "IntelArchiveScanItemsRecognition",
             "MapFind",
             "MapLocateAssertLocation",
             "PuzzleRecognition",
