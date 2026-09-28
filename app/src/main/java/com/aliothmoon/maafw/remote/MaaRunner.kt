@@ -107,6 +107,94 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    /**
+     * BetterSliding 的 MaaFramework 适配。
+     *
+     * 上游 `BetterSliding` 是「一次调用启动一张内部子流水线」，由 8 个 handler 按
+     * 当前驱动节点逐节点推进。状态与编排都已经在 [BetterSlidingSession] 里实现并单测，
+     * 这里只把 MaaFramework 的调用面接过去：
+     *  - 覆盖流水线（`OverrideNext` 未绑定，改用覆盖 `next` 字段，等价）
+     *  - 跑内部子流水线（`MaaContextRunTask`，同步执行，期间回调会重入同一 session）
+     *  - 读调用节点定义（取 attach）
+     *  - 按 recoId 读识别详情（滑条手柄框 / 数量 OCR 都在里面）
+     *
+     * `hostLib` / `hostContext` 是每次回调前刷新的——回调是单线程的，
+     * 而 session 必须跨节点保持状态，所以 host 复用、context 每轮换。
+     */
+    private inner class MaaBetterSlidingHost : BetterSlidingHost {
+        var hostLib: MaaFrameworkLibrary? = null
+        var hostContext: Pointer? = null
+
+        override fun overridePipeline(overrideJson: String): Boolean {
+            val l = hostLib ?: return false
+            val ctx = hostContext ?: return false
+            return l.MaaContextOverridePipeline(ctx, overrideJson).toInt() != 0
+        }
+
+        override fun runSubTask(nodeName: String, overrideJson: String): Boolean {
+            val l = hostLib ?: return false
+            val ctx = hostContext ?: return false
+            return l.MaaContextRunTask(ctx, nodeName, overrideJson) > 0L
+        }
+
+        override fun callerNodeJson(nodeName: String): String? {
+            val l = hostLib ?: return null
+            val ctx = hostContext ?: return null
+            return nodeDefinitionJson(l, ctx, nodeName)
+        }
+
+        override fun recognitionDetailJson(recoId: Long): String? {
+            val l = hostLib ?: return null
+            val ctx = hostContext ?: return null
+            if (recoId <= 0L) return null
+            val tasker = l.MaaContextGetTasker(ctx) ?: return null
+            val detailBuf = l.MaaStringBufferCreate() ?: return null
+            val tempRect = l.MaaRectCreate()
+            val hitMem = Memory(1)
+            return try {
+                val ret = l.MaaTaskerGetRecognitionDetail(
+                    tasker, recoId, null, null, hitMem, tempRect, detailBuf, null, null,
+                ).toInt()
+                if (ret == 0) null else l.MaaStringBufferGet(detailBuf)
+            } catch (t: Throwable) {
+                Ln.w("MaaRunner: BetterSliding 读取识别详情失败: ${t.message}")
+                null
+            } finally {
+                if (tempRect != null) l.MaaRectDestroy(tempRect)
+                l.MaaStringBufferDestroy(detailBuf)
+            }
+        }
+
+        override fun parseJson(text: String): Any? = MaaJsonTree.parse(text)
+
+        override fun info(message: String) {
+            Ln.i("MaaRunner: $message")
+        }
+
+        override fun warn(message: String) {
+            Ln.w("MaaRunner: $message")
+        }
+    }
+
+    private val betterSlidingHost = MaaBetterSlidingHost()
+    private val betterSlidingSession = BetterSlidingSession(betterSlidingHost)
+
+    private val betterSlidingCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, recoId, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null || nodeName == null) {
+            Ln.w("MaaRunner: BetterSliding 收到空 context/node")
+            return@MaaCustomActionCallback 0
+        }
+        betterSlidingHost.hostLib = lib
+        betterSlidingHost.hostContext = context
+        try {
+            if (betterSlidingSession.run(nodeName, customActionParam, recoId)) 1 else 0
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: BetterSliding 执行异常 node=$nodeName", t)
+            0
+        }
+    }
+
     private val subTaskCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
         if (context == null || customActionParam.isNullOrBlank()) {
@@ -2358,6 +2446,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
 
         regAction("SubTask", subTaskCallback)
+        // BetterSliding 不再是 noop：滑条数量是据点交易/囤货/稳定物资购买的共同依赖，
+        // noop 成功的后果不是「少个功能」而是**买错卖错数量**
+        regAction("BetterSliding", betterSlidingCallback)
         regAction("AutoDeliveryResolveDepotAction", resolveDepotCallback)
         regAction("AutoDeliveryResolveDestinationAction", resolveDestinationCallback)
         regAction("CharacterControllerYawDeltaAction", yawDeltaCallback)
@@ -2394,7 +2485,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "DeliveryJobsResolveOngoingDepotAction",
             // AutoDeliveryResolveDepot/Destination 不在此列：已注册为真实实现
             "AutoStockStapleQuantityControlAction",
-            "BetterSliding",
             "CaptureUid",
             "CloseGameAction",
             "ImageCheckSetResultAction",
