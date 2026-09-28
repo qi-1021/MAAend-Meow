@@ -282,7 +282,7 @@ MaaRunner 侧只做适配：七个识别 + 一个 action 从 noop 换成真实�
 ### 怎么验的
 
 没有真机。所有可测逻辑都抽成**不依赖 MaaFramework 的纯逻辑层**，用
-`.tmp/verify/verify.sh` 在本机真实编译 + 反射执行 JUnit 测试：
+`scripts/verify_pure_logic.sh` 在本机真实编译 + 反射执行 JUnit 测试：
 
 - 5 个纯逻辑层：`Support`（normalize/types）、`Params`、`Overrides`、`Ocr`、`Decision`（handlers 的判定部分）
 - 1 个编排层：`Session`（host 接口后面，可本地跑）
@@ -326,14 +326,17 @@ MaaRunner 侧只做适配：七个识别 + 一个 action 从 noop 换成真实�
 
 ## 基础设施：本地纯逻辑验证
 
-`.tmp/verify/verify.sh`（gitignored，在 `.tmp/` 下所以 `git status` 干净）
+`scripts/verify_pure_logic.sh`（**已进仓库**；早先只在 `.tmp/` 下、是 gitignored 的，
+等于文档写着让人用一个不存在的工具）
 
 ```
-.tmp/verify/verify.sh all        # 编译 + 类型检查 + 反射执行全部测试
-.tmp/verify/verify.sh main       # 只编译主源码层
-.tmp/verify/verify.sh typecheck  # 用 JUnit 桩类型检查测试文件
-.tmp/verify/verify.sh run        # 只跑测试
+scripts/verify_pure_logic.sh all        # 编译 + 类型检查 + 反射执行全部测试
+scripts/verify_pure_logic.sh main       # 只编译主源码层
+scripts/verify_pure_logic.sh typecheck  # 用 JUnit 桩类型检查测试文件
+scripts/verify_pure_logic.sh run        # 只跑测试
 ```
+
+中间产物落在 `.tmp/verify/`（gitignored），脚本本身可复现。
 
 - 不需要 Android SDK：用 `~/.gradle/caches` 里已有的
   `kotlin-compiler-embeddable` / `kotlin-stdlib` / `kotlin-reflect` /
