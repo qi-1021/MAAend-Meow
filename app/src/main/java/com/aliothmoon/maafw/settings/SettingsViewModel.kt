@@ -11,6 +11,7 @@ import com.aliothmoon.maafw.i18n.uiTextOf
 import com.aliothmoon.maafw.privileged.PermissionGateway
 import com.aliothmoon.maafw.project.ProjectRepository
 import com.aliothmoon.maafw.project.ProjectState
+import com.aliothmoon.maafw.supplement.SupplementPackInstaller
 import com.aliothmoon.maafw.update.AndroidAbi
 import com.aliothmoon.maafw.update.OkHttpUpdateDownloader
 import com.aliothmoon.maafw.update.UpdateCheckFailure
@@ -55,6 +56,7 @@ class SettingsViewModel(
     private val updateService: UpdateService,
     private val updateDownloader: OkHttpUpdateDownloader,
     private val apkInstaller: SystemApkInstaller,
+    private val supplementInstaller: SupplementPackInstaller,
     private val currentVersion: String = BuildConfig.VERSION_NAME,
     supportedAbis: List<String> = Build.SUPPORTED_ABIS.orEmpty().toList(),
 ) : ViewModel() {
@@ -108,8 +110,14 @@ class SettingsViewModel(
         permissionGateway.state,
         updatePanel,
         appSettings.pipOnHome,
-    ) { remote, update, pipOnHome ->
-        SettingsUiState(remoteAccess = remote, update = update, pipOnHome = pipOnHome)
+        supplementInstaller.state,
+    ) { remote, update, pipOnHome, supplement ->
+        SettingsUiState(
+            remoteAccess = remote,
+            update = update,
+            pipOnHome = pipOnHome,
+            supplement = supplement,
+        )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
@@ -158,6 +166,11 @@ class SettingsViewModel(
             SettingsIntent.CancelDownload -> downloadJob?.cancel()
             SettingsIntent.DismissUpdatePrompt -> updateOperation.update { it.copy(updatePrompt = null) }
             SettingsIntent.DismissUpdateError -> updateOperation.update { it.copy(errorPrompt = null) }
+
+            SettingsIntent.RefreshSupplementPacks -> supplementInstaller.refresh()
+            is SettingsIntent.InstallSupplementPack -> supplementInstaller.install(intent.packId)
+            SettingsIntent.CancelSupplementPackDownload -> supplementInstaller.cancel()
+            is SettingsIntent.RemoveSupplementPack -> supplementInstaller.remove(intent.packId)
         }
     }
 

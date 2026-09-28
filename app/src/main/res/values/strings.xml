@@ -725,4 +725,31 @@
     <string name="feedback_export_logs">导出运行日志</string>
     <string name="feedback_open_issue">前往 GitHub 提交 Issue</string>
     <string name="feedback_device_info_title">设备与环境诊断</string>
+
+    <!-- 补充包（按需下载的高级能力；清单见 assets/supplement-packs.json） -->
+    <string name="supplement_section_title">补充包</string>
+    <string name="supplement_section_summary">基础包只带已经能用的功能。下面是可按需下载的高级能力——想要的才下，不想要的不会占你的空间。</string>
+    <string name="supplement_pack_map_locate_name">地图定位</string>
+    <string name="supplement_pack_map_locate_summary">识别角色在地图上的位置与镜头朝向。传送、落点断言与基础导航需要它。</string>
+    <string name="supplement_pack_map_navmesh_name">精确寻路</string>
+    <string name="supplement_pack_map_navmesh_summary">沿地图网格规划路线，能绕开建筑与障碍。依赖「地图定位」。</string>
+    <string name="supplement_pack_detect_name">战斗识别</string>
+    <string name="supplement_pack_detect_summary">自动战斗与协议空间的画面识别模型。</string>
+    <string name="supplement_state_not_installed">未安装</string>
+    <string name="supplement_state_partial">未完成</string>
+    <string name="supplement_state_installed">已安装</string>
+    <string name="supplement_action_download">下载并安装</string>
+    <string name="supplement_action_cancel">取消</string>
+    <string name="supplement_action_remove">删除</string>
+    <string name="supplement_action_retry">重试</string>
+    <string name="supplement_progress_downloading">下载中 %1$s</string>
+    <string name="supplement_progress_verifying">校验中…</string>
+    <string name="supplement_size_of_total">%1$s / %2$s</string>
+    <string name="supplement_requires_format">需要先安装：%1$s</string>
+    <string name="supplement_remove_confirm_title">删除补充包？</string>
+    <string name="supplement_remove_confirm_message">删除「%1$s」会释放 %2$s，需要时可以重新下载。</string>
+    <string name="supplement_error_disk_full">存储空间不足：还需要 %1$s。</string>
+    <string name="supplement_error_network">下载失败：%1$s</string>
+    <string name="supplement_error_verify_failed">校验失败：下载的内容与清单不一致，已丢弃。</string>
+    <string name="supplement_installed_total">已安装：%1$s</string>
 </resources>

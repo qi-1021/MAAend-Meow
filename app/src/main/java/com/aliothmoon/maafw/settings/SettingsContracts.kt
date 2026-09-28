@@ -5,6 +5,7 @@ import com.aliothmoon.maafw.domain.RemoteBackend
 import com.aliothmoon.maafw.i18n.UiText
 import com.aliothmoon.maafw.i18n.uiTextOf
 import com.aliothmoon.maafw.privileged.RemoteAccessState
+import com.aliothmoon.maafw.supplement.SupplementPackInstaller
 import com.aliothmoon.maafw.update.UpdateChannel
 import com.aliothmoon.maafw.update.UpdateCheckResult
 import com.aliothmoon.maafw.update.UpdateSource
@@ -20,6 +21,7 @@ data class SettingsUiState(
     val remoteAccess: RemoteAccessState = RemoteAccessState(),
     val update: UpdatePanelState = UpdatePanelState(),
     val pipOnHome: Boolean = true,
+    val supplement: SupplementPackInstaller.UiState = SupplementPackInstaller.UiState(),
 )
 
 data class UpdatePanelState(
@@ -67,6 +69,11 @@ sealed interface SettingsIntent {
     data object CancelDownload : SettingsIntent
     data object DismissUpdatePrompt : SettingsIntent
     data object DismissUpdateError : SettingsIntent
+
+    data object RefreshSupplementPacks : SettingsIntent
+    data class InstallSupplementPack(val packId: String) : SettingsIntent
+    data object CancelSupplementPackDownload : SettingsIntent
+    data class RemoveSupplementPack(val packId: String) : SettingsIntent
 }
 
 /**

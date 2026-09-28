@@ -1,0 +1,98 @@
+{
+  "_comment": [
+    "补充包清单：这些资产体积大（合计约 204 MiB），不打进 APK，由用户在应用内按需下载。",
+    "source.commit 是 pin 住的 MaaEnd-AI 提交，保证可复现；不要改成 main。",
+    "blob 是 git blob 的 SHA-1，App 下载后按 git 的算法自算核对",
+    "（SHA1(\"blob <size>\\0\" + content)）——这是完整性校验，不是安全边界。",
+    "选 SHA-1 而不是 SHA-256 的原因：GitHub API 免费给前者，后者要先把 204 MiB 下下来才算得出。",
+    "nameKey/summaryKey 只是可读的对应说明：运行期查找走 SupplementPackText 的静态映射（getIdentifier 会被 release 的资源压缩裁掉）。"
+  ],
+  "schema": 1,
+  "generatedAt": "2026-09-28",
+  "source": {
+    "repo": "MaaEnd/MaaEnd-AI",
+    "commit": "3178323b321a5853a929dd3c4b98896ec0eb4f45",
+    "baseUrl": "https://raw.githubusercontent.com/MaaEnd/MaaEnd-AI/3178323b321a5853a929dd3c4b98896ec0eb4f45/"
+  },
+  "packs": [
+    {
+      "id": "map-locate",
+      "nameKey": "supplement_pack_map_locate_name",
+      "summaryKey": "supplement_pack_map_locate_summary",
+      "requires": [],
+      "totalBytes": 23791447,
+      "files": [
+        {
+          "path": "map/cls.onnx",
+          "size": 23083663,
+          "blob": "52a0386137dae9af59b01bfa8a313c241285d301"
+        },
+        {
+          "path": "map/cameraorientation/preprocess.onnx",
+          "size": 254502,
+          "blob": "46fce9bd93f7ad1d393f83e6d148a62ad33d6b2a"
+        },
+        {
+          "path": "map/cameraorientation/polar_with_ref.onnx",
+          "size": 389818,
+          "blob": "d811600ff0d5f8ce40a751cb33e9a15a26e97a4f"
+        },
+        {
+          "path": "map/tile_mapping.json",
+          "size": 55773,
+          "blob": "d9226551b69afb9e087005862c82d18ff4c7a588"
+        },
+        {
+          "path": "map/cls.json",
+          "size": 7691,
+          "blob": "69694640226762935fbde2b25195a9c8f2b80833"
+        }
+      ]
+    },
+    {
+      "id": "map-navmesh",
+      "nameKey": "supplement_pack_map_navmesh_name",
+      "summaryKey": "supplement_pack_map_navmesh_summary",
+      "requires": [
+        "map-locate"
+      ],
+      "totalBytes": 141274234,
+      "files": [
+        {
+          "path": "map/navmesh/base.nav.gz",
+          "size": 98309600,
+          "blob": "0684db724e17fd0e71864ff64cb32ef53a63d78d"
+        },
+        {
+          "path": "map/navmesh/base.fields.nav.gz",
+          "size": 22815360,
+          "blob": "ff500fd4b74b27c19d2e4aafcfbb41e0ef46afb8"
+        },
+        {
+          "path": "map/navmesh/base.occluder.gz",
+          "size": 20149274,
+          "blob": "c12c9d8eb6d6c0273320b7f62be5bec5ba173120"
+        }
+      ]
+    },
+    {
+      "id": "detect",
+      "nameKey": "supplement_pack_detect_name",
+      "summaryKey": "supplement_pack_detect_summary",
+      "requires": [],
+      "totalBytes": 48774163,
+      "files": [
+        {
+          "path": "detect/AutoFight/autofightv12.onnx",
+          "size": 38169273,
+          "blob": "0ac6edb59a4017d6f2de3916a372574cfffa47b5"
+        },
+        {
+          "path": "detect/ProtocolSpace/best.onnx",
+          "size": 10604890,
+          "blob": "d337f14b6b10f2bc08bf754503c396c0be3ef7a8"
+        }
+      ]
+    }
+  ]
+}

@@ -22,6 +22,8 @@ set -e
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$REPO/app/src/main/java/com/aliothmoon/maafw/remote"
+SUP="$REPO/app/src/main/java/com/aliothmoon/maafw/supplement"
+TSUP="$REPO/app/src/test/java/com/aliothmoon/maafw/supplement"
 TST="$REPO/app/src/test/java/com/aliothmoon/maafw/remote"
 WORK="$REPO/.tmp/verify"
 STUB="$WORK/jstub"
@@ -70,6 +72,8 @@ MAIN_FILES=(
   "$SRC/OperatorRecognitions.kt"
   "$SRC/OperatorRuntime.kt"
   "$SRC/MapNaviParam.kt"
+  "$SUP/SupplementPack.kt"
+  "$SUP/SupplementPackLocal.kt"
 )
 TEST_FILES=(
   "$TST/BetterSlidingSupportTest.kt"
@@ -90,6 +94,8 @@ TEST_FILES=(
   "$TST/OperatorRecognitionsTest.kt"
   "$TST/OperatorRuntimeTest.kt"
   "$TST/MapNaviParamTest.kt"
+  "$TSUP/SupplementPackTest.kt"
+  "$TSUP/SupplementPackLocalTest.kt"
 )
 TEST_CLASSES=(
   com.aliothmoon.maafw.remote.BetterSlidingSupportTest
@@ -110,6 +116,8 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.OperatorRecognitionsTest
   com.aliothmoon.maafw.remote.OperatorRuntimeTest
   com.aliothmoon.maafw.remote.MapNaviParamTest
+  com.aliothmoon.maafw.supplement.SupplementPackTest
+  com.aliothmoon.maafw.supplement.SupplementPackLocalTest
 )
 
 stubs() {
@@ -229,6 +237,8 @@ fun main() {
         "com.aliothmoon.maafw.remote.OperatorRecognitionsTest",
         "com.aliothmoon.maafw.remote.OperatorRuntimeTest",
         "com.aliothmoon.maafw.remote.MapNaviParamTest",
+        "com.aliothmoon.maafw.supplement.SupplementPackTest",
+        "com.aliothmoon.maafw.supplement.SupplementPackLocalTest",
     )
     var pass = 0
     var fail = 0

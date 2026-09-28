@@ -7,6 +7,7 @@ import com.aliothmoon.maafw.privileged.FakePermissionGateway
 import com.aliothmoon.maafw.project.FakeProjectRepository
 import com.aliothmoon.maafw.project.ProjectState
 import com.aliothmoon.maafw.SystemApkInstaller
+import com.aliothmoon.maafw.supplement.SupplementPackInstaller
 import com.aliothmoon.maafw.update.DownloadedUpdate
 import com.aliothmoon.maafw.update.OkHttpUpdateDownloader
 import com.aliothmoon.maafw.update.ResolvedUpdate
@@ -22,9 +23,11 @@ import com.aliothmoon.maafw.update.UpdateResolveResult
 import com.aliothmoon.maafw.update.UpdateService
 import com.aliothmoon.maafw.update.UpdateSource
 import io.mockk.coEvery
+import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -488,6 +491,9 @@ class SettingsViewModelTest {
             )
         },
         settings: AppSettingsGateway = FakeAppSettingsGateway(),
+        installer: SupplementPackInstaller = mockk {
+            every { state } returns MutableStateFlow(SupplementPackInstaller.UiState())
+        },
     ): SettingsViewModel {
         val definition = ProjectDefinition(
             name = "demo",
@@ -512,6 +518,7 @@ class SettingsViewModelTest {
             apkInstaller = mockk {
                 coEvery { install(any()) } returns SystemApkInstaller.Result.Started
             },
+            supplementInstaller = installer,
             currentVersion = "1.0.0",
             supportedAbis = listOf("arm64-v8a"),
         )

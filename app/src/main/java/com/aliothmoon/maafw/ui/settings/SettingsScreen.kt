@@ -146,6 +146,7 @@ fun SettingsScreen(
             NotificationCard(onOpenNotificationSettings)
             LogCard(state, onIntent, onOpenRunLogArchive, onOpenAppLog, onExportLogs)
             PiCard(onIntent)
+            SupplementPackSection(settingsState.supplement, onSettingsIntent)
             OtherCard(state, settingsState, onIntent, onSettingsIntent)
             FeedbackCard(state, settingsState, onExportLogs)
             AboutCard(state)

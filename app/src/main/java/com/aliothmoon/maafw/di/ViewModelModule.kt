@@ -40,6 +40,7 @@ val viewModelModule = module {
             updateService = get(),
             updateDownloader = get(),
             apkInstaller = get(),
+            supplementInstaller = get(),
         )
     }
 }

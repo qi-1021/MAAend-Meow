@@ -736,4 +736,31 @@
     <string name="feedback_export_logs">Export Logs</string>
     <string name="feedback_open_issue">Open GitHub Issues</string>
     <string name="feedback_device_info_title">Device &amp; Environment Diagnostics</string>
+
+    <!-- 补充包（按需下载的高级能力；清单见 assets/supplement-packs.json） -->
+    <string name="supplement_section_title">Add-on packs</string>
+    <string name="supplement_section_summary">The base build only ships what already works. Advanced capabilities are downloaded on demand — take what you want, nothing else takes up your space.</string>
+    <string name="supplement_pack_map_locate_name">Map localization</string>
+    <string name="supplement_pack_map_locate_summary">Recognizes your position on the map and the camera heading. Required by teleport, arrival assertions and basic navigation.</string>
+    <string name="supplement_pack_map_navmesh_name">Precise pathfinding</string>
+    <string name="supplement_pack_map_navmesh_summary">Plans routes along the map mesh and walks around buildings and obstacles. Requires Map localization.</string>
+    <string name="supplement_pack_detect_name">Combat detection</string>
+    <string name="supplement_pack_detect_summary">Screen-recognition models for auto-fight and Protocol Space.</string>
+    <string name="supplement_state_not_installed">Not installed</string>
+    <string name="supplement_state_partial">Incomplete</string>
+    <string name="supplement_state_installed">Installed</string>
+    <string name="supplement_action_download">Download and install</string>
+    <string name="supplement_action_cancel">Cancel</string>
+    <string name="supplement_action_remove">Remove</string>
+    <string name="supplement_action_retry">Retry</string>
+    <string name="supplement_progress_downloading">Downloading %1$s</string>
+    <string name="supplement_progress_verifying">Verifying…</string>
+    <string name="supplement_size_of_total">%1$s / %2$s</string>
+    <string name="supplement_requires_format">Requires: %1$s</string>
+    <string name="supplement_remove_confirm_title">Remove add-on pack?</string>
+    <string name="supplement_remove_confirm_message">Removing “%1$s” frees %2$s. You can download it again any time.</string>
+    <string name="supplement_error_disk_full">Not enough storage: %1$s more needed.</string>
+    <string name="supplement_error_network">Download failed: %1$s</string>
+    <string name="supplement_error_verify_failed">Verification failed: the download did not match the manifest and was discarded.</string>
+    <string name="supplement_installed_total">Installed: %1$s</string>
 </resources>
