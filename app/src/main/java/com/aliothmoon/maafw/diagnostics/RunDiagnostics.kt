@@ -187,6 +187,8 @@ object RunDiagnostics {
                     val file = File(root, relativePath)
                     file.parentFile?.mkdirs()
                     file.writeBytes(bytes)
+                    // 导出成功后才清自己的目录；同队列串行，不拖慢 MAA 工作线程。
+                    applyProbeRetentionLocked(root)
                     Ln.i("RunDiagnostics: dump -> ${file.absolutePath}")
                 }.onFailure { Ln.w("RunDiagnostics: dump $relativePath failed: ${it.message}") }
             }
@@ -253,6 +255,25 @@ object RunDiagnostics {
     private fun isReportName(name: String): Boolean =
         name.startsWith(RunDiagnosticsPolicy.FILE_PREFIX) &&
             name.endsWith(RunDiagnosticsPolicy.FILE_SUFFIX)
+
+    /**
+     * 按 [GoodsProbeDumpPolicy] 的两条上限清理旧探针帧；删失败不影响本次导出。
+     *
+     * 只 `listFiles` 探针自己的子目录、且只认 `goods-*.png`，所以 `report/`、`run/`、
+     * `on_error/` 等旁的目录**根本不会被列到**，不存在误删可能。清理在 worker 线程、
+     * 紧跟一次成功导出之后跑，正常路径（没有全 0 候选）完全不会触发目录扫描。
+     */
+    private fun applyProbeRetentionLocked(rootDir: String) {
+        val dir = File(rootDir, GoodsProbeDumpPolicy.DUMP_DIR)
+        val files = dir.listFiles()
+            ?.filter { it.isFile && GoodsProbeDumpPolicy.isDumpName(it.name) }
+            ?.map { RunDiagnosticsPolicy.ReportFile(it.name, it.length(), it.lastModified()) }
+            ?: return
+        GoodsProbeDumpPolicy.selectDeletions(files).forEach { target ->
+            runCatching { File(dir, target.name).delete() }
+                .onFailure { Ln.w("RunDiagnostics: delete probe dump ${target.name} failed: ${it.message}") }
+        }
+    }
 
     private fun writeLineLocked(line: String) {
         val w = writer ?: return

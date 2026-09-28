@@ -24,6 +24,25 @@ object GoodsProbeDumpPolicy {
     const val FILE_SUFFIX: String = ".png"
 
     /**
+     * `probe_dump/` 保留的最新帧数。
+     *
+     * 依据：这个目录只在「三次尝试全 0 候选」时才写一张，触发本身就少见；一次调试
+     * 往往要横跨几个 region / 几轮复现来回比对，10 份容易不够看，20 份能覆盖
+     * 「一天连着调十来次」的历史，再多基本不会回头翻。
+     */
+    const val MAX_FILES: Int = 20
+
+    /**
+     * `probe_dump/` 目录硬上限，超出按时间从旧到新删。
+     *
+     * 依据：一帧全分辨率 PNG 截图按 0.5~2 MiB 估（游戏界面渐变多、压缩比有限），
+     * 20 份最坏也就 ~40 MiB；这里取 32 MiB 作为最后一道闸，即便单帧异常大
+     * 也不会让这个目录无限膨胀。报告目录的硬顶是 64 MiB，探针图只留一半额度，
+     * 两者相加仍是有界的小体量，符合「不要浪费储存空间」。
+     */
+    const val MAX_TOTAL_BYTES: Long = 32L * 1024 * 1024
+
+    /**
      * 要不要导这一帧。
      *
      * 两个条件缺一不可：诊断必须真的开着（release 下绝不写文件），且本次是
@@ -53,4 +72,29 @@ object GoodsProbeDumpPolicy {
      */
     fun dumpRelativePath(region: String, timestampMs: Long): String =
         "$DUMP_DIR/$FILE_PREFIX${sanitizeRegion(region)}-$timestampMs$FILE_SUFFIX"
+
+    /**
+     * 这个文件名是不是**本策略产出的探针帧**：`goods-` 前缀 + `.png` 后缀。
+     *
+     * 这是清理时唯一的「可删」判据，且只对 `probe_dump/` 目录里的文件生效。
+     * 非 PNG（半截临时文件、用户手放的说明等）一律不算，既不计数也不删。
+     */
+    fun isDumpName(name: String): Boolean =
+        name.startsWith(FILE_PREFIX) && name.endsWith(FILE_SUFFIX)
+
+    /**
+     * 超出份数/总量上限时要删的探针帧（旧到新）。
+     *
+     * 先按 [isDumpName] 过滤，再复用 [RunDiagnosticsPolicy.selectDeletions] 的同一套
+     * 形制（先份数后剩余总量、时间为主键），保证「怎么删」与报告目录完全一致。
+     * 过滤这一步很关键：即便调用方误把混合目录的文件喂进来，非探针帧也绝不会被选中。
+     */
+    fun selectDeletions(
+        files: List<RunDiagnosticsPolicy.ReportFile>,
+    ): List<RunDiagnosticsPolicy.ReportFile> =
+        RunDiagnosticsPolicy.selectDeletions(
+            files = files.filter { isDumpName(it.name) },
+            maxFiles = MAX_FILES,
+            maxTotalBytes = MAX_TOTAL_BYTES,
+        )
 }
