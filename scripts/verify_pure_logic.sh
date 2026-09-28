@@ -91,6 +91,7 @@ MAIN_FILES=(
   "$SUP/SupplementPack.kt"
   "$SUP/SupplementPackLocal.kt"
   "$DIAG/RunDiagnosticsPolicy.kt"
+  "$DIAG/GoodsProbeDumpPolicy.kt"
   "$CLI/DebugCliSupport.kt"
 )
 TEST_FILES=(
@@ -124,6 +125,7 @@ TEST_FILES=(
   "$TSUP/SupplementPackTest.kt"
   "$TSUP/SupplementPackLocalTest.kt"
   "$TDIAG/RunDiagnosticsPolicyTest.kt"
+  "$TDIAG/GoodsProbeDumpPolicyTest.kt"
   "$TCLI/DebugCliSupportTest.kt"
 )
 TEST_CLASSES=(
@@ -157,6 +159,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.supplement.SupplementPackTest
   com.aliothmoon.maafw.supplement.SupplementPackLocalTest
   com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest
+  com.aliothmoon.maafw.diagnostics.GoodsProbeDumpPolicyTest
   com.aliothmoon.maafw.cli.DebugCliSupportTest
 )
 
@@ -289,6 +292,7 @@ fun main() {
         "com.aliothmoon.maafw.supplement.SupplementPackTest",
         "com.aliothmoon.maafw.supplement.SupplementPackLocalTest",
         "com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest",
+        "com.aliothmoon.maafw.diagnostics.GoodsProbeDumpPolicyTest",
         "com.aliothmoon.maafw.cli.DebugCliSupportTest",
     )
     var pass = 0

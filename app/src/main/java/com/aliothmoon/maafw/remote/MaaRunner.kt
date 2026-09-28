@@ -4,6 +4,7 @@ import com.aliothmoon.maafw.IMaaRunnerCallback
 import com.aliothmoon.maafw.bridge.NativeBridgeLib
 import com.aliothmoon.maafw.constant.DefaultDisplayConfig
 import com.aliothmoon.maafw.constant.DisplayMode
+import com.aliothmoon.maafw.diagnostics.GoodsProbeDumpPolicy
 import com.aliothmoon.maafw.diagnostics.RunDiagnostics
 import com.aliothmoon.maafw.maa.MaaAgentClientLibrary
 import com.aliothmoon.maafw.maa.MaaAgentClientLoader
@@ -2192,6 +2193,29 @@ class MaaRunner(private val agentHost: AgentHost) {
         return cachedOcrProbe(lib, ctrl, context, roiBox, onlyRec = onlyRec, colorFilter = colorFilter)
     }
 
+    /**
+     * 探针帧捕获：把「实际送去 OCR 的那一帧」的 PNG 字节留在内存里，供失败时导出。
+     *
+     * 只在诊断开启时由 [goodsOcrProbe] 建一个；[cachedOcrProbe] 每成功取到一帧就覆盖，
+     * 所以最终留下的是本轮**最后一次** OCR 用的帧。写盘与否由上层在确认「全 0 候选」后决定，
+     * 避免每次尝试都写盘。
+     */
+    private class ProbeFrameCapture {
+        var pngBytes: ByteArray? = null
+    }
+
+    /**
+     * 从图像 buffer 读出编码后（PNG）字节；失败返回 null，绝不抛。
+     *
+     * 只用于诊断导出；正常识别路径不读字节，避免无谓拷贝。
+     */
+    private fun readEncodedImage(lib: MaaFrameworkLibrary, image: Pointer): ByteArray? = runCatching {
+        val size = lib.MaaImageBufferGetEncodedSize(image)
+        if (size <= 0) return@runCatching null
+        val data = lib.MaaImageBufferGetEncoded(image) ?: return@runCatching null
+        data.getByteArray(0, size.toInt())
+    }.getOrNull()
+
     /** 从 controller 缓存帧做 OCR 探针；可疑结果时刷帧重试（坏帧防御） */
     private fun cachedOcrProbe(
         lib: MaaFrameworkLibrary,
@@ -2201,6 +2225,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         attempts: Int = 2,
         colorFilter: String? = null,
         onlyRec: Boolean = false,
+        capture: ProbeFrameCapture? = null,
     ): List<GoodsSupport.OcrItem> {
         var items: List<GoodsSupport.OcrItem> = emptyList()
         repeat(attempts) {
@@ -2208,8 +2233,20 @@ class MaaRunner(private val agentHost: AgentHost) {
             if (capId > 0) lib.MaaControllerWait(ctrl, capId)
             val imgBuf = lib.MaaImageBufferCreate() ?: return emptyList()
             try {
-                if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return@repeat
-                if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return@repeat
+                val cachedRc = lib.MaaControllerCachedImage(ctrl, imgBuf).toInt()
+                if (cachedRc == 0) {
+                    // 取帧失败会静默跳过本轮，现象也是 0 候选；记下返回值便于与「真读到乱码」区分
+                    Ln.w("MaaRunner: cachedOcrProbe 取帧失败 capId=$capId cachedImage=$cachedRc")
+                    return@repeat
+                }
+                val emptyRc = lib.MaaImageBufferIsEmpty(imgBuf).toInt()
+                if (emptyRc != 0) {
+                    Ln.w("MaaRunner: cachedOcrProbe 帧为空 capId=$capId cachedImage=$cachedRc isEmpty=$emptyRc")
+                    return@repeat
+                }
+                Ln.i("MaaRunner: cachedOcrProbe 取帧 ok capId=$capId cachedImage=$cachedRc isEmpty=$emptyRc")
+                // 诊断：留一份实际输入帧，只有全 0 候选时上层才会真正落盘
+                capture?.let { holder -> readEncodedImage(lib, imgBuf)?.let { holder.pngBytes = it } }
                 val frame = runOcrProbeFrame(lib, context, imgBuf, roiBox, onlyRec, colorFilter)
                 // 非命中帧的条目只是 all_results_ 噪声，别让上层拿去匹配文本（保持旧语义）
                 items = if (frame.hit) frame.items else emptyList()
@@ -2435,9 +2472,16 @@ class MaaRunner(private val agentHost: AgentHost) {
         region: String,
     ): List<GoodsSupport.OcrItem> {
         var best: List<GoodsSupport.OcrItem> = emptyList()
+        // 诊断：开启时才有额外开销——捕获「实际送去 OCR 的最后一帧」并逐轮记文本，
+        // 供「所有尝试都 0 候选」时导出证据。关闭时两者都是 null，不拷贝、不落盘。
+        val diagnosticsOn = RunDiagnostics.isEnabled()
+        val capture = if (diagnosticsOn) ProbeFrameCapture() else null
+        val attemptTexts = if (diagnosticsOn) mutableListOf<Map<String, Any?>>() else null
         for (attempt in 1..AutoStockpileSupport.GOODS_PROBE_MAX_ATTEMPTS) {
             // 货卡是一页多张卡，必须完整检测分框；only_rec 会把整段 ROI 退化成一个大框
-            val filtered = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = GOODS_COLOR_FILTER, onlyRec = false)
+            val filtered = cachedOcrProbe(
+                lib, ctrl, context, roiBox, colorFilter = GOODS_COLOR_FILTER, onlyRec = false, capture = capture,
+            )
             val filteredHits = AutoStockpileSupport.scan(filtered, region).size
             if (filteredHits > 0) {
                 Ln.i(
@@ -2445,12 +2489,23 @@ class MaaRunner(private val agentHost: AgentHost) {
                 )
                 return filtered
             }
-            val plain = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = null, onlyRec = false)
+            val plain = cachedOcrProbe(
+                lib, ctrl, context, roiBox, colorFilter = null, onlyRec = false, capture = capture,
+            )
             val plainHits = AutoStockpileSupport.scan(plain, region).size
             Ln.i(
                 "MaaRunner: goods OCR [$region] attempt=$attempt/${AutoStockpileSupport.GOODS_PROBE_MAX_ATTEMPTS} " +
                     "filtered=$filteredHits plain=$plainHits " +
                     "filteredTexts=${filtered.take(8).map { it.text }} plainTexts=${plain.take(8).map { it.text }}",
+            )
+            attemptTexts?.add(
+                mapOf(
+                    "attempt" to attempt,
+                    "filteredHits" to filteredHits,
+                    "plainHits" to plainHits,
+                    "filteredTexts" to filtered.take(8).map { it.text },
+                    "plainTexts" to plain.take(8).map { it.text },
+                ),
             )
             if (plainHits > 0) return mergeOcrItems(filtered, plain)
             val probe = if (filtered.size >= plain.size) filtered else plain
@@ -2462,11 +2517,49 @@ class MaaRunner(private val agentHost: AgentHost) {
                     maxAttempts = AutoStockpileSupport.GOODS_PROBE_MAX_ATTEMPTS,
                 )
             ) {
+                // 额度用尽仍是 0 候选：导最后一次的帧，供判定「我们的帧与框架的帧是否同一张」。
+                // 判据纯逻辑化（GoodsProbeDumpPolicy）：诊断关或曾扫到候选都不导。
+                if (GoodsProbeDumpPolicy.shouldDump(RunDiagnostics.isEnabled(), allAttemptsZeroCandidates = true)) {
+                    dumpGoodsProbeFrame(region, roiBox, capture, attemptTexts)
+                }
                 return best
             }
             Thread.sleep(AutoStockpileSupport.GOODS_PROBE_RETRY_DELAY_MS)
         }
         return best
+    }
+
+    /**
+     * 全 0 候选时导出探针**实际输入的那张原图**并记一条诊断 note。
+     *
+     * 只导最后一次的帧：[capture] 里存的就是本轮最后一次送去 OCR 的图。原图不裁剪，
+     * 事后可与框架 on_error 截图逐像素比对、并把 ROI 叠上去。写盘与 note 共用
+     * [RunDiagnostics] 的后台队列，先落图后记路径，且不阻塞 MAA 工作线程。
+     */
+    private fun dumpGoodsProbeFrame(
+        region: String,
+        roiBox: IntArray?,
+        capture: ProbeFrameCapture?,
+        attemptTexts: List<Map<String, Any?>>?,
+    ) {
+        val relPath = GoodsProbeDumpPolicy.dumpRelativePath(region, System.currentTimeMillis())
+        val bytes = capture?.pngBytes
+        val accepted = bytes != null && RunDiagnostics.saveDump(relPath, bytes)
+        val extra: Map<String, Any?> = mapOf(
+            "region" to region,
+            "roi" to (roiBox?.joinToString(",") ?: ""),
+            "dumpPath" to if (accepted) relPath else "",
+            "attempts" to attemptTexts,
+        )
+        RunDiagnostics.note(
+            "autostockpile",
+            if (accepted) {
+                "货卡探针全 0 候选，已导出实际输入帧 $relPath"
+            } else {
+                "货卡探针全 0 候选，但帧导出未受理（无帧或诊断已关）"
+            },
+            extra,
+        )
     }
 
     /** 两遍 OCR 结果合并去重，过滤那遍优先 */

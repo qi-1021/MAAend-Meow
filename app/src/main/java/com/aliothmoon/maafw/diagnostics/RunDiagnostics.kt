@@ -62,6 +62,15 @@ object RunDiagnostics {
     /** 闸门：false 时所有 API 直接 no-op。跨线程读，用 atomic。 */
     private val enabled = AtomicBoolean(false)
 
+    /**
+     * 当前诊断根目录（`<pkg>/files/log/`），[saveDump] 的落点基准。
+     *
+     * 只在 worker 线程的 [beginLocked] 里写、在调用线程（[saveDump]）里读，
+     * 用 `@Volatile` 保证可见性；release / 未 [start] 时为 null，[saveDump] 直接拒绝。
+     */
+    @Volatile
+    private var dumpRoot: String? = null
+
     /** 当前已写字节数；只在 worker 线程读写，Atomic 只为跨线程可见性兜底。 */
     private val writtenBytes = AtomicLong(0L)
 
@@ -78,6 +87,7 @@ object RunDiagnostics {
     fun start(debug: Boolean, logDir: String? = null) {
         if (!debug) {
             // 同进程里上一轮开过的话顺手收掉；release 下本来就没有
+            dumpRoot = null
             if (enabled.getAndSet(false)) {
                 runCatching { worker.execute { closeLocked() } }
             }
@@ -157,6 +167,32 @@ object RunDiagnostics {
         }
     }
 
+    /**
+     * 把一帧**二进制证据**（如货卡探针实际送去 OCR 的原图）写到
+     * `<logDir>/<relativePath>`，返回是否已受理（不代表一定写成功）。
+     *
+     * 与 [event] / [note] 共用同一条后台队列，所以「先导图、后记路径」的顺序天然成立。
+     * 落盘全程在 worker 线程，调用方（MAA 工作线程）不会被文件 IO 拖住。
+     *
+     * 只有诊断真正开启（[isEnabled]）且已成功 [start] 拿到根目录时才写；
+     * release 下 [enabled] 为 false，这里直接返回 false，不建目录、不写文件。
+     */
+    fun saveDump(relativePath: String, bytes: ByteArray): Boolean {
+        if (!enabled.get()) return false
+        val root = dumpRoot ?: return false
+        if (relativePath.isBlank() || bytes.isEmpty()) return false
+        return runCatching {
+            worker.execute {
+                runCatching {
+                    val file = File(root, relativePath)
+                    file.parentFile?.mkdirs()
+                    file.writeBytes(bytes)
+                    Ln.i("RunDiagnostics: dump -> ${file.absolutePath}")
+                }.onFailure { Ln.w("RunDiagnostics: dump $relativePath failed: ${it.message}") }
+            }
+        }.isSuccess
+    }
+
     // ────────────────────────── worker 线程内部 ──────────────────────────
 
     private fun enqueue(line: String) {
@@ -173,6 +209,8 @@ object RunDiagnostics {
                 enabled.set(false)
                 return
             }
+            // 报告目录已确认可用，二进制导出（如探针失败帧）才有落点
+            dumpRoot = logDir
             val file = uniqueReportFile(dir)
             writer = BufferedWriter(FileWriter(file, false))
             writtenBytes.set(0L)
