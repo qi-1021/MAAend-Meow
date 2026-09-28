@@ -8,6 +8,69 @@
 
 ---
 
+## 2026-09-28 · MapNavigator P1：参数解析 + 动作编排
+
+**提交**：`e225871`、`7bce9cc`、`b51eb65`、`966508e`（均已推送，CI 全绿）
+
+### 做了什么
+
+MapNavigator 是 18934 行 C++，还依赖 Navmesh(11757) + MapLocator(4859) + Zipline(1562)，
+且 BNAV 寻路数据不在本 checkout。所以按已产出的分期方案做 **P1（参数与动作编排，不含定位）**。
+
+**1. `MapNaviParam`：完整参数解析（44 条测试）**
+
+之前只剩一个降级实现——对象形态只读 `action/zone/yaw` 三个字段、数组形态是「位置固定式」误读、
+而且**没有任何校验**（动作名写错会被静默当成 zone 或直接吞掉）。现在覆盖：
+
+- 根参数 12 个字段（含 `nav_file` 优先于 `navmesh_file`、`snap_radius` 优先于 `navmesh_snap_radius`）
+- 路点对象形态：`action|actions` 合并、`target` 优先于 `x,y`、`zone_id`/`strict`/`angle` 各自的别名组
+- 路点数组形态：`[x, y, ...rest]`，`rest` 里布尔是 strict、动作字符串/数组是动作、其余是 zone
+- 动作展开：空 → RUN；含非 RUN 时跳过其中的 RUN；全是 RUN 时逐个保留
+- 文本三形态：非空字符串 / 非空字符串数组 / `{"node": ...}`
+
+**2. 执行侧换成按归一化路点分发**
+
+- `COLLECT`/`DIG`/`INTERACT` 走**真实子流水线**（对齐 `async_prompt_action.cpp`）：
+  截断共用出口、按需注入 expected、`rec` 时改成 DoNothing
+- `FIND` 用 `find_stop` 做视觉伺服（48 步 × 30°）；只配 `find_arrive` 的点**明确失败**
+- `FIGHT` 新增 `MotionSupport.attack()`（按钮 1030,551，取自上游 adb_input_backend）
+- `HEADING` 改开环：维护累计朝向估计，发 `yawDelta(target - assumed)` 再前推 270ms
+- `ZIPLINE` 明确失败（P1 无规划数据），不再可能被静默当 RUN 走
+
+### 刻意保留的上游规则（都有用例）
+
+1. **数组里「看起来像动作」的字符串不许当 zone_id**：全大写 / 含下划线 /
+   大小写不敏感等于动作名 —— 写错大小写会静默走错区域，宁可整条路线失败
+2. **`NAVMESH` 的坐标必须来自 `target`**（`x,y` 不算），且强制严格到达
+3. **任一路点失败则整条失败**，不做「跳过这个点继续」
+
+### 为什么先做 P1
+
+没有定位（MapLocator 未移植）时，`NAVMESH`/`TRANSFER`/`PORTAL` 只能降级成「前进近似」，
+但 **`COLLECT`/`DIG`/`INTERACT` 本来就不依赖定位**——它们只是「走到点后跑一个子流水线」，
+所以这一批能力可以现在就真正可用，而不用等整条定位链。
+
+### 教训
+
+1. **`const val` 不能出现在类里**（只能顶层 / object / companion）。CI 直接指出了行号。
+2. **回调参数 `nodeName` 是 `String?`**，传给需要 `String` 的函数前要判空——
+   本地不编译 MaaRunner，这类错误只有 CI 能抓。
+3. **改测试时不要用全局 `replace`**：我用它改 fixture 时误伤了另一个测试
+   （`item("char_a")` → `item("A")`），两条测试一起挂。
+4. **JUnit 桩要补齐重载**：`assertEquals(double, double, double)` 与 `@After`/`@Before`
+   都不是"顺手就有"的，缺了会报 unresolved。
+
+### 未做
+
+| 项 | 规模 | 原因 |
+|---|---|---|
+| MapNavigator P2（定位） | 2.5k–4k 行 | 需要 MapLocator(4859) + ONNX 模型 + 底图资产，且资产不在本 checkout |
+| MapNavigator P3（真寻路） | 6.5k–10k 行 | 需要 Navmesh(11757)，且 BNAV 数据来自 MAAend-AI 子模块（本 checkout 没有） |
+| MapNavigator P5（滑索） | 2.2k–3.8k 行 | 上游对触屏后端直接禁用滑索（没有独立鼠标左右键），优先级最低 |
+| `CaptureUid` | ~420 行 Go | 纯遥测 + 供 cpp-algo 读账号标识；无消费者、无功能影响 |
+
+---
+
 ## 2026-09-28 · 据点交易干员子系统完成 + MapNavigate 数组路点修复
 
 **提交**：`20f9b90`、`de39848`、`e225871`（均已推送，CI 全绿）
