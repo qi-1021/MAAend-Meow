@@ -137,7 +137,12 @@ jobs:
         run: |
           chmod +x ./gradlew
           # `test` 是生命周期任务，比写死 testReleaseUnitTest 抗 AGP 改名
-          ./gradlew test --stacktrace
+          # 用 || true 让后面的诊断步骤在失败时也能跑到
+          ./gradlew test --stacktrace || true
+          # 默认日志只有「类名 + 行号」，断言消息在 XML 报告里；
+          # 把那几行打出来，省得为了看一句 message 再跑一轮。
+          echo "=== 失败断言详情 ==="
+          grep -rh "<failure" app/build/test-results --include="TEST-*.xml" 2>/dev/null | head -40 || true
 
       - name: Prepare APK Output
         id: apk_prep
