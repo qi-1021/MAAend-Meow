@@ -4,6 +4,7 @@ import com.aliothmoon.maafw.IMaaRunnerCallback
 import com.aliothmoon.maafw.bridge.NativeBridgeLib
 import com.aliothmoon.maafw.constant.DefaultDisplayConfig
 import com.aliothmoon.maafw.constant.DisplayMode
+import com.aliothmoon.maafw.diagnostics.RunDiagnostics
 import com.aliothmoon.maafw.maa.MaaAgentClientLibrary
 import com.aliothmoon.maafw.maa.MaaAgentClientLoader
 import com.aliothmoon.maafw.maa.MaaFrameworkLibrary
@@ -103,6 +104,9 @@ class MaaRunner(private val agentHost: AgentHost) {
     private val eventSink = MaaFrameworkLibrary.MaaEventCallback { _, message, detailsJson, _ ->
         keepCallbackThread()
         Ln.i("MaaEventCallback on $message")
+        // 结构化诊断：debug 才落盘，release 里是 no-op；在 MaaFrameworkRunnerPort 那边
+        // 不再重复喂一份，事件源只此一处
+        RunDiagnostics.event(message.orEmpty(), detailsJson.orEmpty())
         runCatching {
             callbackRef.get()?.onEvent(message.orEmpty(), detailsJson.orEmpty())
         }.onFailure {
@@ -157,10 +161,14 @@ class MaaRunner(private val agentHost: AgentHost) {
 
         override fun info(message: String) {
             Ln.i("MaaRunner: $message")
+            // 调货滑条最容易出问题的就是「哪一步算了什么、路由到哪」，Session 已经在
+            // 关键节点吐了人话，这里原样进报告，省得事后翻 logcat
+            RunDiagnostics.note("bettersliding", message)
         }
 
         override fun warn(message: String) {
             Ln.w("MaaRunner: $message")
+            RunDiagnostics.note("bettersliding", message, mapOf("level" to "warn"))
         }
     }
 
@@ -1248,11 +1256,26 @@ class MaaRunner(private val agentHost: AgentHost) {
                 is MapNaviParam.Outcome.NoOp -> 1
                 is MapNaviParam.Outcome.Invalid -> {
                     Ln.e("MaaRunner: MapNavigate [$nodeName] 参数不合法：${parsed.reason}")
+                    RunDiagnostics.note(
+                        "mapnavi",
+                        "参数不合法：${parsed.reason}",
+                        mapOf("node" to nodeName),
+                    )
                     0
                 }
 
-                is MapNaviParam.Outcome.Ok ->
+                is MapNaviParam.Outcome.Ok -> {
+                    RunDiagnostics.note(
+                        "mapnavi",
+                        "解析成功：${parsed.param.path.size} 个路点 map='${parsed.param.mapName}'",
+                        mapOf(
+                            "node" to nodeName,
+                            "map" to parsed.param.mapName,
+                            "waypoints" to parsed.param.path.size,
+                        ),
+                    )
                     if (runMapNavPath(context, nodeName, parsed.param)) 1 else 0
+                }
             }
         } catch (t: Throwable) {
             Ln.e("MaaRunner: MapNavigate error on node=$nodeName", t)
@@ -2212,6 +2235,11 @@ class MaaRunner(private val agentHost: AgentHost) {
             if (pick == null) {
                 // 本区候选已试完：把中继指向 Skip，本区就此收尾而不是把整任务判失败
                 Ln.i("MaaRunner: AutoStockpile.Recognition [$nodeName] no candidate left (${candidates.size} seen), route to skip")
+                RunDiagnostics.note(
+                    "autostockpile",
+                    "本区候选已试完，转 Skip（region=$region seen=${candidates.size}）",
+                    mapOf("node" to node, "region" to region, "candidates" to candidates.size),
+                )
                 lib.MaaContextOverridePipeline(
                     context,
                     "{\"AutoStockpileRelayNodeDecision\":{\"next\":[\"AutoStockpileSkip\"]}," +
@@ -2226,6 +2254,18 @@ class MaaRunner(private val agentHost: AgentHost) {
             Ln.i(
                 "MaaRunner: AutoStockpile.Recognition [$nodeName] pick '${pick.name}' " +
                     "price=${pick.price ?: -1} box=${pick.box.joinToString(",")} of ${candidates.size} candidates",
+            )
+            RunDiagnostics.note(
+                "autostockpile",
+                "选中 '${pick.name}' 价格=${pick.price ?: -1} 候选=${candidates.size}",
+                mapOf(
+                    "node" to node,
+                    "region" to region,
+                    "name" to pick.name,
+                    "price" to pick.price,
+                    "candidates" to candidates.size,
+                    "box" to pick.box.joinToString(","),
+                ),
             )
             1
         } catch (t: Throwable) {
@@ -2712,6 +2752,15 @@ class MaaRunner(private val agentHost: AgentHost) {
                 running = false
                 stopRequested = false
             }
+            // 报告收尾：结局行排在所有已入队事件之后，随后关文件。
+            // finish 只是排队，不阻塞这里；写盘进度落后于 onFinished 无妨
+            val outcomeName = when (outcome) {
+                RunOutcome.COMPLETED -> "COMPLETED"
+                RunOutcome.COMPLETED_WITH_FAILURES -> "COMPLETED_WITH_FAILURES"
+                RunOutcome.CANCELLED -> "CANCELLED"
+                else -> "FAILED"
+            }
+            RunDiagnostics.finish(if (reason.isEmpty()) outcomeName else "$outcomeName: $reason")
             notify { onFinished(outcome, reason) }
         }
     }
@@ -3040,6 +3089,150 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    // ───────────────────────── autoEcoFarm（生态农场）─────────────────────────
+    // 上游 autoecofarm 包（622 行）在移动端曾整组是 stub：两个识别恒假、三个动作 noop。
+    // 注意这三个动作**不是可选项**：override 把识别模板在「追踪标记」与「农田标记」间切换，
+    // reset 清掉跨任务的滑动状态，interruptibleSleep 是等待队友的 60s。
+    // 保持 noop 会让分支「能进但一直找错目标 / 提前退出」，正是本项目反复踩过的静默成功。
+
+    /**
+     * `autoEcoFarmCalculateSwipeTarget`：按目标 ROI 与拉近比例算出 swipe 终点。
+     * 几何与状态在 [AutoEcoFarmSwipe]（已单测）；这里只取截图尺寸/ROI 并回写 outBox。
+     */
+    private val autoEcoFarmSwipeTargetCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { _, _, nodeName, _, customRecognitionParam, _, roi, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        val param = AutoEcoFarmSwipe.parseParam(customRecognitionParam) ?: run {
+            Ln.w("MaaRunner: autoEcoFarmCalculateSwipeTarget 参数不合法: $customRecognitionParam")
+            return@MaaCustomRecognitionCallback 0
+        }
+        try {
+            val rect = getBoxRect(lib, roi)
+            // 上游用截图尺寸 arg.Img.Bounds()；JNA 侧没暴露 image 宽高，用绑定的虚拟屏分辨率
+            // （截图就是它）。极少数拿不到时退回 MAA 规范分辨率 1280x720。
+            val (screenW, screenH) = boundResolution ?: (1280 to 720)
+            val box = AutoEcoFarmSwipe.run(
+                AutoEcoFarmSwipe.Rect(rect.x, rect.y, rect.w, rect.h),
+                param,
+                screenW,
+                screenH,
+            )
+            if (outBox != null) lib.MaaRectSet(outBox, box.x, box.y, box.w, box.h)
+            Ln.i(
+                "MaaRunner: autoEcoFarmCalculateSwipeTarget [$nodeName] " +
+                    "roi=(${rect.x},${rect.y},${rect.w},${rect.h}) -> (${box.x},${box.y})",
+            )
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: autoEcoFarmCalculateSwipeTarget error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** `autoEcoFarmResetSwipeState`：清空 [AutoEcoFarmSwipe] 的跨任务状态。 */
+    private val autoEcoFarmResetSwipeStateCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, _, _, _, _ ->
+        AutoEcoFarmSwipe.resetState()
+        Ln.i("MaaRunner: autoEcoFarmResetSwipeState [$nodeName] state cleared")
+        1
+    }
+
+    /**
+     * `autoEcoFarmOverrideTargetTemplate`：把若干节点的 template 覆写成目标模板。
+     * 构造在 [AutoEcoFarmOverride]（已单测）；参数不合法**返回失败**而不是静默放行。
+     */
+    private val autoEcoFarmOverrideTargetTemplateCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        val param = AutoEcoFarmOverride.parseParam(customActionParam) ?: run {
+            Ln.w("MaaRunner: autoEcoFarmOverrideTargetTemplate 参数不合法: $customActionParam")
+            return@MaaCustomActionCallback 0
+        }
+        val override = AutoEcoFarmOverride.buildOverride(param) ?: run {
+            Ln.w("MaaRunner: autoEcoFarmOverrideTargetTemplate 缺少 template 或 nodeNames (node=$nodeName)")
+            return@MaaCustomActionCallback 0
+        }
+        try {
+            if (lib.MaaContextOverridePipeline(context, JsonTree.toJson(override)).toInt() == 0) {
+                Ln.w("MaaRunner: autoEcoFarmOverrideTargetTemplate 覆写 pipeline 失败 (node=$nodeName)")
+                return@MaaCustomActionCallback 0
+            }
+            Ln.i(
+                "MaaRunner: autoEcoFarmOverrideTargetTemplate [$nodeName] " +
+                    "template='${param.template.trim()}' nodes=${override.keys}",
+            )
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: autoEcoFarmOverrideTargetTemplate error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** `autoEcoFarmFindNearestRecognitionResult`：跑子识别，挑离指定比例位置最近的框。 */
+    private val autoEcoFarmFindNearestCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, _, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        val param = AutoEcoFarmNearest.parseParam(customRecognitionParam) ?: run {
+            Ln.w("MaaRunner: autoEcoFarmFindNearestRecognitionResult 参数不合法: $customRecognitionParam")
+            return@MaaCustomRecognitionCallback 0
+        }
+        if (!AutoEcoFarmNearest.validate(param)) {
+            Ln.w("MaaRunner: autoEcoFarmFindNearestRecognitionResult 参数越界或节点名为空: $customRecognitionParam")
+            return@MaaCustomRecognitionCallback 0
+        }
+        try {
+            // 上游 ctx.RunRecognition(name, arg.Img, nil)：沿用当前截图，不重新截图
+            val recoId = lib.MaaContextRunRecognition(context, param.recognitionNodeName, "{}", image)
+            if (recoId <= 0L) {
+                Ln.i("MaaRunner: autoEcoFarmFindNearestRecognitionResult 子识别未命中 (node=${param.recognitionNodeName})")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val detail = MaaJsonTree.parse(recognitionDetailJson(lib, context, recoId))
+            val box = AutoEcoFarmNearest.pickNearest(detail, param.xRatio, param.yRatio) ?: run {
+                Ln.i("MaaRunner: autoEcoFarmFindNearestRecognitionResult 没有可用结果 (node=${param.recognitionNodeName})")
+                return@MaaCustomRecognitionCallback 0
+            }
+            if (outBox != null) lib.MaaRectSet(outBox, box.x, box.y, box.w, box.h)
+            Ln.i(
+                "MaaRunner: autoEcoFarmFindNearestRecognitionResult [$nodeName] " +
+                    "node=${param.recognitionNodeName} -> (${box.x},${box.y},${box.w},${box.h})",
+            )
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: autoEcoFarmFindNearestRecognitionResult error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * `autoEcoFarmInterruptibleSleep`：250ms 分片休眠，期间按间隔报倒计时，可响应停止。
+     * 分片计划在 [AutoEcoFarmSleep]（已单测）；这里只做 sleep 与停止检查。
+     */
+    private val autoEcoFarmInterruptibleSleepCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 1
+        val param = AutoEcoFarmSleep.parseParam(customActionParam) ?: run {
+            Ln.w("MaaRunner: autoEcoFarmInterruptibleSleep 参数不合法: $customActionParam")
+            return@MaaCustomActionCallback 0
+        }
+        if (param.durationMs <= 0) return@MaaCustomActionCallback 1
+        val tasker = context?.let { lib.MaaContextGetTasker(it) }
+        for (segment in AutoEcoFarmSleep.plan(param.durationMs, param.reportIntervalMs)) {
+            if (isStopRequested() || (tasker != null && lib.MaaTaskerStopping(tasker).toInt() != 0)) {
+                Ln.i("MaaRunner: autoEcoFarmInterruptibleSleep [$nodeName] 任务停止，提前结束")
+                return@MaaCustomActionCallback 1
+            }
+            segment.reportRemainingMs?.let {
+                Ln.i("MaaRunner: autoEcoFarmInterruptibleSleep [$nodeName] 剩余 ${AutoEcoFarmSleep.formatRemaining(it)}")
+            }
+            try {
+                Thread.sleep(segment.chunkMs)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return@MaaCustomActionCallback 1
+            }
+        }
+        Ln.i("MaaRunner: autoEcoFarmInterruptibleSleep [$nodeName] 完成")
+        1
+    }
+
     private fun registerCustomActions(lib: MaaFrameworkLibrary, res: Pointer) {
         registeredCustomActions.clear()
         registeredCustomRecognitions.clear()
@@ -3100,6 +3293,14 @@ class MaaRunner(private val agentHost: AgentHost) {
         regAction("AutoStockpile.ReconcileDecision", autoStockpileReconcileDecisionCallback)
         regAction("OcrTapAction", ocrTapActionCallback)
 
+        // autoEcoFarm 整组不再是 stub：两个识别 + 三个动作全部真实实现（含 override/reset，
+        // 它们是识别链能正确选模板、正确累计滑动状态的前提）
+        regReco("autoEcoFarmCalculateSwipeTarget", autoEcoFarmSwipeTargetCallback)
+        regReco("autoEcoFarmFindNearestRecognitionResult", autoEcoFarmFindNearestCallback)
+        regAction("autoEcoFarmResetSwipeState", autoEcoFarmResetSwipeStateCallback)
+        regAction("autoEcoFarmOverrideTargetTemplate", autoEcoFarmOverrideTargetTemplateCallback)
+        regAction("autoEcoFarmInterruptibleSleep", autoEcoFarmInterruptibleSleepCallback)
+
         val otherActions = listOf(
             "CreditShoppingScanItemAction",
             "AddItemData",
@@ -3115,9 +3316,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             "IntelArchiveShowInventoryAction",
             "SeizeDeliveryJobsResetScanStateAction",
             "SeizeDeliveryJobsScanTargetAction",
-            "autoEcoFarmResetSwipeState",
-            "autoEcoFarmInterruptibleSleep",
-            "autoEcoFarmOverrideTargetTemplate",
+            // autoEcoFarmResetSwipeState/InterruptibleSleep/OverrideTargetTemplate 不在此列：
+            // 已注册为真实实现
             "AutoFightMainAction",
             "AccountSwitchWindowAction",
             "BatchAddFriendsAction",
@@ -3200,8 +3400,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "AeroSalvageBalloonStateRecognition",
             "AeroSalvageGridRecognition",
             "AeroSalvageInitialStateRecognition",
-            "autoEcoFarmCalculateSwipeTarget",
-            "autoEcoFarmFindNearestRecognitionResult",
             "AutoFightEntryRecognition",
             "EssenceFilterAfterBattleNthRecognition",
             "EssenceGridAdvanceRecognition",

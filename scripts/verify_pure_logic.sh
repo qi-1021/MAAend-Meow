@@ -25,6 +25,9 @@ SRC="$REPO/app/src/main/java/com/aliothmoon/maafw/remote"
 SUP="$REPO/app/src/main/java/com/aliothmoon/maafw/supplement"
 TSUP="$REPO/app/src/test/java/com/aliothmoon/maafw/supplement"
 TST="$REPO/app/src/test/java/com/aliothmoon/maafw/remote"
+# 诊断报告的保留/截断策略是纯逻辑（不碰文件系统），也要能本机验证
+DIAG="$REPO/app/src/main/java/com/aliothmoon/maafw/diagnostics"
+TDIAG="$REPO/app/src/test/java/com/aliothmoon/maafw/diagnostics"
 WORK="$REPO/.tmp/verify"
 STUB="$WORK/jstub"
 GC=~/.gradle/caches/modules-2/files-2.1
@@ -72,8 +75,13 @@ MAIN_FILES=(
   "$SRC/OperatorRecognitions.kt"
   "$SRC/OperatorRuntime.kt"
   "$SRC/MapNaviParam.kt"
+  "$SRC/AutoEcoFarmSwipe.kt"
+  "$SRC/AutoEcoFarmNearest.kt"
+  "$SRC/AutoEcoFarmOverride.kt"
+  "$SRC/AutoEcoFarmSleep.kt"
   "$SUP/SupplementPack.kt"
   "$SUP/SupplementPackLocal.kt"
+  "$DIAG/RunDiagnosticsPolicy.kt"
 )
 TEST_FILES=(
   "$TST/BetterSlidingSupportTest.kt"
@@ -94,8 +102,13 @@ TEST_FILES=(
   "$TST/OperatorRecognitionsTest.kt"
   "$TST/OperatorRuntimeTest.kt"
   "$TST/MapNaviParamTest.kt"
+  "$TST/AutoEcoFarmSwipeTest.kt"
+  "$TST/AutoEcoFarmNearestTest.kt"
+  "$TST/AutoEcoFarmOverrideTest.kt"
+  "$TST/AutoEcoFarmSleepTest.kt"
   "$TSUP/SupplementPackTest.kt"
   "$TSUP/SupplementPackLocalTest.kt"
+  "$TDIAG/RunDiagnosticsPolicyTest.kt"
 )
 TEST_CLASSES=(
   com.aliothmoon.maafw.remote.BetterSlidingSupportTest
@@ -116,8 +129,13 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.OperatorRecognitionsTest
   com.aliothmoon.maafw.remote.OperatorRuntimeTest
   com.aliothmoon.maafw.remote.MapNaviParamTest
+  com.aliothmoon.maafw.remote.AutoEcoFarmSwipeTest
+  com.aliothmoon.maafw.remote.AutoEcoFarmNearestTest
+  com.aliothmoon.maafw.remote.AutoEcoFarmOverrideTest
+  com.aliothmoon.maafw.remote.AutoEcoFarmSleepTest
   com.aliothmoon.maafw.supplement.SupplementPackTest
   com.aliothmoon.maafw.supplement.SupplementPackLocalTest
+  com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest
 )
 
 stubs() {
@@ -237,8 +255,13 @@ fun main() {
         "com.aliothmoon.maafw.remote.OperatorRecognitionsTest",
         "com.aliothmoon.maafw.remote.OperatorRuntimeTest",
         "com.aliothmoon.maafw.remote.MapNaviParamTest",
+        "com.aliothmoon.maafw.remote.AutoEcoFarmSwipeTest",
+        "com.aliothmoon.maafw.remote.AutoEcoFarmNearestTest",
+        "com.aliothmoon.maafw.remote.AutoEcoFarmOverrideTest",
+        "com.aliothmoon.maafw.remote.AutoEcoFarmSleepTest",
         "com.aliothmoon.maafw.supplement.SupplementPackTest",
         "com.aliothmoon.maafw.supplement.SupplementPackLocalTest",
+        "com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest",
     )
     var pass = 0
     var fail = 0

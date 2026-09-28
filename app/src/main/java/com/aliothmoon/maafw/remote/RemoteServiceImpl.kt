@@ -7,6 +7,7 @@ import com.aliothmoon.maafw.bridge.InputControlUtils
 import com.aliothmoon.maafw.bridge.NativeBridgeLib
 import com.aliothmoon.maafw.constant.DefaultDisplayConfig
 import com.aliothmoon.maafw.constant.DisplayMode
+import com.aliothmoon.maafw.diagnostics.RunDiagnostics
 import com.aliothmoon.maafw.maa.MaaFrameworkLoader
 import com.aliothmoon.maafw.remote.internal.ActivityUtils
 import com.aliothmoon.maafw.remote.internal.AppWatchdog
@@ -157,8 +158,12 @@ class RemoteServiceImpl : RemoteService.Stub() {
         // 特权进程是 shell/root 身份，app 建的目录未必可写，这里自己建一遍
         if (!logDir.isNullOrBlank() && ensureWritableDir(logDir)) {
             runner.applyGlobalOptions(logDir, isDebug)
+            // debug 才开结构化报告；release 下这里是 no-op，不建任何文件
+            RunDiagnostics.start(isDebug, logDir)
         } else {
             Ln.w("$TAG: log dir unusable, MaaFramework will write to process CWD: $logDir")
+            // 目录不可用就明确关掉，免得沿用上一轮的开启状态
+            RunDiagnostics.start(false)
         }
         Ln.i("$TAG: setup ok, piRoot=$piRoot")
         return true

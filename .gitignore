@@ -29,6 +29,10 @@ versioncode.txt
 *.iml
 .idea/
 
+# Eclipse / Buildship：本地跑 gradle 时误生成的 IDE 元数据
+/.project
+/.settings/
+
 
 # App Build
 /app/release
