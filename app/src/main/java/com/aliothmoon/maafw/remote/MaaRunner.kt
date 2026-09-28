@@ -93,6 +93,9 @@ class MaaRunner(private val agentHost: AgentHost) {
 
     fun setProjectRoot(path: String) {
         projectRoot = path
+        // 据点交易干员子系统按相对路径读 selection_data.json 与写快照缓存
+        OperatorRuntime.projectRoot = path
+        OperatorRuntime.logger = { message -> Ln.w(message) }
     }
 
     /** JNA 回调必须被强引用住，否则会被 GC，native 回调时踩空 */
@@ -324,6 +327,269 @@ class MaaRunner(private val agentHost: AgentHost) {
             1
         } catch (t: Throwable) {
             Ln.e("MaaRunner: ScheduleRecognition 执行异常 node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * 据点交易「干员智能选择」的 MaaFramework 适配。
+     *
+     * 决策全部在 [OperatorRecognitions] / [OperatorSelection] / [OperatorScan] / [OperatorCache]，
+     * 已经本地单测过。这里只把 lib/context/image/roi 接上去，并把结果写回 outBox。
+     *
+     * `hostXxx` 是每次回调前刷新的——回调单线程，而跨帧状态（扫描表、OCR 交接槽）
+     * 必须持久，所以宿主复用、这四项每轮换。
+     */
+    private inner class MaaOperatorHost : OperatorRecognitions.Host {
+        var hostLib: MaaFrameworkLibrary? = null
+        var hostContext: Pointer? = null
+        var hostImage: Pointer? = null
+        var hostTaskId: Long = 0
+        var hostLocation: String = ""
+
+        override fun selectionData(): OperatorDataset.OperatorSelectionData? = OperatorRuntime.selectionData()
+
+        override fun selectionFile(): OperatorDataset.SelectionFile? = OperatorRuntime.selectionFile()
+
+        /**
+         * 拼装选择参数，并按上游做校验：数据里有该据点、扫描域非空、启用集合非空、
+         * 非 all 时该据点必须在启用集合里。任一不满足返回 null（识别判 miss）。
+         */
+        override fun resolveSelection(p: OperatorRecognitions.Param): OperatorSelection.SelectionParam? {
+            val data = OperatorRuntime.selectionData() ?: return null
+            if (p.usage != OperatorSelection.USAGE_ALL && data.targetCandidates[p.location] == null) {
+                Ln.w("MaaRunner: operator 数据里没有据点 ${p.location}")
+                return null
+            }
+            val scanCandidates = OperatorSelection.allOperatorScanCandidates(data)
+            if (scanCandidates.isEmpty()) {
+                Ln.w("MaaRunner: operator 已知干员表为空")
+                return null
+            }
+            val snap = OperatorRuntime.session.snapshot()
+            if (snap.activeLocations.isEmpty()) {
+                Ln.w("MaaRunner: operator 启用据点集合为空（register 未执行？）")
+                return null
+            }
+            if (p.usage != OperatorSelection.USAGE_ALL && p.location !in snap.activeLocations) {
+                Ln.w("MaaRunner: operator 据点 ${p.location} 未启用")
+                return null
+            }
+            return OperatorSelection.SelectionParam(
+                usage = p.usage,
+                location = p.location,
+                // target 才需要该据点的候选；restore/all 留空
+                candidates = if (p.usage == OperatorSelection.USAGE_TARGET) {
+                    OperatorDataset.normalizeOperatorCandidates(data.targetCandidates[p.location] ?: emptyList())
+                } else {
+                    emptyList()
+                },
+                targetCandidatesByLocation = data.targetCandidates,
+                restoreGroups = OperatorDataset.normalizeOperatorCandidateGroups(data.restoreGroups),
+                scanCandidates = scanCandidates,
+                knownOperators = data.knownOperators,
+                activeLocations = snap.activeLocations,
+                completedRestoreLocations = snap.completedRestoreLocations,
+                targetAssignments = snap.targetAssignments,
+                lockedRestoreAssignments = snap.lockedRestoreAssignments,
+                excludedOperators = snap.excludedOperators,
+                outpostProsperityMaxLocations = snap.outpostProsperityMaxLocations,
+            )
+        }
+
+        override fun loadOwnedNames(): Set<String>? = OperatorRuntime.loadOwnedNames()
+
+        override fun listOcr(roi: List<Int>): List<OperatorOcrMatch.Item>? = probe(roi)
+
+        /** reuse=true 先吃交接槽；吃不到才重新 OCR，且**不再写回**（与上游一致）。 */
+        override fun currentOcr(roi: List<Int>, reuse: Boolean): List<OperatorOcrMatch.Item>? {
+            val key = OperatorScan.HandoffKey(hostTaskId, hostLocation, roi)
+            if (reuse) {
+                OperatorRuntime.ocrHandoff.take(key)?.let { return it }
+                return probe(roi)
+            }
+            val items = probe(roi) ?: return null
+            OperatorRuntime.ocrHandoff.store(key, items)
+            return items
+        }
+
+        override val scanStates: OperatorScan.ScanStates = OperatorRuntime.scanStates
+
+        override val session: OperatorSession = OperatorRuntime.session
+
+        override fun cacheHasSnapshot(uid: String): Boolean = OperatorRuntime.hasSnapshot()
+
+        override fun invalidateSnapshot(uid: String): Boolean = OperatorRuntime.invalidateSnapshot()
+
+        override fun shouldWriteSnapshot(p: OperatorRecognitions.Param): Boolean =
+            OperatorScan.shouldWriteSnapshot(p.usage, p.location, p.mode, OperatorRuntime.hasSnapshot())
+
+        override fun writeSnapshot(
+            p: OperatorRecognitions.Param,
+            scanCandidates: List<OperatorDataset.OperatorCandidate>,
+            observed: List<String>,
+        ): Boolean = OperatorRuntime.writeSnapshot(scanCandidates, observed)
+
+        override fun lastError(): String = OperatorRuntime.lastError()
+
+        override fun currentUid(): String = OperatorRuntime.uidProvider()
+
+        override fun log(message: String) {
+            Ln.i("MaaRunner: $message")
+        }
+
+        private fun probe(roi: List<Int>): List<OperatorOcrMatch.Item>? {
+            val lib = hostLib ?: return null
+            val ctx = hostContext ?: return null
+            val image = hostImage ?: return null
+            if (roi.size != 4) return null
+            val items = ocrProbe(lib, ctx, image, intArrayOf(roi[0], roi[1], roi[2], roi[3]))
+            // OcrItem 的 box 可能为空（极少）；匹配仍然有效，但点击框退化到 0,0
+            return items.map { item ->
+                val b = item.box
+                OperatorOcrMatch.Item(
+                    item.text,
+                    if (b != null && b.size >= 4) OcrBox(b[0], b[1], b[2], b[3]) else OcrBox(0, 0, 0, 0),
+                )
+            }
+        }
+    }
+
+    private val operatorHost = MaaOperatorHost()
+    private val operatorRecognitions = OperatorRecognitions(operatorHost)
+
+    /** 六个干员识别共用的回调骨架：解析参数 → 刷新宿主 → 决策 → 回写 outBox。 */
+    private fun makeOperatorRecognition(
+        handler: (OperatorRecognitions, OperatorRecognitions.Param) -> OperatorRecognitions.Outcome,
+    ): MaaFrameworkLibrary.MaaCustomRecognitionCallback =
+        MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, taskId, nodeName, _, customRecognitionParam, image, roi, _, outBox, _ ->
+            val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+            if (context == null || image == null || nodeName == null) return@MaaCustomRecognitionCallback 0
+            val p = OperatorRecognitions.parseParam(MaaJsonTree.parse(customRecognitionParam))
+            if (p == null) {
+                Ln.w("MaaRunner: $nodeName 参数不合法: $customRecognitionParam")
+                return@MaaCustomRecognitionCallback 0
+            }
+            operatorHost.hostLib = lib
+            operatorHost.hostContext = context
+            operatorHost.hostImage = image
+            operatorHost.hostTaskId = taskId
+            operatorHost.hostLocation = p.location
+            try {
+                val hit = handler(operatorRecognitions, p) as? OperatorRecognitions.Outcome.Hit
+                    ?: return@MaaCustomRecognitionCallback 0
+                if (outBox != null && hit.box != null) {
+                    lib.MaaRectSet(outBox, hit.box.x, hit.box.y, hit.box.w, hit.box.h)
+                }
+                Ln.i("MaaRunner: $nodeName 命中 ${hit.detail}")
+                1
+            } catch (t: Throwable) {
+                Ln.e("MaaRunner: $nodeName 执行异常", t)
+                0
+            }
+        }
+
+    private val outpostOperatorSelectBestCallback =
+        makeOperatorRecognition { rec, p -> rec.decideSelectBest(p) }
+
+    private val outpostOperatorCurrentBestCallback =
+        makeOperatorRecognition { rec, p -> rec.decideCurrentBest(p) }
+
+    private val outpostOperatorCurrentUncachedCallback =
+        makeOperatorRecognition { rec, p -> rec.decideUncached(p) }
+
+    private val outpostOperatorListBottomCallback =
+        makeOperatorRecognition { rec, p -> rec.decideListBottom(p, operatorHost.listOcr(p.roi)) }
+
+    private val outpostOperatorScanOutcomeCallback =
+        makeOperatorRecognition { rec, p -> rec.decideScanOutcome(p) }
+
+    /** CacheReady 的「就绪」来自磁盘快照或本任务的 refresh 标记。 */
+    private val outpostOperatorCacheReadyCallback =
+        makeOperatorRecognition { rec, p ->
+            val mode = p.mode
+            val ready = if (mode == OperatorSession.MODE_REFRESH) {
+                OperatorRuntime.session.isRefreshed()
+            } else {
+                OperatorRuntime.hasSnapshot()
+            }
+            rec.decideCacheReady(p, OperatorRecognitions.CacheStatus(ready, OperatorRuntime.snapshotUpdatedAt().orEmpty()))
+        }
+
+    /** 冲突识别：ROI 来自回调本身（参数里没有 roi），OCR 弹窗文本后判定来源据点。 */
+    private val outpostOperatorConflictCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, roi, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null || nodeName == null) return@MaaCustomRecognitionCallback 0
+        val p = OperatorRecognitions.parseConflictParam(MaaJsonTree.parse(customRecognitionParam))
+        if (p == null) {
+            Ln.w("MaaRunner: $nodeName 参数不合法: $customRecognitionParam")
+            return@MaaCustomRecognitionCallback 0
+        }
+        operatorHost.hostLib = lib
+        operatorHost.hostContext = context
+        operatorHost.hostImage = image
+        operatorHost.hostLocation = p.location
+        try {
+            val r = getBoxRect(lib, roi)
+            val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h)).map { item ->
+                val b = item.box
+                OperatorOcrMatch.Item(
+                    item.text,
+                    if (b != null && b.size >= 4) OcrBox(b[0], b[1], b[2], b[3]) else OcrBox(0, 0, 0, 0),
+                )
+            }
+            val hit = operatorRecognitions.decideConflict(p, items) as? OperatorRecognitions.Outcome.Hit
+                ?: return@MaaCustomRecognitionCallback 0
+            Ln.i("MaaRunner: $nodeName 命中 ${hit.detail}")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: $nodeName 执行异常", t)
+            0
+        }
+    }
+
+    /** `OutpostTradingOperatorSession`：7 种 operation 的状态机入口。 */
+    private val outpostOperatorSessionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, _, _ ->
+        val p = OperatorSession.parseParam(MaaJsonTree.parse(customActionParam))
+        if (p == null) {
+            Ln.w("MaaRunner: $nodeName 参数不合法: $customActionParam")
+            return@MaaCustomActionCallback 0
+        }
+        try {
+            val outcome = OperatorRuntime.session.run(p)
+            // reset 会重建会话，扫描状态表也要一起清（上游同一处做）
+            if (p.operation == "reset" && OperatorRuntime.session.lastResetClearedScanStates) {
+                OperatorRuntime.scanStates.clear()
+                OperatorRuntime.ocrHandoff.clear()
+            }
+            when (outcome) {
+                is OperatorSession.SessionOutcome.Failed -> {
+                    Ln.w("MaaRunner: $nodeName ${outcome.reason}")
+                    0
+                }
+
+                is OperatorSession.SessionOutcome.Assignment -> {
+                    Ln.i(
+                        "MaaRunner: $nodeName ${outcome.usage} 干员=${outcome.candidate.name} " +
+                            "changed=${outcome.changed} 据点=${outcome.location}",
+                    )
+                    1
+                }
+
+                is OperatorSession.SessionOutcome.RestoreSkipped -> {
+                    Ln.i("MaaRunner: $nodeName 跳过售后派驻 据点=${outcome.location}")
+                    1
+                }
+
+                is OperatorSession.SessionOutcome.ConflictExcluded -> {
+                    Ln.i("MaaRunner: $nodeName 拉黑干员=${outcome.candidate.name} 据点=${outcome.location}")
+                    1
+                }
+
+                OperatorSession.SessionOutcome.Ok -> 1
+            }
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: $nodeName 执行异常", t)
             0
         }
     }
@@ -2672,7 +2938,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "ImportBluePrintsInitTextAction",
 
             "OutpostTradingLocationPlan",
-            "OutpostTradingOperatorSession",
             // OutpostTradingPrioritySession 不在此列：已显式注册为 outpostPrioritySessionCallback
             "OutpostTradingReserveSession",
             "PullCountCalculatorAction",
@@ -2712,6 +2977,15 @@ class MaaRunner(private val agentHost: AgentHost) {
         regReco("OutpostTradingPriorityItem", outpostTradingPriorityItemCallback)
         regReco("OutpostTradingCurrentGoods", outpostTradingCurrentGoodsCallback)
         regAction("OutpostTradingPrioritySession", outpostPrioritySessionCallback)
+        // 干员智能选择：数据/选择/缓存/会话/扫描全部已移植并单测
+        regReco("OutpostTradingSelectBestOperator", outpostOperatorSelectBestCallback)
+        regReco("OutpostTradingCurrentBestOperator", outpostOperatorCurrentBestCallback)
+        regReco("OutpostTradingCurrentOperatorUncached", outpostOperatorCurrentUncachedCallback)
+        regReco("OutpostTradingOperatorCacheReady", outpostOperatorCacheReadyCallback)
+        regReco("OutpostTradingOperatorListBottom", outpostOperatorListBottomCallback)
+        regReco("OutpostTradingOperatorScanOutcome", outpostOperatorScanOutcomeCallback)
+        regReco("OutpostTradingOperatorConflict", outpostOperatorConflictCallback)
+        regAction("OutpostTradingOperatorSession", outpostOperatorSessionCallback)
         regReco("OcrCheckRecognition", ocrCheckRecognitionCallback)
         // AutoStockpile 的两个识别不再返回恒假：Recognition 恒假会让
         // AutoStockpileDecision<Region> 永不命中，整条决策—购买链直接断掉
@@ -2735,13 +3009,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "IntelArchiveScanItemsRecognition",
             "MapFind",
             "MapLocateAssertLocation",
-            "OutpostTradingCurrentBestOperator",
-            "OutpostTradingCurrentOperatorUncached",
-            "OutpostTradingOperatorCacheReady",
-            "OutpostTradingOperatorConflict",
-            "OutpostTradingOperatorListBottom",
-            "OutpostTradingOperatorScanOutcome",
-            "OutpostTradingSelectBestOperator",
             "PuzzleRecognition",
             "ReceptionRoomExchangeCountdownWithinThresholdRecognition",
             "ReceptionRoomWaitExchangeKeepAliveDueRecognition",
