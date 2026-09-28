@@ -65,6 +65,13 @@ jobs:
         with:
           python-version: '3.12'
 
+      # i18n 资源一致性：中英 key 对齐、占位符集合一致、英文里不残留中文。
+      # 脚本本身早就写了（文档里也写着「可作 CI gate」），但一直没人接——
+      # 和单测是同一类缺口：工具在、闸门没合上。
+      # 放在构建之前：这类静态检查只要几秒，不该等 5 分钟编译完才发现。
+      - name: Check i18n string resources
+        run: python scripts/check_i18n_strings.py
+
       - name: Install Python Build Dependencies
         run: |
           python -m pip install --upgrade pip packaging pillow
