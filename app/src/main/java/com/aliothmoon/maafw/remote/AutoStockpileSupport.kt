@@ -200,6 +200,31 @@ object AutoStockpileSupport {
                 .thenBy { it.box[1] }
         )
 
+    /** 货卡探针的总尝试次数：首次 + 有界重试（真机实测网格进场需要再等 1~2 帧） */
+    const val GOODS_PROBE_MAX_ATTEMPTS = 3
+
+    /** 重试之间的间隔：等货卡网格的进场动画铺完，别一帧接一帧地打空 */
+    const val GOODS_PROBE_RETRY_DELAY_MS = 400L
+
+    /**
+     * 货卡探针扫出 0 个候选时是否再取一帧重试。
+     *
+     * 真机实测（同一轮 run，谷地命中、相隔 17s 的武陵 0 候选）：管道刚导航进武陵市场、
+     * 货卡网格还在进场（卡片渐入/尚未铺满）时，两遍 OCR 都只回三条一模一样的乱码
+     * `2そ22`，scan 出 0 个候选；失败后的 on_error 截图里网格早已铺满。一次空结果就判
+     * seen=0 会把「读太早」误伤成「本区没货」。
+     *
+     * 判定只看候选数，且**有界**：
+     *  - 只要扫到候选就立刻采用（正常路径首帧即返回，不额外取帧、不 sleep）；
+     *  - 只有 0 候选且还有额度才重试；
+     *  - 额度用尽仍是 0 → 真的一件货都没有，交给上层转 Skip。
+     *
+     * @param attempt 当前是第几次尝试（1 起）
+     * @param maxAttempts 总尝试次数上限
+     */
+    fun shouldRetryScan(candidateCount: Int, attempt: Int, maxAttempts: Int): Boolean =
+        candidateCount == 0 && attempt < maxAttempts
+
     /**
      * 一次囤货任务里的决策状态。
      *

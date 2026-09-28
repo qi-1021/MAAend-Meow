@@ -48,7 +48,11 @@ object OcrProbeSupport {
      * 其余启发式沿用旧实现：
      *  - 空结果可疑；
      *  - 单条且框盖满全帧（≥1200×640）可疑；
-     *  - 只剩 ≤4 个单字（颜色过滤失效时整屏回 ['手','手','手']）可疑。
+     *  - 只剩 ≤4 个单字（颜色过滤失效时整屏回 ['手','手','手']）可疑；
+     *  - 2~4 条**完全相同的短文本**可疑：真机武陵首帧回 ['2そ22','2そ22','2そ22']，
+     *    正常的货卡网格是多条不同的名字+价格，≤4 条一模一样基本只可能是帧没渲染好
+     *    或颜色过滤失效。只在 2 条及以上判定：单条合法数值（only_rec 价格/数量）走上面的
+     *    单条分支，不会被误伤。
      */
     fun isSuspicious(hit: Boolean, items: List<GoodsSupport.OcrItem>): Boolean {
         if (!hit) return true
@@ -59,6 +63,8 @@ object OcrProbeSupport {
         }
         // 全是单字：颜色过滤失效 / 帧上真的没有可读文字
         if (items.size <= 4 && items.all { it.text.length == 1 }) return true
+        // 2~4 条完全相同：帧没渲染好 / 颜色过滤失效（武陵首帧的 2そ22 三连）
+        if (items.size in 2..4 && items.map { it.text }.distinct().size == 1) return true
         return false
     }
 }

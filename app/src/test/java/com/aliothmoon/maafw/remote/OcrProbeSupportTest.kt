@@ -137,4 +137,37 @@ class OcrProbeSupportTest {
         val many = (1..5).map { ocr("手", 40, 40) }
         assertFalse(OcrProbeSupport.isSuspicious(hit = true, items = many))
     }
+
+    @Test
+    fun `两到四条完全相同的短文本可疑_真机武陵的 2そ22 三连`() {
+        // 首帧货卡没铺满时两遍 OCR 都只回三条一模一样的乱码，旧判据（全是单字）漏掉
+        assertTrue(
+            OcrProbeSupport.isSuspicious(
+                hit = true,
+                items = listOf(ocr("2そ22", 80, 30), ocr("2そ22", 82, 31), ocr("2そ22", 84, 30)),
+            ),
+        )
+        // 两条相同也在判定内
+        assertTrue(
+            OcrProbeSupport.isSuspicious(hit = true, items = listOf(ocr("2そ22", 80, 30), ocr("2そ22", 82, 31))),
+        )
+    }
+
+    @Test
+    fun `多条但文本不同不算可疑`() {
+        // 正常的货卡网格：名字/价格各不相同，别被上面的「相同文本」判据扫到
+        assertFalse(
+            OcrProbeSupport.isSuspicious(
+                hit = true,
+                items = listOf(ocr("1200", 80, 30), ocr("1200", 82, 31), ocr("950", 84, 30)),
+            ),
+        )
+    }
+
+    @Test
+    fun `两条不同的短数值不是可疑帧`() {
+        assertFalse(
+            OcrProbeSupport.isSuspicious(hit = true, items = listOf(ocr("2675", 160, 48), ocr("1811", 160, 48))),
+        )
+    }
 }

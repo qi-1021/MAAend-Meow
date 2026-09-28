@@ -68,6 +68,7 @@ MAIN_FILES=(
   "$SRC/MaaJsonTree.kt"
   "$SRC/GoodsSupport.kt"
   "$SRC/OcrProbeSupport.kt"
+  "$SRC/AutoStockpileSupport.kt"
   "$SRC/AutoStockStapleSupport.kt"
   "$SRC/ScheduleSupport.kt"
   "$SRC/OperatorOcrMatch.kt"
@@ -101,6 +102,7 @@ TEST_FILES=(
   "$TST/BetterSlidingSessionTest.kt"
   "$TST/JsonTreeTest.kt"
   "$TST/OcrProbeSupportTest.kt"
+  "$TST/AutoStockpileSupportTest.kt"
   "$TST/AutoStockStapleSupportTest.kt"
   "$TST/ScheduleSupportTest.kt"
   "$TST/OperatorOcrMatchTest.kt"
@@ -133,6 +135,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.BetterSlidingSessionTest
   com.aliothmoon.maafw.remote.JsonTreeTest
   com.aliothmoon.maafw.remote.OcrProbeSupportTest
+  com.aliothmoon.maafw.remote.AutoStockpileSupportTest
   com.aliothmoon.maafw.remote.AutoStockStapleSupportTest
   com.aliothmoon.maafw.remote.ScheduleSupportTest
   com.aliothmoon.maafw.remote.OperatorOcrMatchTest
@@ -264,6 +267,7 @@ fun main() {
         "com.aliothmoon.maafw.remote.BetterSlidingSessionTest",
         "com.aliothmoon.maafw.remote.JsonTreeTest",
         "com.aliothmoon.maafw.remote.OcrProbeSupportTest",
+        "com.aliothmoon.maafw.remote.AutoStockpileSupportTest",
         "com.aliothmoon.maafw.remote.AutoStockStapleSupportTest",
         "com.aliothmoon.maafw.remote.ScheduleSupportTest",
         "com.aliothmoon.maafw.remote.OperatorOcrMatchTest",
@@ -296,6 +300,10 @@ fun main() {
             if (m.getAnnotation(org.junit.Test::class.java) == null) continue
             val instance = cls.getDeclaredConstructor().newInstance()
             try {
+                // JUnit 语义：每个 @Test 前先跑 @Before（AutoStockpileSupportTest 靠它 reset Session）
+                for (b in cls.declaredMethods) {
+                    if (b.getAnnotation(org.junit.Before::class.java) != null) b.invoke(instance)
+                }
                 m.invoke(instance)
                 pass++
                 println("  ok   ${m.name}")

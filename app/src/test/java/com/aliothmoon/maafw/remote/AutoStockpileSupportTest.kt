@@ -1,6 +1,7 @@
 package com.aliothmoon.maafw.remote
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -203,5 +204,37 @@ class AutoStockpileSupportTest {
 
         AutoStockpileSupport.Session.decide("ValleyIV", "AutoStockpileDecisionValleyIV", emptyList())
         assertNotNull(AutoStockpileSupport.Session.decide("Wuling", "AutoStockpileDecisionWuling", candidates))
+    }
+
+    @Test
+    fun `扫不出候选且还有额度才重试`() {
+        val max = AutoStockpileSupport.GOODS_PROBE_MAX_ATTEMPTS
+        // 真机武陵首帧：候选 0 → 重试；后面帧网格铺满 → 命中即停
+        assertTrue(AutoStockpileSupport.shouldRetryScan(0, attempt = 1, maxAttempts = max))
+        assertTrue(AutoStockpileSupport.shouldRetryScan(0, attempt = max - 1, maxAttempts = max))
+        // 额度用尽不再重试，老老实实把 0 交给上层转 Skip
+        assertFalse(AutoStockpileSupport.shouldRetryScan(0, attempt = max, maxAttempts = max))
+    }
+
+    @Test
+    fun `只要有候选就不重试_正常路径零额外取帧`() {
+        val max = AutoStockpileSupport.GOODS_PROBE_MAX_ATTEMPTS
+        assertFalse(AutoStockpileSupport.shouldRetryScan(1, attempt = 1, maxAttempts = max))
+        assertFalse(AutoStockpileSupport.shouldRetryScan(6, attempt = 1, maxAttempts = max))
+        // 即使被打到最后一帧，有候选也不该再刷帧
+        assertFalse(AutoStockpileSupport.shouldRetryScan(1, attempt = max, maxAttempts = max))
+    }
+
+    @Test
+    fun `重试额度是有界的小值_不能拖慢正常路径`() {
+        // 上报一下边界：总次数 2~3、间隔在百毫秒级，别被改成无界循环
+        assertTrue(
+            "maxAttempts=${AutoStockpileSupport.GOODS_PROBE_MAX_ATTEMPTS}",
+            AutoStockpileSupport.GOODS_PROBE_MAX_ATTEMPTS in 2..3,
+        )
+        assertTrue(
+            "delayMs=${AutoStockpileSupport.GOODS_PROBE_RETRY_DELAY_MS}",
+            AutoStockpileSupport.GOODS_PROBE_RETRY_DELAY_MS in 100L..1000L,
+        )
     }
 }

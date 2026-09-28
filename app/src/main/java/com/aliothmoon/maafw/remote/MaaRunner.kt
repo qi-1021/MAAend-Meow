@@ -2422,6 +2422,10 @@ class MaaRunner(private val agentHost: AgentHost) {
      * 本意是压掉货卡插画（不过滤时整屏只回 ['手','手','手']）；但商品名是深色条上的
      * 白字，白字会被刷成黑、连同深色条一起变成纯黑块，名字反而读不出来。
      * 哪种更管用要看真机，所以两遍都读、合并，让日志直接给出两遍各认出几个货组名。
+     *
+     * 为什么要重试：真机实测管道刚导航进武陵市场时货卡网格还在进场，两遍 OCR 都只回
+     * 三条一模一样的乱码（scan 出 0 个候选），而失败后的截图里网格早已铺满。所以
+     * 「一个候选都没扫到」时有界重试，等网格铺完；正常路径首帧命中即返回，不额外取帧。
      */
     private fun goodsOcrProbe(
         lib: MaaFrameworkLibrary,
@@ -2430,23 +2434,39 @@ class MaaRunner(private val agentHost: AgentHost) {
         roiBox: IntArray?,
         region: String,
     ): List<GoodsSupport.OcrItem> {
-        // 货卡是一页多张卡，必须完整检测分框；only_rec 会把整段 ROI 退化成一个大框
-        val filtered = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = GOODS_COLOR_FILTER, onlyRec = false)
-        val filteredHits = AutoStockpileSupport.scan(filtered, region).size
-        if (filteredHits > 0) {
+        var best: List<GoodsSupport.OcrItem> = emptyList()
+        for (attempt in 1..AutoStockpileSupport.GOODS_PROBE_MAX_ATTEMPTS) {
+            // 货卡是一页多张卡，必须完整检测分框；only_rec 会把整段 ROI 退化成一个大框
+            val filtered = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = GOODS_COLOR_FILTER, onlyRec = false)
+            val filteredHits = AutoStockpileSupport.scan(filtered, region).size
+            if (filteredHits > 0) {
+                Ln.i(
+                    "MaaRunner: goods OCR [$region] filtered hits=$filteredHits texts=${filtered.take(10).map { it.text }}",
+                )
+                return filtered
+            }
+            val plain = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = null, onlyRec = false)
+            val plainHits = AutoStockpileSupport.scan(plain, region).size
             Ln.i(
-                "MaaRunner: goods OCR [$region] filtered hits=$filteredHits texts=${filtered.take(10).map { it.text }}",
+                "MaaRunner: goods OCR [$region] attempt=$attempt/${AutoStockpileSupport.GOODS_PROBE_MAX_ATTEMPTS} " +
+                    "filtered=$filteredHits plain=$plainHits " +
+                    "filteredTexts=${filtered.take(8).map { it.text }} plainTexts=${plain.take(8).map { it.text }}",
             )
-            return filtered
+            if (plainHits > 0) return mergeOcrItems(filtered, plain)
+            val probe = if (filtered.size >= plain.size) filtered else plain
+            if (probe.size > best.size) best = probe
+            // 一个候选都没扫到且还有额度：等网格进场后重新取帧再探
+            if (!AutoStockpileSupport.shouldRetryScan(
+                    candidateCount = 0,
+                    attempt = attempt,
+                    maxAttempts = AutoStockpileSupport.GOODS_PROBE_MAX_ATTEMPTS,
+                )
+            ) {
+                return best
+            }
+            Thread.sleep(AutoStockpileSupport.GOODS_PROBE_RETRY_DELAY_MS)
         }
-        val plain = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = null, onlyRec = false)
-        val plainHits = AutoStockpileSupport.scan(plain, region).size
-        Ln.i(
-            "MaaRunner: goods OCR [$region] filtered=$filteredHits plain=$plainHits " +
-                "filteredTexts=${filtered.take(8).map { it.text }} plainTexts=${plain.take(8).map { it.text }}",
-        )
-        if (plainHits == 0) return if (filtered.size >= plain.size) filtered else plain
-        return mergeOcrItems(filtered, plain)
+        return best
     }
 
     /** 两遍 OCR 结果合并去重，过滤那遍优先 */
