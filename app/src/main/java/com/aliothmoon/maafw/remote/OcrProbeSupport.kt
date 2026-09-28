@@ -67,4 +67,29 @@ object OcrProbeSupport {
         if (items.size in 2..4 && items.map { it.text }.distinct().size == 1) return true
         return false
     }
+
+    /**
+     * 货卡探针第 [attempt] 次尝试（1-based，对应 `goodsOcrProbe` 的外层循环）该不该用
+     * 框架回调给的 `image`，而不是自己重新截屏。
+     *
+     * 框架帧就是框架本次识别实际用的那一帧——用它做第一次 OCR，能保证「OCR 看到的就是
+     * 框架看到的」，从根上消掉「自抓帧与框架帧不一致」造成的假失败（真机武陵：框架 on_error
+     * 截图完全正常，探针自抓帧却稳定读出 `2そ22` 三连、跨三次取帧逐字一致）。
+     *
+     * 但**只有第一次尝试**能用它：
+     *  - 后续重试的目的是「换一帧等画面进场」，复用同一张框架帧等于不换帧，重试失去意义；
+     *  - 帧为空（`hasFrameworkFrame=false`，例如未来从别处调用）时无框架帧可用，只能自抓。
+     */
+    fun shouldUseFrameworkFrame(attempt: Int, hasFrameworkFrame: Boolean): Boolean =
+        attempt == 1 && hasFrameworkFrame
+
+    /**
+     * 一次探针内部第 [attemptIndex] 轮（0-based，对应 `cachedOcrProbe` 的坏帧重试）该不该用
+     * 外部传入的首选帧（框架帧）。
+     *
+     * 与 [shouldUseFrameworkFrame] 同一原则：首选帧只用于第一轮，之后是「坏帧重试」，
+     * 必须自己重新取帧。
+     */
+    fun shouldUsePreferredFrame(attemptIndex: Int, hasPreferredFrame: Boolean): Boolean =
+        attemptIndex == 0 && hasPreferredFrame
 }

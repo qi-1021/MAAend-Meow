@@ -170,4 +170,49 @@ class OcrProbeSupportTest {
             OcrProbeSupport.isSuspicious(hit = true, items = listOf(ocr("2675", 160, 48), ocr("1811", 160, 48))),
         )
     }
+
+    // ───────────────── 帧来源选择（框架帧 vs 自抓）─────────────────────────
+
+    @Test
+    fun `第一次尝试且有框架帧时用框架帧`() {
+        // 根因修复：识别回调把框架本次识别用的 image 透传进来，第一次 OCR 直接用它，
+        // 「OCR 看到的就是框架看到的」，不再自抓一张可能不一致的帧（武陵 2そ22）。
+        assertTrue(OcrProbeSupport.shouldUseFrameworkFrame(attempt = 1, hasFrameworkFrame = true))
+    }
+
+    @Test
+    fun `重试时不用框架帧_要换新帧等画面进场`() {
+        // 重试的意义就是换一帧；复用同一张框架帧等于不换帧。
+        assertFalse(OcrProbeSupport.shouldUseFrameworkFrame(attempt = 2, hasFrameworkFrame = true))
+        assertFalse(OcrProbeSupport.shouldUseFrameworkFrame(attempt = 3, hasFrameworkFrame = true))
+    }
+
+    @Test
+    fun `image 为空时第一次也回退自抓`() {
+        // image 可能为空（未来从别处调用），必须明确回退，不能崩也不该用空帧。
+        assertFalse(OcrProbeSupport.shouldUseFrameworkFrame(attempt = 1, hasFrameworkFrame = false))
+        assertFalse(OcrProbeSupport.shouldUseFrameworkFrame(attempt = 2, hasFrameworkFrame = false))
+    }
+
+    @Test
+    fun `尝试序号非正时不使用框架帧`() {
+        assertFalse(OcrProbeSupport.shouldUseFrameworkFrame(attempt = 0, hasFrameworkFrame = true))
+    }
+
+    @Test
+    fun `探针内部第一轮用首选帧`() {
+        assertTrue(OcrProbeSupport.shouldUsePreferredFrame(attemptIndex = 0, hasPreferredFrame = true))
+    }
+
+    @Test
+    fun `探针内部坏帧重试第二轮起自抓`() {
+        // cachedOcrProbe 的 attempts=2：第一轮用首选帧，第二轮是坏帧重试，必须自己取新帧。
+        assertFalse(OcrProbeSupport.shouldUsePreferredFrame(attemptIndex = 1, hasPreferredFrame = true))
+        assertFalse(OcrProbeSupport.shouldUsePreferredFrame(attemptIndex = 2, hasPreferredFrame = true))
+    }
+
+    @Test
+    fun `没有首选帧时内部第一轮也自抓`() {
+        assertFalse(OcrProbeSupport.shouldUsePreferredFrame(attemptIndex = 0, hasPreferredFrame = false))
+    }
 }

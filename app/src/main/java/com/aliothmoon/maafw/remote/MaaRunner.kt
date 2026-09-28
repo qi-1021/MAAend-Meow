@@ -2216,7 +2216,14 @@ class MaaRunner(private val agentHost: AgentHost) {
         data.getByteArray(0, size.toInt())
     }.getOrNull()
 
-    /** 从 controller 缓存帧做 OCR 探针；可疑结果时刷帧重试（坏帧防御） */
+    /**
+     * 从 controller 缓存帧做 OCR 探针；可疑结果时刷帧重试（坏帧防御）。
+     *
+     * [preferredImage] 是调用方（识别回调）手上那一帧（框架本次识别用的 `image`）：非空时
+     * **第一轮**直接拿它 OCR，不再自己 `PostScreencap`——「OCR 看到的就是框架看到的」。
+     * 之后的重试轮、以及 [preferredImage] 为空/空 buffer 时，仍走原来的自抓退路。
+     * 这样既优先用框架帧，又保留「坏帧重试要换新帧」与「动作回调没有 image」两类自抓场景。
+     */
     private fun cachedOcrProbe(
         lib: MaaFrameworkLibrary,
         ctrl: Pointer,
@@ -2226,25 +2233,42 @@ class MaaRunner(private val agentHost: AgentHost) {
         colorFilter: String? = null,
         onlyRec: Boolean = false,
         capture: ProbeFrameCapture? = null,
+        preferredImage: Pointer? = null,
     ): List<GoodsSupport.OcrItem> {
         var items: List<GoodsSupport.OcrItem> = emptyList()
-        repeat(attempts) {
-            val capId = lib.MaaControllerPostScreencap(ctrl)
-            if (capId > 0) lib.MaaControllerWait(ctrl, capId)
-            val imgBuf = lib.MaaImageBufferCreate() ?: return emptyList()
+        repeat(attempts) { attemptIndex ->
+            // 首选帧只用于第一轮；重试要换新帧。指针为空、或 buffer 为空（未来从别处调用）
+            // 都明确回退自抓，绝不把空帧送去 OCR。
+            val usePreferred = preferredImage != null &&
+                OcrProbeSupport.shouldUsePreferredFrame(attemptIndex, hasPreferredFrame = true) &&
+                lib.MaaImageBufferIsEmpty(preferredImage).toInt() == 0
+            var owned = false
+            var capId = 0L
+            val imgBuf: Pointer = if (usePreferred) {
+                Ln.i("MaaRunner: cachedOcrProbe 使用框架帧 attempt=$attemptIndex")
+                preferredImage!!
+            } else {
+                capId = lib.MaaControllerPostScreencap(ctrl)
+                if (capId > 0) lib.MaaControllerWait(ctrl, capId)
+                val buf = lib.MaaImageBufferCreate() ?: return emptyList()
+                owned = true
+                buf
+            }
             try {
-                val cachedRc = lib.MaaControllerCachedImage(ctrl, imgBuf).toInt()
-                if (cachedRc == 0) {
-                    // 取帧失败会静默跳过本轮，现象也是 0 候选；记下返回值便于与「真读到乱码」区分
-                    Ln.w("MaaRunner: cachedOcrProbe 取帧失败 capId=$capId cachedImage=$cachedRc")
-                    return@repeat
+                if (owned) {
+                    val cachedRc = lib.MaaControllerCachedImage(ctrl, imgBuf).toInt()
+                    if (cachedRc == 0) {
+                        // 取帧失败会静默跳过本轮，现象也是 0 候选；记下返回值便于与「真读到乱码」区分
+                        Ln.w("MaaRunner: cachedOcrProbe 取帧失败 capId=$capId cachedImage=$cachedRc")
+                        return@repeat
+                    }
+                    val emptyRc = lib.MaaImageBufferIsEmpty(imgBuf).toInt()
+                    if (emptyRc != 0) {
+                        Ln.w("MaaRunner: cachedOcrProbe 帧为空 capId=$capId cachedImage=$cachedRc isEmpty=$emptyRc")
+                        return@repeat
+                    }
+                    Ln.i("MaaRunner: cachedOcrProbe 取帧 ok capId=$capId cachedImage=$cachedRc isEmpty=$emptyRc")
                 }
-                val emptyRc = lib.MaaImageBufferIsEmpty(imgBuf).toInt()
-                if (emptyRc != 0) {
-                    Ln.w("MaaRunner: cachedOcrProbe 帧为空 capId=$capId cachedImage=$cachedRc isEmpty=$emptyRc")
-                    return@repeat
-                }
-                Ln.i("MaaRunner: cachedOcrProbe 取帧 ok capId=$capId cachedImage=$cachedRc isEmpty=$emptyRc")
                 // 诊断：留一份实际输入帧，只有全 0 候选时上层才会真正落盘
                 capture?.let { holder -> readEncodedImage(lib, imgBuf)?.let { holder.pngBytes = it } }
                 val frame = runOcrProbeFrame(lib, context, imgBuf, roiBox, onlyRec, colorFilter)
@@ -2252,7 +2276,7 @@ class MaaRunner(private val agentHost: AgentHost) {
                 items = if (frame.hit) frame.items else emptyList()
                 if (!OcrProbeSupport.isSuspicious(frame.hit, frame.items)) return items
             } finally {
-                lib.MaaImageBufferDestroy(imgBuf)
+                if (owned) lib.MaaImageBufferDestroy(imgBuf)
             }
         }
         return items
@@ -2379,7 +2403,7 @@ class MaaRunner(private val agentHost: AgentHost) {
      * region 从节点名 AutoStockpileDecision<Region> 取，与上游
      * resolveGoodsRegionFromTaskNode 同源。
      */
-    private val autoStockpileRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, _, _, _, _, outBox, _ ->
+    private val autoStockpileRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, _, image, _, _, outBox, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
         if (context == null) return@MaaCustomRecognitionCallback 0
         try {
@@ -2390,7 +2414,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                 return@MaaCustomRecognitionCallback 0
             }
             val ctrl = controller ?: return@MaaCustomRecognitionCallback 0
-            val items = goodsOcrProbe(lib, ctrl, context, AutoStockpileSupport.goodsRoi, region)
+            // image 是框架本次识别用的那一帧，透传下去优先 OCR（可能为空，探针内部回退自抓）
+            val items = goodsOcrProbe(lib, ctrl, context, AutoStockpileSupport.goodsRoi, region, image)
             val candidates = AutoStockpileSupport.scan(items, region)
             val pick = AutoStockpileSupport.Session.decide(region, node, candidates)
             if (pick == null) {
@@ -2463,6 +2488,10 @@ class MaaRunner(private val agentHost: AgentHost) {
      * 为什么要重试：真机实测管道刚导航进武陵市场时货卡网格还在进场，两遍 OCR 都只回
      * 三条一模一样的乱码（scan 出 0 个候选），而失败后的截图里网格早已铺满。所以
      * 「一个候选都没扫到」时有界重试，等网格铺完；正常路径首帧命中即返回，不额外取帧。
+     *
+     * [frameworkImage] 是识别回调手上那一帧（框架本次识别实际用的 `image`）：第一次尝试
+     * 两遍 OCR 都用它，保证「OCR 看到的就是框架看到的」；之后的重试要换新帧等画面进场，
+     * 一律自抓。为空时全程自抓，不崩。
      */
     private fun goodsOcrProbe(
         lib: MaaFrameworkLibrary,
@@ -2470,6 +2499,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         context: Pointer,
         roiBox: IntArray?,
         region: String,
+        frameworkImage: Pointer? = null,
     ): List<GoodsSupport.OcrItem> {
         var best: List<GoodsSupport.OcrItem> = emptyList()
         // 诊断：开启时才有额外开销——捕获「实际送去 OCR 的最后一帧」并逐轮记文本，
@@ -2478,9 +2508,16 @@ class MaaRunner(private val agentHost: AgentHost) {
         val capture = if (diagnosticsOn) ProbeFrameCapture() else null
         val attemptTexts = if (diagnosticsOn) mutableListOf<Map<String, Any?>>() else null
         for (attempt in 1..AutoStockpileSupport.GOODS_PROBE_MAX_ATTEMPTS) {
+            // 第一次尝试用框架帧，之后重试自抓；框架帧为空则全程自抓。
+            val preferred = if (OcrProbeSupport.shouldUseFrameworkFrame(attempt, frameworkImage != null)) {
+                frameworkImage
+            } else {
+                null
+            }
             // 货卡是一页多张卡，必须完整检测分框；only_rec 会把整段 ROI 退化成一个大框
             val filtered = cachedOcrProbe(
-                lib, ctrl, context, roiBox, colorFilter = GOODS_COLOR_FILTER, onlyRec = false, capture = capture,
+                lib, ctrl, context, roiBox, colorFilter = GOODS_COLOR_FILTER, onlyRec = false,
+                capture = capture, preferredImage = preferred,
             )
             val filteredHits = AutoStockpileSupport.scan(filtered, region).size
             if (filteredHits > 0) {
@@ -2490,7 +2527,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                 return filtered
             }
             val plain = cachedOcrProbe(
-                lib, ctrl, context, roiBox, colorFilter = null, onlyRec = false, capture = capture,
+                lib, ctrl, context, roiBox, colorFilter = null, onlyRec = false,
+                capture = capture, preferredImage = preferred,
             )
             val plainHits = AutoStockpileSupport.scan(plain, region).size
             Ln.i(
