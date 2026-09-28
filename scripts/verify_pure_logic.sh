@@ -75,6 +75,7 @@ MAIN_FILES=(
   "$SRC/OperatorRecognitions.kt"
   "$SRC/OperatorRuntime.kt"
   "$SRC/MapNaviParam.kt"
+  "$SRC/ReceptionRoomSupport.kt"
   "$SRC/AutoEcoFarmSwipe.kt"
   "$SRC/AutoEcoFarmNearest.kt"
   "$SRC/AutoEcoFarmOverride.kt"
@@ -102,6 +103,7 @@ TEST_FILES=(
   "$TST/OperatorRecognitionsTest.kt"
   "$TST/OperatorRuntimeTest.kt"
   "$TST/MapNaviParamTest.kt"
+  "$TST/ReceptionRoomSupportTest.kt"
   "$TST/AutoEcoFarmSwipeTest.kt"
   "$TST/AutoEcoFarmNearestTest.kt"
   "$TST/AutoEcoFarmOverrideTest.kt"
@@ -129,6 +131,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.OperatorRecognitionsTest
   com.aliothmoon.maafw.remote.OperatorRuntimeTest
   com.aliothmoon.maafw.remote.MapNaviParamTest
+  com.aliothmoon.maafw.remote.ReceptionRoomSupportTest
   com.aliothmoon.maafw.remote.AutoEcoFarmSwipeTest
   com.aliothmoon.maafw.remote.AutoEcoFarmNearestTest
   com.aliothmoon.maafw.remote.AutoEcoFarmOverrideTest
@@ -255,6 +258,7 @@ fun main() {
         "com.aliothmoon.maafw.remote.OperatorRecognitionsTest",
         "com.aliothmoon.maafw.remote.OperatorRuntimeTest",
         "com.aliothmoon.maafw.remote.MapNaviParamTest",
+        "com.aliothmoon.maafw.remote.ReceptionRoomSupportTest",
         "com.aliothmoon.maafw.remote.AutoEcoFarmSwipeTest",
         "com.aliothmoon.maafw.remote.AutoEcoFarmNearestTest",
         "com.aliothmoon.maafw.remote.AutoEcoFarmOverrideTest",

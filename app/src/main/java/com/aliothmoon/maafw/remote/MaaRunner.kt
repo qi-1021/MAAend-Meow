@@ -2531,6 +2531,101 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    // ───────────────────── 会客室·交流倒计时 ─────────────────────
+    // 对齐上游 dijjiangrewards/reception_room.go：两个识别共用
+    // `RunRecognition(ReceptionRoomExchangeCountdownText)` 的 OCR 文本。
+
+    /** 上游两个 recognition struct 里的节流状态机。 */
+    private val receptionWaitingReportGate = ReceptionRoomSupport.WaitingReportGate()
+    private val receptionKeepAliveGate = ReceptionRoomSupport.KeepAliveGate()
+
+    private data class ReceptionCountdown(val text: String, val seconds: Int, val box: IntArray?)
+
+    /** 对齐上游 `recognizeCountdownSeconds`：跑 OCR 节点 → best 文本 → 秒数。 */
+    private fun recognizeReceptionCountdown(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        image: Pointer,
+    ): ReceptionCountdown? {
+        val res = runRecognitionOnce(lib, context, image, ReceptionRoomSupport.COUNTDOWN_TEXT_NODE)
+            ?: return null
+        val text = ReceptionRoomSupport.bestOcrText(MaaJsonTree.parse(res.detailJson)) ?: return null
+        val seconds = when (val outcome = ReceptionRoomSupport.parseCountdownSeconds(text)) {
+            is ReceptionRoomSupport.SecondsOutcome.Ok -> outcome.seconds
+            is ReceptionRoomSupport.SecondsOutcome.Invalid -> {
+                Ln.d("MaaRunner: 会客室倒计时解析失败：${outcome.reason}")
+                return null
+            }
+        }
+        return ReceptionCountdown(text, seconds, res.box)
+    }
+
+    private fun setReceptionOutBox(lib: MaaFrameworkLibrary, outBox: Pointer?, box: IntArray?) {
+        if (outBox == null || box == null || box.size < 4) return
+        lib.MaaRectSet(outBox, box[0], box[1], box[2], box[3])
+    }
+
+    /**
+     * `ReceptionRoomExchangeCountdownWithinThresholdRecognition`：
+     * 倒计时 ≤ `threshold_minutes`（默认 5）时命中；`report_waiting` 时每 10 秒放行一次提示。
+     *
+     * 上游提示走 maafocus 大内容输出；移动端没有该通道，这里保留同样的节流门控，
+     * 改成一条日志，不影响命中判定。
+     */
+    private val receptionCountdownWithinThresholdCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, _, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val params = when (val outcome = ReceptionRoomSupport.parseCountdownParams(customRecognitionParam)) {
+                is ReceptionRoomSupport.ParamsOutcome.Ok -> outcome.params
+                is ReceptionRoomSupport.ParamsOutcome.Invalid -> {
+                    Ln.e("MaaRunner: ReceptionRoomCountdown [$nodeName] 参数非法：${outcome.reason}")
+                    return@MaaCustomRecognitionCallback 0
+                }
+            }
+
+            val reading = recognizeReceptionCountdown(lib, context, image)
+                ?: return@MaaCustomRecognitionCallback 0
+            val thresholdSeconds = params.thresholdMinutes * 60
+            if (reading.seconds > thresholdSeconds) return@MaaCustomRecognitionCallback 0
+
+            if (params.reportWaiting &&
+                receptionWaitingReportGate.shouldReportWaiting(System.currentTimeMillis())
+            ) {
+                Ln.i("MaaRunner: 会客室等待交流结束，剩余 ${ReceptionRoomSupport.formatCountdown(reading.seconds)}")
+            }
+            setReceptionOutBox(lib, outBox, reading.box)
+            Ln.i("MaaRunner: ReceptionRoomCountdown [$nodeName] text='${reading.text}' seconds=${reading.seconds} threshold=$thresholdSeconds matched=true")
+            1
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: ReceptionRoomCountdown error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * `ReceptionRoomWaitExchangeKeepAliveDueRecognition`：
+     * 距上次保活满 20 分钟命中一次；判定间隔超 2 分钟视为会话中断，保活计时重置。
+     */
+    private val receptionKeepAliveDueCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, _, image, _, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val reading = recognizeReceptionCountdown(lib, context, image)
+                ?: return@MaaCustomRecognitionCallback 0
+            if (!receptionKeepAliveGate.shouldKeepAlive(System.currentTimeMillis())) {
+                return@MaaCustomRecognitionCallback 0
+            }
+            setReceptionOutBox(lib, outBox, reading.box)
+            val intervalSeconds = (ReceptionRoomSupport.KEEP_ALIVE_INTERVAL_MILLIS / 1000L).toInt()
+            Ln.i("MaaRunner: ReceptionRoomKeepAlive [$nodeName] text='${reading.text}' seconds=${reading.seconds} interval=$intervalSeconds matched=true")
+            1
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: ReceptionRoomKeepAlive error on node=$nodeName", t)
+            0
+        }
+    }
+
     fun setCallback(callback: IMaaRunnerCallback?) {
         callbackRef.set(callback)
     }
@@ -3392,6 +3487,15 @@ class MaaRunner(private val agentHost: AgentHost) {
         // AutoStockpileDecision<Region> 永不命中，整条决策—购买链直接断掉
         regReco("AutoStockpile.Recognition", autoStockpileRecognitionCallback)
         regReco("AutoStockpile.SelectedGoodsHit", autoStockpileSelectedGoodsHitCallback)
+        // 会客室·交流倒计时不再恒假：恒假会让「等待交流结束/长时间保活」分支永不可达
+        regReco(
+            "ReceptionRoomExchangeCountdownWithinThresholdRecognition",
+            receptionCountdownWithinThresholdCallback,
+        )
+        regReco(
+            "ReceptionRoomWaitExchangeKeepAliveDueRecognition",
+            receptionKeepAliveDueCallback,
+        )
 
         val falseRecognitions = listOf(
             "ImageCheckNotPassedRecognition",
@@ -3409,8 +3513,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "MapFind",
             "MapLocateAssertLocation",
             "PuzzleRecognition",
-            "ReceptionRoomExchangeCountdownWithinThresholdRecognition",
-            "ReceptionRoomWaitExchangeKeepAliveDueRecognition",
             "SeizeDeliveryJobsFindTargetRecognition",
             "SeizeDeliveryJobsScanTargetRecognition",
             "TrialOfSwordmancy.Recognize",
