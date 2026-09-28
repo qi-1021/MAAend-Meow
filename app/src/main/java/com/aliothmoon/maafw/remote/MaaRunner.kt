@@ -156,7 +156,11 @@ class MaaRunner(private val agentHost: AgentHost) {
         override fun recognitionDetailJson(recoId: Long): String? {
             val l = hostLib ?: return null
             val ctx = hostContext ?: return null
-            return this@MaaRunner.recognitionDetailJson(l, ctx, recoId)
+            val json = this@MaaRunner.recognitionDetailJson(l, ctx, recoId)
+            // 真机诊断：BetterSliding 驱动节点走回调 recoId 查 detail。若这里 len=0/为 null，
+            // 说明「查不到」；若 len>0 但上层仍读不到数量，则是解析问题（And 数组根，见 BetterSlidingOcr）。
+            Ln.i("MaaRunner: BetterSliding recognitionDetail recoId=$recoId len=${json?.length ?: 0}")
+            return json
         }
 
         override fun parseJson(text: String): Any? = MaaJsonTree.parse(text)
@@ -1866,8 +1870,16 @@ class MaaRunner(private val agentHost: AgentHost) {
 
     /** 按 recoId 取识别详情 JSON。BetterSliding 宿主与数量控制共用。 */
     private fun recognitionDetailJson(lib: MaaFrameworkLibrary, context: Pointer, recoId: Long): String? {
-        if (recoId <= 0L) return null
-        val tasker = lib.MaaContextGetTasker(context) ?: return null
+        if (recoId <= 0L) {
+            // 回调 recoId 为 0 只会出现在 action-only 节点（框架 Go 绑定 custom_action.go 注释，
+            // 与 `Context.RunAction` 同源）；正常 pipeline 驱动节点不会走到这里。
+            Ln.w("MaaRunner: recognitionDetailJson 收到非法 recoId=$recoId")
+            return null
+        }
+        val tasker = lib.MaaContextGetTasker(context) ?: run {
+            Ln.w("MaaRunner: recognitionDetailJson MaaContextGetTasker 返回空 (recoId=$recoId)")
+            return null
+        }
         val detailBuf = lib.MaaStringBufferCreate() ?: return null
         val tempRect = lib.MaaRectCreate()
         val hitMem = Memory(1)
@@ -1875,7 +1887,12 @@ class MaaRunner(private val agentHost: AgentHost) {
             val ret = lib.MaaTaskerGetRecognitionDetail(
                 tasker, recoId, null, null, hitMem, tempRect, detailBuf, null, null,
             ).toInt()
-            if (ret == 0) null else lib.MaaStringBufferGet(detailBuf)
+            if (ret == 0) {
+                Ln.w("MaaRunner: MaaTaskerGetRecognitionDetail 返回 0 (recoId=$recoId)")
+                null
+            } else {
+                lib.MaaStringBufferGet(detailBuf)
+            }
         } catch (t: Throwable) {
             Ln.w("MaaRunner: 读取识别详情失败: ${t.message}")
             null

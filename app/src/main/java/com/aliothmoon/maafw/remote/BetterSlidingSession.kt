@@ -232,8 +232,9 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
      * 起点框来自回调参数 [actionBox]（`BetterSlidingFindStart` 是 `And` 节点，
      * 其命中框即子节点 `BetterSlidingSwipeButton` 的模板框）。
      *
-     * `readHitBox(recoId)` 那条 `detail_json` 路径**只作兜底**：真机证明它读不到
-     * `And` 根节点的顶层 box，之前把警告「读不到滑条起点框」刷满日志就是它。
+     * `readHitBox(recoId)` 那条 `detail_json` 路径是兜底：不采用它作主路，不是因为读不到
+     * （数组根已于 2026-09 支持，见 [BetterSlidingOcr.fromRecognizedDetail]），而是回调
+     * 参数 [actionBox] 就是框架给的「本节点命中框」，更直接、少一层解析假设。
      * 别把它改回主路。
      */
     private fun handleFindStart(recoId: Long, actionBox: List<Int>?): Boolean {
@@ -527,12 +528,18 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
     )
 
     /**
-     * 仅兜底：从 `detail_json` 找框。真机证明 `And` 节点读不到（见 [handleFindStart]），
-     * 起点/终点框请用回调参数 [actionBox]。
+     * 仅兜底：从 `detail_json` 找框。框优先用回调参数 [actionBox]（见 [handleFindStart]）。
      */
     private fun readHitBox(recoId: Long): List<Int>? = BetterSlidingOcr.readHitBox(detailOf(recoId))
 
-    /** 数量是 OCR 文本，不是 box，仍走 `detail_json`——这条路是有效的。 */
+    /**
+     * 数量是 OCR 文本，不是 box，只能走 `detail_json`。
+     *
+     * 驱动节点 `BetterSlidingGetSliderMaxQuantity` / `BetterSlidingCheckQuantity` 是 `And`，
+     * detail 根是「组合结果数组」；[BetterSlidingOcr.fromRecognizedDetail] 会解析数组并
+     * 下钻到 `BetterSlidingGetSliderQuantity` 子项取文本——这是 2026-09 真机 bug 的修复点
+     * （此前数组根返回 null，导致「读不到滑条上限」）。
+     */
     private fun readQuantityValue(recoId: Long): Int? = BetterSlidingOcr.readQuantityValue(detailOf(recoId))
 
     private fun detailOf(recoId: Long): BetterSlidingOcr.Detail? {

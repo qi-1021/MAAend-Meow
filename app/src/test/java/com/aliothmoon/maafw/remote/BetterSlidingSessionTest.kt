@@ -326,4 +326,29 @@ class BetterSlidingSessionTest {
         assertEquals(false, joined.contains("\"target\":[378,510]"))
         assertEquals(false, joined.contains("\"target\":[500,510]"))
     }
+
+    // ───────────── 回调 recoId 的 And 组合 detail（真机 bug 回归） ─────────────
+    // 真机：BetterSlidingGetSliderMaxQuantity 是 And，回调 recoId 查到的 detail 根是数组，
+    // 旧解析器直接返回 null → 「读不到滑条上限」，而框架日志里 OCR 已识别出 7299。
+
+    private fun andQuantityDetailJson(text: String): String {
+        val ocr = """{"box":[1065,499,78,36],"score":0.99,"text":"$text"}"""
+        return """[{"algorithm":"OCR","box":[1065,499,78,36],""" +
+            """"detail":{"all":[$ocr],"best":$ocr,"filtered":[]},""" +
+            """"name":"BetterSlidingGetSliderQuantity","reco_id":42}]"""
+    }
+
+    @Test
+    fun `And 组合结果数组作 detail 时能读到滑条上限并收尾`() {
+        val host = FakeHost()
+        host.details[7L] = andQuantityDetailJson("7299")
+        val param = """{"TargetQuantity":7299,"Direction":"right","SliderQuantity":{"Box":[300,500,100,40]}}"""
+
+        assertTrue(session(host).run(BetterSlidingSupport.NODE_GET_SLIDER_MAX_QUANTITY, param, 7))
+        // max=7299 == target=7299 -> 直接收尾；读不到的话会走 warn 并返回 false
+        assertTrue(
+            "期望读到上限 7299 并短路到 Done，实际：\n${host.joined()}",
+            host.joined().contains("""{"BetterSlidingGetSliderMaxQuantity":{"next":["BetterSlidingDone"]}}"""),
+        )
+    }
 }

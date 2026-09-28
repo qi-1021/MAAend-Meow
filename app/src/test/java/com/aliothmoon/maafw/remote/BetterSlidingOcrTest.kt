@@ -132,6 +132,66 @@ class BetterSlidingOcrTest {
         assertNull(OCR.readQuantityValue(null))
     }
 
+    // ── 真机回归：And 组合识别的 detail_json 根是数组 ──
+    // maafw.log 里 BetterSlidingGetSliderQuantity 已识别出 7299，但旧解析器对数组根
+    // 直接返回 null → 「BetterSliding 读不到滑条上限」。形状对齐官方 Go 绑定
+    // recognition_result.go:325 parseCombinedResult。
+
+    /** 一条组合结果项：名字 + 自身 box + 嵌套的 OCR 结果（all/best/filtered）。 */
+    private fun combinedItem(name: String, box: List<Int>, text: String, algorithm: String = "OCR"): Map<String, Any?> =
+        mapOf(
+            "algorithm" to algorithm,
+            "box" to box,
+            "detail" to linkedMapOf(
+                "all" to listOf(mapOf("box" to box, "score" to 0.99, "text" to text)),
+                "best" to mapOf("box" to box, "score" to 0.99, "text" to text),
+                "filtered" to listOf(mapOf("box" to box, "score" to 0.99, "text" to text)),
+            ),
+            "name" to name,
+            "reco_id" to 42L,
+        )
+
+    @Test
+    fun `fromRecognizedDetail 组合识别数组根不再返回 null`() {
+        val t = detail(listOf(combinedItem("BetterSlidingGetSliderQuantity", listOf(1065, 499, 78, 36), "7299")))
+        // 合成根沿用兜底名，数组各项成为它的子节点
+        assertEquals("root", t?.name)
+        assertEquals(1, t?.children?.size)
+    }
+
+    @Test
+    fun `readQuantityValue 能从 And 组合结果数组读到滑条上限`() {
+        // 真实 7299 场景：BetterSlidingGetSliderMaxQuantity 是 And，detail 根为数组
+        val t = detail(
+            listOf(
+                combinedItem("BetterSlidingGetSliderQuantity", listOf(1065, 499, 78, 36), "7299"),
+            ),
+        )
+        assertEquals(7299, OCR.readQuantityValue(t))
+    }
+
+    @Test
+    fun `readQuantityValue 优先 best 而非 all 首个结果`() {
+        // only_rec=false / 多结果时，上游读的是 Results.Best；旧实现按 JSON 键序取到 all[0]
+        val node = linkedMapOf<String, Any?>(
+            "name" to "root",
+            "all" to listOf(mapOf("text" to "1")),
+            "best" to mapOf("text" to "7299"),
+            "filtered" to listOf(mapOf("text" to "2")),
+        )
+        assertEquals(7299, OCR.readQuantityValue(detail(node)))
+    }
+
+    @Test
+    fun `readHitBox 能从 And 组合结果数组取 SwipeButton 框`() {
+        val t = detail(
+            listOf(
+                combinedItem("BetterSlidingSwipeButton", listOf(500, 520, 20, 20), "x", algorithm = "TemplateMatch"),
+            ),
+        )
+        assertEquals(listOf(500, 520, 20, 20), OCR.readHitBox(t))
+    }
+
     @Test
     fun `fromRecognizedDetail 缺 name 时用兜底名`() {
         val t = detail(mapOf("text" to "5"), fallback = "fallbackName")

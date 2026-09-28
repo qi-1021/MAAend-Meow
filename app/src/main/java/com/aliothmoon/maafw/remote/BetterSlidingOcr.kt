@@ -61,11 +61,10 @@ object BetterSlidingOcr {
      * 上游还有一级「换了候选节点时退回原始 detail 的框」——这里的树本来就是从根节点取的，
      * 所以那一级由「退回根节点框」承担。
      *
-     * **真机实测：这条 detail_json 路径读不到 `And` 节点的框，只作兜底、不可依赖。**
-     * `MaaTaskerGetRecognitionDetail(...).detail_json` 的 `And` 根是**数组**，
-     * 没有顶层 `box`、也没有带节点名的子结构（子项只有 algorithm/box/detail）；
-     * [fromRecognizedDetail] 对数组根直接返回 null。box 只在框架的事件/回调侧。
-     * 新代码请走 [boxOfRect]（回调参数），别把这条当主路。
+     * **真机实测：起点/终点框优先用回调第 7 个参数（[boxOfRect]），不要依赖这条 detail_json。**
+     * 原因不是「数组根读不到」——2026-09 已修成能读（见 [fromRecognizedDetail]）；
+     * 而是回调参数就是框架给的「本节点命中框」，语义最直接、少一层解析假设。
+     * 这里的兜底在组合结果（And）下会取 `BetterSlidingSwipeButton` 子项的 box，通常与回调框一致。
      */
     fun readHitBox(detail: Detail?): List<Int>? {
         if (detail == null) return null
@@ -105,10 +104,23 @@ object BetterSlidingOcr {
      *
      * 遍历策略与 [GoodsSupport.collectOcrItems] 一致：**不认路径**，递归所有嵌套的
      * object/array。凡带 `text` 的对象就是一处 OCR 命中，其 `box` 是包围盒。
+     *
+     * 根是数组时按「组合识别（And/Or）」处理：官方 Go 绑定
+     * `recognition_result.go:325 parseCombinedResult` 明确 And/Or 的 `detail_json`
+     * 根就是数组，每项形如
+     * `{"algorithm":"And","box":[...],"detail":{all,best,filtered},"name":"...","reco_id":...}`。
+     * [BetterSlidingSupport.NODE_GET_SLIDER_MAX_QUANTITY] /
+     * [BetterSlidingSupport.NODE_CHECK_QUANTITY] / FindStart / FindEnd 全是 And 驱动节点，
+     * 回调 recoId 查到的 detail 根就是这种数组。
+     *
+     * **真机 bug 回归（2026-09）**：此前只认对象根，数组根直接返回 null，
+     * 于是 `readQuantityValue` 恒为 null，真机报「BetterSliding 读不到滑条上限」——
+     * 而框架日志里 OCR 明明识别出 `7299`。这里包一层合成根，让 [findByName]
+     * 能下钻到数组里的每一项。recoId 本身是有效的，问题一直在解析，不在取数。
      */
     fun fromRecognizedDetail(node: Any?, fallbackName: String): Detail? {
-        val detail = toDetail(node, fallbackName) ?: return null
-        return detail
+        val list = node as? List<*> ?: return toDetail(node, fallbackName)
+        return Detail(name = fallbackName, children = list.mapNotNull { toDetail(it, "") })
     }
 
     private fun toDetail(node: Any?, fallbackName: String): Detail? {
@@ -125,8 +137,13 @@ object BetterSlidingOcr {
             collectChildren(value, children)
         }
 
-        // 自身没有 text 时，向下取第一个 OCR 文本（组合识别里 OCR 常在子节点）
-        val text = ownText ?: children.firstNotNullOfOrNull { it.text }
+        // 上游 `readBestOCRText` 读的是 `RecognitionResults.Best`，OCR detail 里就是 `best`。
+        // 不能只取「第一个有 text 的子节点」：JSON 键顺序通常是 all→best→filtered，
+        // `only_rec=false` 时会取到 all[0]，与上游不一致。显式优先 `best`。
+        val bestText = (asMap(map["best"])?.get("text") as? String)?.takeIf { it.isNotBlank() }
+
+        // 自身没有 text 时，向下取 best / 第一个 OCR 文本（组合识别里 OCR 常在子节点）
+        val text = ownText ?: bestText ?: children.firstNotNullOfOrNull { it.text }
 
         return Detail(name = name, text = text, box = ownBox, children = children)
     }
