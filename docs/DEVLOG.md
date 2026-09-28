@@ -8,6 +8,45 @@
 
 ---
 
+## 2026-09-28 · 修完 7 个历史失败，单测重新卡住构建
+
+**提交**：`ef425a7`、`99a14a7`、`41eedb6`、`1ef7ef2`（CI 全绿，`continue-on-error` 已摘）
+
+### 做了什么
+
+CI 的单测步骤一直挂着 `continue-on-error`，因为一接上就暴露 7 个历史失败。
+它们看着像「环境问题」，实际是 **4 个真 bug + 1 个过期期望 + 2 处上游/我们自己的数据缺陷**：
+
+| 失败 | 真实原因 | 修法 |
+|---|---|---|
+| `GitHubUpdateTest` 429 / 403 | `releases()` 会依次试 4 个镜像端点。429 时只记 `lastOutcome` 再 `continue`，后面三个端点没有响应就抛异常，把 `RATE_LIMITED` **覆盖成 `NETWORK`**——真原因丢了还白打三次请求 | 限流是账号/IP 级的，换镜像照样被限 → 直接返回 |
+| `GitHubUpdateTest` resolve | `selectAsset` 在「本机 ABI 无变体、也没有 universal」时 `return apkAssets.firstOrNull()`，**把 ABI 校验整个架空**（会把 x86_64 的包推给 arm64 设备），且与函数自己的文档注释矛盾 | 返回 null，交由上层报 `NO_MATCHING_ASSET` |
+| `UiTextBoundaryTest` | `SessionViewModel` 两处直接构造 `UiText.Verbatim` 塞硬编码中文，绕过 i18n | 改用 `uiTextOf(R.string.*)` 并补中英文资源 |
+| `CurrentProjectI18nTest` | **是我们自己拼坏的**：`prepare_maaend.py` 在 `$task.X.description` 后面拼中文后缀。i18n 引用**整串就是 key**，所以这个 description 在每种语言下都解析不出来（运行时退化成原文） | 移动端说明改放 `label`（本就是字面量） |
+| `CurrentProjectI18nTest`（另一条） | `task.BatchUseDetector.option.Times.input.error` 被 PI 引用，但**上游五种语言都缺**（已在 MaaEnd 仓库确认是上游遗漏） | 打包期按语言补上 |
+| `CurrentProjectLoadTest` | `tasks/setting/Keymap.json` 是**键盘快捷键（hotkey）配置**，而 `PiParser` 在 Android 端明确不支持该类型 → 丢 option → `global_option` 引用悬空又报一条 error | 按既有模式排除该 import（手机没有键盘；已确认无他处引用、无 pipeline 依赖） |
+| `SettingsViewModelTest` | 期望 2 次检查、实际 3 次。三个来源（切渠道重查 / 填 CDK 静默查 / 手动查）在代码里都有理由，测试与它们**同属初始提交**——从第一天起就没算上「切渠道」那一次 | 更新期望并写明三个来源 |
+
+### 为什么值得做
+
+`continue-on-error` 让 CI 失去了把关能力：单测红了构建照样绿，等于没有单测。
+摘掉开关之后，**793 个测试真正卡住构建**。
+
+### 方法上的收获
+
+**默认日志只有「类名 + 行号」，看不到断言消息。** 加了 `ef425a7` 一步把 XML 报告里的
+`<failure message=...>` 打出来之后，一轮 CI 就拿到了全部 7 条的真实原因——
+否则要为了看一句 message 反复跑 8 分钟一轮的构建。这个诊断步骤保留着。
+
+### 顺带确认
+
+- 上述修复全部有测试或实测支撑：限流/ABI 两条由既有断言直接验证；i18n 与 Keymap
+  用 `prepare_maaend.py` 自己的 `strip_json_comments` 实测过解析路径
+- `upstream/maaend` 的 submodule 指针在本地被改动过（`9f90c71` → `fcdc53a-dirty`），
+  **没有提交**——提交它会误钉一个上游提交
+
+---
+
 ## 2026-09-28 · MapNavigator P1：参数解析 + 动作编排
 
 **提交**：`e225871`、`7bce9cc`、`b51eb65`、`966508e`（均已推送，CI 全绿）
