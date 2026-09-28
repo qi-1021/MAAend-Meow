@@ -287,6 +287,47 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    /**
+     * `ScheduleRecognition`：按调用节点 attach 里的 monday..sunday 决定今天是否执行。
+     *
+     * 之前在移动端注册成恒真，等于「用户设了只在周末跑也照跑」。节点 attach 默认为全 false，
+     * 任务选项默认七天全选，所以默认行为与恒真一致；只有用户真去改周期时才有区别。
+     */
+    private val scheduleRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, _, _, roi, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || nodeName == null) {
+            Ln.w("MaaRunner: ScheduleRecognition 缺少 context/node")
+            return@MaaCustomRecognitionCallback 0
+        }
+        try {
+            val flags = ScheduleSupport.parseFlags(MaaJsonTree.parse(nodeDefinitionJson(lib, context, nodeName)))
+            if (flags == null) {
+                Ln.w("MaaRunner: ScheduleRecognition 取不到节点定义 (node=$nodeName)")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val day = ScheduleSupport.gameWeekday(java.time.LocalDateTime.now())
+            if (!ScheduleSupport.isEnabledOn(flags, day)) {
+                Ln.i("MaaRunner: ScheduleRecognition 今天($day)不在执行周期内，跳过 (node=$nodeName)")
+                return@MaaCustomRecognitionCallback 0
+            }
+            // 上游把 arg.Roi 作为命中框回填，保持一致
+            if (outBox != null && roi != null) {
+                lib.MaaRectSet(
+                    outBox,
+                    lib.MaaRectGetX(roi),
+                    lib.MaaRectGetY(roi),
+                    lib.MaaRectGetW(roi),
+                    lib.MaaRectGetH(roi),
+                )
+            }
+            Ln.i("MaaRunner: ScheduleRecognition 周期命中 ($day, node=$nodeName)")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: ScheduleRecognition 执行异常 node=$nodeName", t)
+            0
+        }
+    }
+
     private val subTaskCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
         if (context == null || customActionParam.isNullOrBlank()) {
@@ -2662,7 +2703,8 @@ class MaaRunner(private val agentHost: AgentHost) {
         // 永远命中并把 FalseAction 判失败，直接掐断 SceneAnyEnterWorld 的 next 链，
         // 导致 __ScenePrivateAnyExit（返回键）根本执行不到——游戏留在菜单里，后续任务全部失败。
         regReco("ScreenshotStableRecognition", noopFalseRecognitionCallback)
-        regReco("ScheduleRecognition", noopTrueRecognitionCallback)
+        // ScheduleRecognition 不再是恒真：恒真会让「只勾了某几天」的周期设置完全失效
+        regReco("ScheduleRecognition", scheduleRecognitionCallback)
         regReco("ItemQuantitySatisfied", noopTrueRecognitionCallback)
         regReco("ItemDataReady", noopTrueRecognitionCallback)
         regReco("AutoSellScanItemRecognition", autoSellScanItemRecognitionCallback)
