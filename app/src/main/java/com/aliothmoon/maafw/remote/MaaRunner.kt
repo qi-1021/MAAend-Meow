@@ -146,23 +146,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         override fun recognitionDetailJson(recoId: Long): String? {
             val l = hostLib ?: return null
             val ctx = hostContext ?: return null
-            if (recoId <= 0L) return null
-            val tasker = l.MaaContextGetTasker(ctx) ?: return null
-            val detailBuf = l.MaaStringBufferCreate() ?: return null
-            val tempRect = l.MaaRectCreate()
-            val hitMem = Memory(1)
-            return try {
-                val ret = l.MaaTaskerGetRecognitionDetail(
-                    tasker, recoId, null, null, hitMem, tempRect, detailBuf, null, null,
-                ).toInt()
-                if (ret == 0) null else l.MaaStringBufferGet(detailBuf)
-            } catch (t: Throwable) {
-                Ln.w("MaaRunner: BetterSliding 读取识别详情失败: ${t.message}")
-                null
-            } finally {
-                if (tempRect != null) l.MaaRectDestroy(tempRect)
-                l.MaaStringBufferDestroy(detailBuf)
-            }
+            return this@MaaRunner.recognitionDetailJson(l, ctx, recoId)
         }
 
         override fun parseJson(text: String): Any? = MaaJsonTree.parse(text)
@@ -192,6 +176,114 @@ class MaaRunner(private val agentHost: AgentHost) {
         } catch (t: Throwable) {
             Ln.e("MaaRunner: BetterSliding 执行异常 node=$nodeName", t)
             0
+        }
+    }
+
+    /**
+     * `AutoStockStapleQuantityControlAction`：算出这一格该买多少，把 TargetQuantity
+     * 覆盖到同级的 BetterSliding 节点上。拖动本身由 BetterSliding 负责。
+     *
+     * 上游走的是「读校验节点的表达式 -> 截图 OCR 当前持有量 -> target = 阈值 - 当前」，
+     * 表达式形如 `20 > {AutoStockStapleGoodsCountValidate}`，阈值是字面整数、计数节点是占位符。
+     */
+    private val autoStockStapleQuantityControlCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null || customActionParam.isNullOrBlank()) {
+            Ln.w("MaaRunner: AutoStockStapleQuantityControl 缺少 context/param (node=$nodeName)")
+            return@MaaCustomActionCallback 0
+        }
+        try {
+            val param = AutoStockStapleSupport.parseParam(MaaJsonTree.parse(customActionParam))
+            if (param == null) {
+                Ln.w("MaaRunner: AutoStockStapleQuantityControl 参数不合法: $customActionParam")
+                return@MaaCustomActionCallback 0
+            }
+
+            val validatorNode = param.validatorNode.ifEmpty {
+                AutoStockStapleSupport.buildValidatorNodeName(param.itemName)
+            }
+            val spec = AutoStockStapleSupport.resolveValidatorSpec(
+                MaaJsonTree.parse(nodeDefinitionJson(lib, context, validatorNode)),
+            )
+            if (spec == null) {
+                Ln.w("MaaRunner: AutoStockStapleQuantityControl 取不到校验表达式 (validator=$validatorNode)")
+                return@MaaCustomActionCallback 0
+            }
+
+            val ctrl = controller
+            if (ctrl == null) {
+                Ln.w("MaaRunner: AutoStockStapleQuantityControl controller 为空，无法读取当前持有量")
+                return@MaaCustomActionCallback 0
+            }
+            val currentCount = readOwnedQuantity(lib, context, spec.countNode, ctrl) ?: run {
+                Ln.w("MaaRunner: AutoStockStapleQuantityControl 读不到持有量数字 (count=${spec.countNode})")
+                return@MaaCustomActionCallback 0
+            }
+
+            val target = spec.threshold - currentCount
+            if (target <= 0) {
+                Ln.i(
+                    "MaaRunner: AutoStockStapleQuantityControl 无需购买 " +
+                        "(item=${param.itemName} threshold=${spec.threshold} current=$currentCount target=$target)",
+                )
+                return@MaaCustomActionCallback 1
+            }
+
+            val slidingNode = param.slidingNode.ifEmpty { AutoStockStapleSupport.DEFAULT_SLIDING_NODE }
+            val overrideJson = JsonTree.toJson(AutoStockStapleSupport.buildQuantityControlOverride(slidingNode, target))
+            if (lib.MaaContextOverridePipeline(context, overrideJson).toInt() == 0) {
+                Ln.w("MaaRunner: AutoStockStapleQuantityControl 覆盖 BetterSliding 失败 (sliding=$slidingNode)")
+                return@MaaCustomActionCallback 0
+            }
+            Ln.i(
+                "MaaRunner: AutoStockStapleQuantityControl 目标数量已解析 " +
+                    "(item=${param.itemName} expr=\"${spec.expression}\" threshold=${spec.threshold} " +
+                    "current=$currentCount target=$target sliding=$slidingNode)",
+            )
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: AutoStockStapleQuantityControl 执行异常 node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * 截当前画面并跑一次计数识别，返回 OCR 文本里的第一个整数（当前持有量）。
+     *
+     * 抽成独立方法是因为「截图缓冲区的释放」与「提前失败」交织，
+     * 写在回调里既难读也容易出现未初始化赋值；这里用 try/finally 收口。
+     */
+    private fun readOwnedQuantity(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        countNode: String,
+        ctrl: Pointer,
+    ): Int? {
+        val capId = lib.MaaControllerPostScreencap(ctrl)
+        if (capId > 0) lib.MaaControllerWait(ctrl, capId)
+
+        val imgBuf = lib.MaaImageBufferCreate() ?: return null
+        return try {
+            if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) {
+                Ln.w("MaaRunner: AutoStockStaple 取当前画面失败")
+                return null
+            }
+            if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) {
+                Ln.w("MaaRunner: AutoStockStaple 当前画面为空")
+                return null
+            }
+            val recoId = lib.MaaContextRunRecognition(context, countNode, "{}", imgBuf)
+            if (recoId <= 0L) {
+                Ln.w("MaaRunner: AutoStockStaple 持有量识别未命中 (count=$countNode)")
+                return null
+            }
+            val detail = BetterSlidingOcr.fromRecognizedDetail(
+                MaaJsonTree.parse(recognitionDetailJson(lib, context, recoId)),
+                countNode,
+            )
+            AutoStockStapleSupport.findFirstOcrText(detail)?.let { AutoStockStapleSupport.firstIntegerOfText(it) }
+        } finally {
+            lib.MaaImageBufferDestroy(imgBuf)
         }
     }
 
@@ -1141,6 +1233,27 @@ class MaaRunner(private val agentHost: AgentHost) {
         } finally {
             if (tempRect != null) lib.MaaRectDestroy(tempRect)
             if (detailBuf != null) lib.MaaStringBufferDestroy(detailBuf)
+        }
+    }
+
+    /** 按 recoId 取识别详情 JSON。BetterSliding 宿主与数量控制共用。 */
+    private fun recognitionDetailJson(lib: MaaFrameworkLibrary, context: Pointer, recoId: Long): String? {
+        if (recoId <= 0L) return null
+        val tasker = lib.MaaContextGetTasker(context) ?: return null
+        val detailBuf = lib.MaaStringBufferCreate() ?: return null
+        val tempRect = lib.MaaRectCreate()
+        val hitMem = Memory(1)
+        return try {
+            val ret = lib.MaaTaskerGetRecognitionDetail(
+                tasker, recoId, null, null, hitMem, tempRect, detailBuf, null, null,
+            ).toInt()
+            if (ret == 0) null else lib.MaaStringBufferGet(detailBuf)
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: 读取识别详情失败: ${t.message}")
+            null
+        } finally {
+            if (tempRect != null) lib.MaaRectDestroy(tempRect)
+            lib.MaaStringBufferDestroy(detailBuf)
         }
     }
 
@@ -2449,6 +2562,8 @@ class MaaRunner(private val agentHost: AgentHost) {
         // BetterSliding 不再是 noop：滑条数量是据点交易/囤货/稳定物资购买的共同依赖，
         // noop 成功的后果不是「少个功能」而是**买错卖错数量**
         regAction("BetterSliding", betterSlidingCallback)
+        // 稳定物资购买：算出该买多少，覆盖给同级的 BetterSliding
+        regAction("AutoStockStapleQuantityControlAction", autoStockStapleQuantityControlCallback)
         regAction("AutoDeliveryResolveDepotAction", resolveDepotCallback)
         regAction("AutoDeliveryResolveDestinationAction", resolveDestinationCallback)
         regAction("CharacterControllerYawDeltaAction", yawDeltaCallback)
@@ -2484,7 +2599,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "UpdateItemQuantity",
             "DeliveryJobsResolveOngoingDepotAction",
             // AutoDeliveryResolveDepot/Destination 不在此列：已注册为真实实现
-            "AutoStockStapleQuantityControlAction",
             "CaptureUid",
             "CloseGameAction",
             "ImageCheckSetResultAction",
