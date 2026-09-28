@@ -337,11 +337,15 @@ def tag_unimplemented_tasks():
                         continue
                     name = t.get("name")
                     if name in marks:
-                        t["label"] = marks[name]
-                        desc = t.get("description", "")
+                        # 注意：label 是字面量，description 是 `$task.X.description` 引用。
+                        # i18n 引用**整串就是 key**（见 PiText / CurrentProjectI18nTest），
+                        # 所以在 description 后面拼中文后缀会让它解析不出来（运行时会退化成
+                        # 原文，且每种语言都报缺 key）。移动端说明一律放 label。
                         note = "【移动端暂未完全实现，后续版本补齐，敬请期待】"
-                        if isinstance(desc, str) and note not in desc:
-                            t["description"] = f"{desc} {note}" if desc else note
+                        label = marks[name]
+                        if note not in label:
+                            label = f"{label}{note}"
+                        t["label"] = label
                         modified = True
             if modified:
                 p.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")

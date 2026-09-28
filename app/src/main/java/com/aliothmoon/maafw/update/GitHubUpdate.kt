@@ -68,11 +68,18 @@ internal class GitHubReleasesApi(
                     val body = response.readBody()
                     if (!sc.isSuccess()) {
                         val serverMessage = parseJsonObject(body)?.string("message")
-                        lastOutcome = UpdateSourceOutcome.Failed(
-                            apiFailureReason(sc),
+                        val reason = apiFailureReason(sc)
+                        val failed = UpdateSourceOutcome.Failed(
+                            reason,
                             detail = serverMessage?.let(::uiTextFromFramework)
                                 ?: uiTextOf(R.string.update_detail_http_status, sc),
                         )
+                        // 限流是账号/IP 级的：换镜像端点照样被限，直接收手。
+                        // 早先这里只记 lastOutcome 再 continue，于是后面三个镜像端点
+                        // 找不到响应就各自抛异常，把 RATE_LIMITED 覆盖成 NETWORK——
+                        // 真正的限流原因被吃掉，还白打三次请求。
+                        if (reason == UpdateCheckFailure.RATE_LIMITED) return failed
+                        lastOutcome = failed
                         continue
                     }
                     val parsedObj = parseJsonObject(body)
@@ -137,7 +144,11 @@ internal class GitHubReleasesApi(
         val universal = apkAssets.filterNot { asset -> ALL_ABI_MARKERS.any { asset.name.matchesAlias(it) } }
         if (universal.size == 1) return universal.first()
 
-        return apkAssets.firstOrNull()
+        // 到这里说明：本机 ABI 没有对应变体，且没有唯一的 universal。
+        // 早先这里 `return apkAssets.firstOrNull()` 会兜底返回任意一个 APK——
+        // 等于把 ABI 校验架空，会把 x86_64 的包推给 arm64 设备（装上也是坏的）。
+        // 与上面文档注释一致：返回 null，交由上层报 NO_MATCHING_ASSET。
+        return null
     }
 
     private fun release(raw: JsonObject): Release? {

@@ -378,6 +378,9 @@
     <string name="msg_reject_primary_capture">主屏采集启动失败</string>
     <string name="msg_reject_virtual_display">虚拟屏幕启动失败，请检查服务权限</string>
     <string name="msg_reject_service_rejected">特权进程拒绝了本次执行</string>
+    <!-- 启动目标应用（游戏）失败的两条提示；文案要可翻译，所以走资源而不是就地造 Verbatim -->
+    <string name="msg_start_target_app_failed">启动终末地失败，请确认游戏客户端已安装</string>
+    <string name="msg_privileged_service_not_connected">特权服务未连接，请先连接 Shizuku 或 Root 后端</string>
 
     <!-- 资源切换与运行选项 -->
     <string name="resource_switch_title">资源</string>

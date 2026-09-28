@@ -544,10 +544,10 @@ class SessionViewModel(
                             service.startTargetApp(intent.packageName)
                         }.onFailure { Timber.w(it, "startTargetApp via service failed") }.getOrDefault(false)
                         if (!ok) {
-                            emitEffect(SessionEffect.ShowMessage(com.aliothmoon.maafw.i18n.UiText.Verbatim("启动终末地失败，请确认游戏客户端已安装")))
+                            emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.msg_start_target_app_failed)))
                         }
                     } else {
-                        emitEffect(SessionEffect.ShowMessage(com.aliothmoon.maafw.i18n.UiText.Verbatim("特权服务未连接，请先连接 Shizuku 或 Root 后端")))
+                        emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.msg_privileged_service_not_connected)))
                     }
                 }
             }

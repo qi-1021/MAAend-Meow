@@ -385,6 +385,9 @@
     <string name="msg_reject_primary_capture">Failed to start primary screen capture</string>
     <string name="msg_reject_virtual_display">Virtual display failed to start; check service permissions</string>
     <string name="msg_reject_service_rejected">Privileged process rejected the run</string>
+    <!-- Prompts shown when launching the target game app fails -->
+    <string name="msg_start_target_app_failed">Failed to launch Endfield; make sure the game client is installed</string>
+    <string name="msg_privileged_service_not_connected">Privileged service not connected; connect Shizuku or the Root backend first</string>
 
     <!-- Server switching & run options -->
     <string name="resource_switch_title">Resource</string>
