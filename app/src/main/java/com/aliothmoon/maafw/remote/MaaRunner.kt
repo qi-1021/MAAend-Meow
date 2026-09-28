@@ -1242,7 +1242,7 @@ class MaaRunner(private val agentHost: AgentHost) {
      * 参数不合法时整节点失败（上游语义），不做「跳过这个点继续」。
      */
     private val mapNavigateCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
-        if (context == null) return@MaaCustomActionCallback 0
+        if (context == null || nodeName == null) return@MaaCustomActionCallback 0
         try {
             when (val parsed = MapNaviParam.parseText(customActionParam)) {
                 is MapNaviParam.Outcome.NoOp -> 1
@@ -1277,8 +1277,8 @@ class MaaRunner(private val agentHost: AgentHost) {
     )
 
     /** FIND 搜索预算与每步转视角幅度（上游 find_action.cpp 的 48 步 / 30°）。 */
-    private const val MAP_NAV_FIND_MAX_STEPS = 48
-    private const val MAP_NAV_FIND_TURN_DEGREES = 30
+    private val MAP_NAV_FIND_MAX_STEPS = 48
+    private val MAP_NAV_FIND_TURN_DEGREES = 30
 
     /** P1 执行：无定位降级 + 真实子任务。返回是否整条走通。 */
     private fun runMapNavPath(
