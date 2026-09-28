@@ -28,6 +28,9 @@ TST="$REPO/app/src/test/java/com/aliothmoon/maafw/remote"
 # 诊断报告的保留/截断策略是纯逻辑（不碰文件系统），也要能本机验证
 DIAG="$REPO/app/src/main/java/com/aliothmoon/maafw/diagnostics"
 TDIAG="$REPO/app/src/test/java/com/aliothmoon/maafw/diagnostics"
+# 调试 CLI 的命令解析是纯逻辑（不碰 socket/Android），纳入本机验证
+CLI="$REPO/app/src/main/java/com/aliothmoon/maafw/cli"
+TCLI="$REPO/app/src/test/java/com/aliothmoon/maafw/cli"
 WORK="$REPO/.tmp/verify"
 STUB="$WORK/jstub"
 GC=~/.gradle/caches/modules-2/files-2.1
@@ -85,6 +88,7 @@ MAIN_FILES=(
   "$SUP/SupplementPack.kt"
   "$SUP/SupplementPackLocal.kt"
   "$DIAG/RunDiagnosticsPolicy.kt"
+  "$CLI/DebugCliSupport.kt"
 )
 TEST_FILES=(
   "$TST/BetterSlidingSupportTest.kt"
@@ -115,6 +119,7 @@ TEST_FILES=(
   "$TSUP/SupplementPackTest.kt"
   "$TSUP/SupplementPackLocalTest.kt"
   "$TDIAG/RunDiagnosticsPolicyTest.kt"
+  "$TCLI/DebugCliSupportTest.kt"
 )
 TEST_CLASSES=(
   com.aliothmoon.maafw.remote.BetterSlidingSupportTest
@@ -145,6 +150,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.supplement.SupplementPackTest
   com.aliothmoon.maafw.supplement.SupplementPackLocalTest
   com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest
+  com.aliothmoon.maafw.cli.DebugCliSupportTest
 )
 
 stubs() {
@@ -274,6 +280,7 @@ fun main() {
         "com.aliothmoon.maafw.supplement.SupplementPackTest",
         "com.aliothmoon.maafw.supplement.SupplementPackLocalTest",
         "com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest",
+        "com.aliothmoon.maafw.cli.DebugCliSupportTest",
     )
     var pass = 0
     var fail = 0

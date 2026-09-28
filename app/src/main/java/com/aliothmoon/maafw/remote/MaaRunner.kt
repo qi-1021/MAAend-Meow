@@ -2919,6 +2919,142 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    // ────────────────────── debug CLI 能力面（仅 debug 构建接线） ──────────────────────
+    //
+    // 这些方法只被 DebugCliServer 的宿主适配器调用。release 下没有调用方（服务端不启动），
+    // 但它们本身不碰文件系统，因此保留也不会产生副作用。
+
+    fun debugProjectRoot(): String? = projectRoot
+
+    /** controller 是否已连接、能取到缓存帧。 */
+    fun debugControllerReady(): Boolean {
+        val lib = MaaFrameworkLoader.library ?: return false
+        val ctrl = controller ?: return false
+        return runCatching { lib.MaaControllerConnected(ctrl).toInt() != 0 }.getOrDefault(false)
+    }
+
+    /** 把当前缓存帧写到 [path]；成功返回 null，失败返回原因。 */
+    fun debugSaveCachedImage(path: String): String? {
+        val lib = MaaFrameworkLoader.library ?: return "MaaFramework 未加载"
+        val ctrl = controller ?: return "controller 未建立（先跑一次任务）"
+        val buffer = lib.MaaImageBufferCreate() ?: return "MaaImageBufferCreate 失败"
+        return try {
+            if (lib.MaaControllerCachedImage(ctrl, buffer).toInt() == 0) return "取缓存帧失败（当前无帧）"
+            if (lib.MaaImageBufferIsEmpty(buffer).toInt() != 0) return "缓存帧为空"
+            val size = lib.MaaImageBufferGetEncodedSize(buffer)
+            if (size <= 0) return "缓存帧编码为空"
+            val data = lib.MaaImageBufferGetEncoded(buffer) ?: return "读取缓存帧字节失败"
+            val bytes = data.getByteArray(0, size.toInt())
+            val file = File(path)
+            file.parentFile?.mkdirs()
+            file.writeBytes(bytes)
+            null
+        } catch (t: Throwable) {
+            "导出缓存帧失败：${t.javaClass.simpleName}: ${t.message}"
+        } finally {
+            lib.MaaImageBufferDestroy(buffer)
+        }
+    }
+
+    /**
+     * 对当前帧跑一次识别节点，返回 best 文本。
+     *
+     * MaaFramework 的 `MaaContextRunRecognition` 需要 task context，而 context 只在任务回调里存在；
+     * 外部拿不到。于是注册一个探针识别 `DebugCliOcr`，用 `MaaTaskerPostTask` 跑一个只含该探针的
+     * 临时节点——探针回调里再用现成的 [runRecognitionOnce] 跑目标节点。
+     */
+    fun debugOcrOnce(nodeName: String): DebugRecoOutcome {
+        val lib = MaaFrameworkLoader.library ?: return DebugRecoOutcome(false, null, "MaaFramework 未加载")
+        if (isRunning()) return DebugRecoOutcome(false, null, "任务运行中，无法执行调试识别")
+        val tasker = synchronized(lifecycleLock) { tasker }
+            ?: return DebugRecoOutcome(false, null, "tasker 未初始化（先跑一次任务）")
+        if (lib.MaaTaskerInited(tasker).toInt() == 0) {
+            return DebugRecoOutcome(false, null, "tasker 未就绪")
+        }
+        synchronized(debugOcrLock) {
+            debugOcrResult = null
+            // MaaTaskerPostTask 的 pipeline_override 是**对象数组**（按序合并），不是单个对象
+            val probeNode = buildJsonObject {
+                put(DEBUG_OCR_NODE, buildJsonObject {
+                    put("recognition", buildJsonObject {
+                        put("type", "Custom")
+                        put("param", buildJsonObject {
+                            put("custom_recognition", DEBUG_OCR_RECO)
+                            put("custom_recognition_param", buildJsonObject { put("node", nodeName) })
+                        })
+                    })
+                    // 只认不按：临时节点不触发任何动作
+                    put("action", buildJsonObject { put("type", "DoNothing") })
+                })
+            }
+            val override = JsonArray(listOf(probeNode)).toString()
+            val id = lib.MaaTaskerPostTask(tasker, DEBUG_OCR_NODE, override)
+            if (id == INVALID_ID) return DebugRecoOutcome(false, null, "PostTask 被拒绝")
+            lib.MaaTaskerWait(tasker, id)
+            return debugOcrResult ?: DebugRecoOutcome(false, null, "识别未返回结果")
+        }
+    }
+
+    /** 跑一次节点 [nodeName]（截断其 next，避免顺链跑下去），返回结果描述。 */
+    fun debugRunOnce(nodeName: String): String {
+        val lib = MaaFrameworkLoader.library ?: return "MaaFramework 未加载"
+        if (isRunning()) return "任务运行中，无法执行调试节点"
+        val tasker = synchronized(lifecycleLock) { tasker }
+            ?: return "tasker 未初始化（先跑一次任务）"
+        // 同 debugOcrOnce：pipeline_override 是对象数组
+        val patch = buildJsonObject {
+            put(nodeName, buildJsonObject { put("next", JsonArray(emptyList())) })
+        }
+        val override = JsonArray(listOf(patch)).toString()
+        val id = lib.MaaTaskerPostTask(tasker, nodeName, override)
+        if (id == INVALID_ID) return "PostTask 被拒绝（节点不存在？）"
+        val status = lib.MaaTaskerWait(tasker, id)
+        return statusText(status)
+    }
+
+    private val debugOcrLock = Any()
+
+    @Volatile
+    private var debugOcrResult: DebugRecoOutcome? = null
+
+    /** 探针识别：把目标节点名放进 `custom_recognition_param.node`，在回调里跑目标识别。 */
+    private val debugCliOcrCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, _, _, param, image, _, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) {
+            debugOcrResult = DebugRecoOutcome(false, null, "识别回调缺少 context/image")
+            return@MaaCustomRecognitionCallback 0
+        }
+        val node = runCatching {
+            Json.parseToJsonElement(param.orEmpty()).jsonObject["node"]?.jsonPrimitive?.contentOrNull
+        }.getOrNull().orEmpty()
+        if (node.isBlank()) {
+            debugOcrResult = DebugRecoOutcome(false, null, "custom_recognition_param 缺少 node")
+            return@MaaCustomRecognitionCallback 0
+        }
+        try {
+            val res = runRecognitionOnce(lib, context, image, node)
+            if (res == null) {
+                debugOcrResult = DebugRecoOutcome(false, null, "识别调用失败（节点不存在或 runtime 未就绪）")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val nodeJson = nodeDefinitionJson(lib, context, node)
+            val text = selectOcrText(res.detailJson, nodeJson)
+                ?: ReceptionRoomSupport.bestOcrText(MaaJsonTree.parse(res.detailJson))
+            debugOcrResult = when {
+                text != null -> DebugRecoOutcome(res.hit, text, null)
+                res.hit -> DebugRecoOutcome(true, null, "识别命中但没有 OCR 文本（可能是模板/颜色类节点）")
+                else -> DebugRecoOutcome(false, null, "识别未命中")
+            }
+            if (res.hit && outBox != null && res.box != null && res.box.size >= 4) {
+                lib.MaaRectSet(outBox, res.box[0], res.box[1], res.box[2], res.box[3])
+            }
+            if (res.hit) 1 else 0
+        } catch (t: Throwable) {
+            debugOcrResult = DebugRecoOutcome(false, null, "${t.javaClass.simpleName}: ${t.message}")
+            0
+        }
+    }
+
     /**
      * 全局选项是进程级单例，setup 时设一次即可
      *
@@ -3731,6 +3867,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         regReco("ScreenshotStableRecognition", noopFalseRecognitionCallback)
         // ScheduleRecognition 不再是恒真：恒真会让「只勾了某几天」的周期设置完全失效
         regReco("ScheduleRecognition", scheduleRecognitionCallback)
+        // debug CLI 的 OCR 探针：外部没有 task context，只能借一个临时节点回调拿到 context，
+        // 再在回调里跑目标节点识别（见 debugOcrOnce）
+        regReco(DEBUG_OCR_RECO, debugCliOcrCallback)
         regReco("ItemQuantitySatisfied", noopTrueRecognitionCallback)
         regReco("ItemDataReady", noopTrueRecognitionCallback)
         regReco("AutoSellScanItemRecognition", autoSellScanItemRecognitionCallback)
@@ -3837,7 +3976,11 @@ class MaaRunner(private val agentHost: AgentHost) {
 
         /** MaaInvalidId */
         const val INVALID_ID = 0L
-        const val BRIDGE_LIBRARY_NAME = "libbridge.so"
+
+        /** debug CLI 探针识别用：临时节点名与注册的识别名 */
+        const val DEBUG_OCR_NODE = "__DebugCliOcr__"
+        const val DEBUG_OCR_RECO = "DebugCliOcr"
+
 
         /** 解释器这类 child 冷启动要几秒，超时给宽一点；连不上会整批任务失败，宁可多等 */
         const val AGENT_CONNECT_TIMEOUT_MILLIS = 30_000L
@@ -3851,3 +3994,14 @@ class MaaRunner(private val agentHost: AgentHost) {
         const val AUTO_PORT: Short = 0
     }
 }
+
+/**
+ * debug CLI 的识别结果。
+ *
+ * [text] 为 null 时看 [reason]；[hit] 只表示节点是否命中，模板类节点可能命中但无 OCR 文本。
+ */
+data class DebugRecoOutcome(
+    val hit: Boolean,
+    val text: String?,
+    val reason: String?,
+)

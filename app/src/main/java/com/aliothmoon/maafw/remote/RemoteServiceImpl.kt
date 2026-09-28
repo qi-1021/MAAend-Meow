@@ -3,11 +3,17 @@ package com.aliothmoon.maafw.remote
 import com.aliothmoon.maafw.IMaaRunnerCallback
 import com.aliothmoon.maafw.ITouchEventCallback
 import com.aliothmoon.maafw.RemoteService
+import com.aliothmoon.maafw.BuildConfig
 import com.aliothmoon.maafw.bridge.InputControlUtils
 import com.aliothmoon.maafw.bridge.NativeBridgeLib
+import com.aliothmoon.maafw.cli.DebugCliContext
+import com.aliothmoon.maafw.cli.DebugCliHost
+import com.aliothmoon.maafw.cli.DebugCliOcrResult
+import com.aliothmoon.maafw.cli.DebugCliServer
 import com.aliothmoon.maafw.constant.DefaultDisplayConfig
 import com.aliothmoon.maafw.constant.DisplayMode
 import com.aliothmoon.maafw.diagnostics.RunDiagnostics
+import com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicy
 import com.aliothmoon.maafw.maa.MaaFrameworkLoader
 import com.aliothmoon.maafw.remote.internal.ActivityUtils
 import com.aliothmoon.maafw.remote.internal.AppWatchdog
@@ -66,6 +72,7 @@ class RemoteServiceImpl : RemoteService.Stub() {
         AppWatchdog.stopWatching()
         InputControlUtils.setTouchCallback(null)
         runner.destroy()
+        DebugCliServer.stop()
         cleanup()
         exitProcess(0)
     }
@@ -160,6 +167,11 @@ class RemoteServiceImpl : RemoteService.Stub() {
             runner.applyGlobalOptions(logDir, isDebug)
             // debug 才开结构化报告；release 下这里是 no-op，不建任何文件
             RunDiagnostics.start(isDebug, logDir)
+            // debug CLI：仅 debug 构建且开启调试模式时监听 127.0.0.1；release 下 BuildConfig.DEBUG 为
+            // false，完全不启动（不监听端口、不建文件）
+            if (BuildConfig.DEBUG && isDebug) {
+                DebugCliServer.start(DebugCliRunnerHost(logDir))
+            }
         } else {
             Ln.w("$TAG: log dir unusable, MaaFramework will write to process CWD: $logDir")
             // 目录不可用就明确关掉，免得沿用上一轮的开启状态
@@ -410,6 +422,57 @@ class RemoteServiceImpl : RemoteService.Stub() {
             name = "remote-heartbeat-watchdog"
             isDaemon = true
         }.start()
+    }
+
+    /**
+     * debug CLI 的能力宿主：把 [DebugCliServer] 的意图接到 [runner]（controller / tasker / resource
+     * 都在它手里）。跑在特权进程里，所以能直接取缓存帧、跑识别；不做任何 Android UI 依赖。
+     */
+    private inner class DebugCliRunnerHost(private val logDir: String) : DebugCliHost {
+
+        /** 截图落点：`<root>/files/cli/`（logDir 是 `<root>/files/log`）。 */
+        private val cliDir: File = File(File(logDir).parentFile, "cli")
+
+        override fun context(): DebugCliContext = DebugCliContext(
+            projectRoot = runner.debugProjectRoot(),
+            controllerReady = runner.debugControllerReady(),
+            taskRunning = runner.isRunning(),
+            reportDir = File(logDir, RunDiagnosticsPolicy.REPORT_DIR).absolutePath,
+            logDir = logDir,
+        )
+
+        override fun newestReportFile(): File? {
+            val dir = File(logDir, RunDiagnosticsPolicy.REPORT_DIR)
+            return dir.listFiles()
+                ?.filter {
+                    it.isFile &&
+                        it.name.startsWith(RunDiagnosticsPolicy.FILE_PREFIX) &&
+                        it.name.endsWith(RunDiagnosticsPolicy.FILE_SUFFIX)
+                }
+                ?.maxByOrNull { it.lastModified() }
+        }
+
+        override fun mainLogFile(): File? {
+            // MaaFramework 的 maa.log 信息最全；没有就退到 app.log，再退到目录里最新的 .log
+            for (name in listOf("maa.log", "app.log")) {
+                val file = File(logDir, name)
+                if (file.isFile) return file
+            }
+            return File(logDir).listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".log") }
+                ?.maxByOrNull { it.lastModified() }
+        }
+
+        override fun screenshotDir(): File = cliDir
+
+        override fun screenshot(target: File): String? = runner.debugSaveCachedImage(target.absolutePath)
+
+        override fun ocr(nodeName: String): DebugCliOcrResult {
+            val outcome = runner.debugOcrOnce(nodeName)
+            return DebugCliOcrResult(ok = outcome.hit, text = outcome.text, reason = outcome.reason)
+        }
+
+        override fun run(nodeName: String): String = runner.debugRunOnce(nodeName)
     }
 
     private companion object {
