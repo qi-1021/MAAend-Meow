@@ -128,12 +128,11 @@ jobs:
       # 单测不进 assemble，但决策逻辑（据点/囤货选品、送达目录匹配）靠它锁住，
       # assemble 绿不代表逻辑对，所以单独跑一步，别让单测悄悄烂掉
       #
-      # continue-on-error：这套单测此前从未在 CI 跑过，一接上就暴露 7 个历史失败
+      # 这一步曾经挂着 continue-on-error：接上 CI 时暴露的 7 个历史失败
       # （UiTextBoundary / CurrentProjectI18n / CurrentProjectLoad /
-      # SettingsViewModel / GitHubUpdate）。先把它们挂出来，别再攒着；
-      # 修完那几条就把这个开关去掉，让单测重新卡住构建。
+      # SettingsViewModel / GitHubUpdate×3）都已经修完，开关已摘掉——
+      # 单测重新卡住构建。
       - name: Run unit tests
-        continue-on-error: true
         run: |
           chmod +x ./gradlew
           # `test` 是生命周期任务，比写死 testReleaseUnitTest 抗 AGP 改名
@@ -143,6 +142,11 @@ jobs:
           # 把那几行打出来，省得为了看一句 message 再跑一轮。
           echo "=== 失败断言详情 ==="
           grep -rh "<failure" app/build/test-results --include="TEST-*.xml" 2>/dev/null | head -40 || true
+          # 单测现在真卡构建：上面那行只负责把消息打出来，失败要靠这里显式上报
+          if grep -rql "<failure" app/build/test-results --include="TEST-*.xml" 2>/dev/null; then
+            echo "单测有失败，见上面的断言详情"
+            exit 1
+          fi
 
       - name: Prepare APK Output
         id: apk_prep

@@ -106,9 +106,16 @@ class SettingsViewModelTest {
         viewModel.onIntent(SettingsIntent.DownloadUpdate)
         advanceUntilIdle()
 
-        // 手动一次 + 填 CDK 触发的静默检查一次；都打所选的 Mirror酱 源
-        assertEquals(2, checkRequests.size)
-        assertEquals(listOf(UpdateSource.MIRRORCHYAN, UpdateSource.MIRRORCHYAN), checkSources)
+        // 三次检查，各有明确来源：
+        //   1. 切更新渠道会立刻重查（否则新渠道的更新要等下一次手动检查才出现）
+        //   2. 填 CDK 触发的静默检查（见 SettingsViewModel init 里的 watcher）
+        //   3. 手动 CheckUpdate
+        // 全打所选的 Mirror酱 源。
+        assertEquals(3, checkRequests.size)
+        assertEquals(
+            listOf(UpdateSource.MIRRORCHYAN, UpdateSource.MIRRORCHYAN, UpdateSource.MIRRORCHYAN),
+            checkSources,
+        )
         assertEquals(UpdateChannel.BETA, checkRequests.first().channel)
 
         // 只有下载这一次 resolve，源与 CDK 都来自设置
