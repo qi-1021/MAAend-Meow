@@ -12,6 +12,7 @@ import com.aliothmoon.maafw.root.BootstrapRegistry
 import com.aliothmoon.maafw.root.RootServiceBootstrapRegistry
 import com.aliothmoon.maafw.root.RootServiceStarter
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -82,7 +83,10 @@ abstract class ProcessServiceConnectorBackend(
         val token = UUID.randomUUID().toString()
         val deferred = registry.register(token)
 
-        val job = scope.launch {
+        // LAZY + 先登记再 start：activeLaunch 必须在协程体读到它之前就指向本次 token，
+        // 否则调度器（负载下主线程被抢占）可能让协程先跑完，看到 activeLaunch 还是 null
+        // 而把自己误判成"被取代"，首次拉起被静默丢弃、连 onError 都不上报（时序 flaky 的真因）
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             val logFile = debugLogFile()
             var spawned = false
             // 整段包住：check(launcherFile) 等异常逃逸会让协程未捕获致崩溃
@@ -114,6 +118,7 @@ abstract class ProcessServiceConnectorBackend(
             }
         }
         activeLaunch = ActiveLaunch(token, job)
+        job.start()
     }
 
     override fun disconnect(currentBinder: IBinder?) {
