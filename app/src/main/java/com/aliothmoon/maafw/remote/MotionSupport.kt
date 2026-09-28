@@ -42,6 +42,10 @@ object MotionSupport {
     private const val INTERACT_BTN_X = 1080
     private const val INTERACT_BTN_Y = 390
 
+    /** 攻击按钮；坐标取自上游 adb_input_backend 的 action_buttons_（FIGHT 动作用）。 */
+    private const val ATTACK_BTN_X = 1030
+    private const val ATTACK_BTN_Y = 551
+
     /** 摇杆拖拽专用 contact；转向/点击各自独立 contact，多指并存 */
     private const val CONTACT_JOYSTICK = 8
     private const val CONTACT_CAMERA = 9
@@ -217,6 +221,11 @@ object MotionSupport {
 
     fun jump(holdMs: Int = 50) {
         tapButton(JUMP_BTN_X, JUMP_BTN_Y, holdMs)
+    }
+
+    /** 普攻一次（MapNavigateAction 的 FIGHT 动作）。 */
+    fun attack(holdMs: Int = 50) {
+        tapButton(ATTACK_BTN_X, ATTACK_BTN_Y, holdMs)
     }
 
     /** 冲刺是 toggle 键：记录状态避免连按解除 */

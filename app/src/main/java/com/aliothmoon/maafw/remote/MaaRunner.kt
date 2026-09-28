@@ -1232,94 +1232,259 @@ class MaaRunner(private val agentHost: AgentHost) {
      * - INTERACT 到点交互（有文本表时 OCR 找点，本实现：直接按交互键）
      * - RUN/TRANSFER/PORTAL 经过式/转移式路点（本实现：脉冲前进）
      */
-    private val mapNavigateCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, _, _ ->
+    /**
+     * MapNavigateAction：参数解析已全量移植到 [MapNaviParam]。
+     *
+     * 执行侧仍是 P1 降级——没有小地图定位，所以 NAVMESH/RUN 用「前进近似」、
+     * ZONE 只等画面稳定不做区域校验、TRANSFER/PORTAL 靠定时等待。
+     * 但 COLLECT/DIG/INTERACT 走**真实子流水线**，FIND 用 find_stop 做视觉伺服。
+     *
+     * 参数不合法时整节点失败（上游语义），不做「跳过这个点继续」。
+     */
+    private val mapNavigateCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        if (context == null) return@MaaCustomActionCallback 0
         try {
-            val p = motionParam(customActionParam)
-            val path = p["path"]?.jsonArray.orEmpty()
-            if (path.isEmpty()) return@MaaCustomActionCallback 1
-            for (raw in path) {
-                val step = parseMapNavigateStep(raw) ?: continue
-                val action = step.action
-                when (action) {
-                    "ZONE" -> {
-                        // 声明节点：等待画面稳定再继续（本实现无小地图定位校验）
-                        MotionSupport.screencapFresh()
-                        Thread.sleep(600)
-                        Ln.i("MaaRunner: MapNavigate [$nodeName] ZONE=${step.zoneId}")
-                    }
-                    "HEADING" -> {
-                        MotionSupport.yawDelta(step.yaw)
-                    }
-                    // 空 action 的裸坐标点等价于「走到那里」：降级为前进
-                    "", "NAVMESH", "RUN" -> {
-                        // 降级：按当前朝向脉冲前进近似走一段；真寻路待 MapLocator 移植
-                        MotionSupport.pulseForward(400)
-                    }
-                    "SPRINT" -> MotionSupport.sprint(true)
-                    "JUMP" -> MotionSupport.jump()
-                    "TRANSFER", "PORTAL" -> {
-                        // 等待机关/跳板把角色转走
-                        MotionSupport.pulseForward(200)
-                        Thread.sleep(1500)
-                    }
-                    "COLLECT", "DIG" -> {
-                        MotionSupport.interact()
-                        Thread.sleep(800)
-                        if (action == "DIG") {
-                            MotionSupport.interact()
-                            Thread.sleep(800)
-                        }
-                    }
-                    "INTERACT" -> {
-                        MotionSupport.interact(holdMs = 120)
-                        Thread.sleep(600)
-                    }
-                    else -> {
-                        // 动作是数组形态时也可能带 target/angle 等简写；未识别的动作不要静默吞掉
-                        Ln.w("MaaRunner: MapNavigate [$nodeName] 未识别的路点动作 '$action'（已跳过）")
-                    }
+            when (val parsed = MapNaviParam.parseText(customActionParam)) {
+                is MapNaviParam.Outcome.NoOp -> 1
+                is MapNaviParam.Outcome.Invalid -> {
+                    Ln.e("MaaRunner: MapNavigate [$nodeName] 参数不合法：${parsed.reason}")
+                    0
                 }
+
+                is MapNaviParam.Outcome.Ok ->
+                    if (runMapNavPath(context, nodeName, parsed.param)) 1 else 0
             }
-            MotionSupport.releaseJoystick()
-            MotionSupport.resetSprintState()
-            Ln.i("MaaRunner: MapNavigate [$nodeName] path done (${path.size} steps)")
-            1
         } catch (t: Throwable) {
             Ln.e("MaaRunner: MapNavigate error on node=$nodeName", t)
             0
         }
     }
 
-    /** 地图导航的单个路点。 */
-    private data class MapNavStep(val action: String, val zoneId: String, val yaw: Int)
+    private data class MapNavPromptSpec(val entry: String, val recognition: String, val exit: String)
+
+    /** 采集点：命中采集物才触发采集。 */
+    private val mapNavCollectSpec = MapNavPromptSpec(
+        entry = "AutoCollectClickStart",
+        recognition = "AutoCollectClick",
+        exit = "AutoCollectClickEnd",
+    )
+
+    /** 交互点：带 expected 时用它认按钮。 */
+    private val mapNavInteractSpec = MapNavPromptSpec(
+        entry = "MapNavigatorInteractStart",
+        recognition = "MapNavigatorInteract",
+        exit = "MapNavigatorInteractEnd",
+    )
+
+    /** FIND 搜索预算与每步转视角幅度（上游 find_action.cpp 的 48 步 / 30°）。 */
+    private const val MAP_NAV_FIND_MAX_STEPS = 48
+    private const val MAP_NAV_FIND_TURN_DEGREES = 30
+
+    /** P1 执行：无定位降级 + 真实子任务。返回是否整条走通。 */
+    private fun runMapNavPath(
+        context: Pointer,
+        nodeName: String,
+        param: MapNaviParam.NaviParam,
+    ): Boolean {
+        val lib = MaaFrameworkLoader.library ?: return false
+        if (param.path.isEmpty()) return true
+
+        // 开环朝向估计：读不到镜头角，HEADING 只能按累计转向推算
+        var assumedYaw = 0.0
+
+        for ((index, wp) in param.path.withIndex()) {
+            when (wp.action) {
+                MapNaviParam.ActionType.ZONE -> {
+                    // 声明节点：等画面稳定（无定位，不做区域校验）
+                    MotionSupport.screencapFresh()
+                    Thread.sleep(600)
+                    Ln.i("MaaRunner: MapNavigate [$nodeName] #$index ZONE=${wp.zoneId}")
+                }
+
+                MapNaviParam.ActionType.HEADING -> {
+                    if (wp.headingUsesTarget) {
+                        Ln.w("MaaRunner: MapNavigate [$nodeName] #$index HEADING 以 target 定朝向，需要定位（未移植），跳过")
+                    } else {
+                        val delta = normalizeDegrees(wp.headingAngle - assumedYaw)
+                        MotionSupport.yawDelta(delta.toInt())
+                        assumedYaw = wp.headingAngle
+                        MotionSupport.pulseForward(270)
+                        Thread.sleep(120)
+                    }
+                }
+
+                MapNaviParam.ActionType.SPRINT -> MotionSupport.sprint(true)
+
+                MapNaviParam.ActionType.JUMP -> {
+                    MotionSupport.jump()
+                    Thread.sleep(500)
+                }
+
+                MapNaviParam.ActionType.FIGHT -> {
+                    MotionSupport.attack()
+                    Thread.sleep(60)
+                }
+
+                MapNaviParam.ActionType.TRANSFER, MapNaviParam.ActionType.PORTAL -> {
+                    // 无定位：盲走一段后等转场（真判定要等 P2）
+                    MotionSupport.pulseForward(200)
+                    Thread.sleep(1500)
+                }
+
+                MapNaviParam.ActionType.COLLECT -> runMapNavPromptSubtask(lib, context, mapNavCollectSpec, null, false)
+
+                MapNaviParam.ActionType.DIG -> {
+                    lib.MaaContextRunTask(context, "AutoCollectDigStart", """{"AutoCollectDigEnd":{"next":[]}}""")
+                    Thread.sleep(80)
+                }
+
+                MapNaviParam.ActionType.INTERACT -> runMapNavInteract(lib, context, wp)
+
+                MapNaviParam.ActionType.FIND -> {
+                    if (!runMapNavFind(lib, context, nodeName, index, wp)) return false
+                }
+
+                MapNaviParam.ActionType.ZIPLINE -> {
+                    // 上游用手写点跑滑索会因缺 hop plan 被拒绝；这里明确失败而不是静默按 RUN 走
+                    Ln.e("MaaRunner: MapNavigate [$nodeName] #$index ZIPLINE 缺少规划数据（P1 不支持滑索）")
+                    return false
+                }
+
+                // RUN / NAVMESH：真寻路待 MapLocator 移植，先用前进近似
+                MapNaviParam.ActionType.RUN, MapNaviParam.ActionType.NAVMESH -> MotionSupport.pulseForward(400)
+            }
+        }
+
+        MotionSupport.releaseJoystick()
+        MotionSupport.resetSprintState()
+        Ln.i("MaaRunner: MapNavigate [$nodeName] path done (${param.path.size} steps)")
+        return true
+    }
+
+    /** 归一化到 (-180, 180]，用于把绝对朝向换算成相对转向量。 */
+    private fun normalizeDegrees(deg: Double): Double {
+        var d = deg % 360.0
+        if (d > 180.0) d -= 360.0
+        if (d <= -180.0) d += 360.0
+        return d
+    }
 
     /**
-     * 解析 MapNavigateAction 的单个路点。上游支持两种形态：
-     *  - 对象：`{action|actions, target|x,y, zone_id, yaw|angle|heading, strict, ...}`
-     *  - 数组：`[x, y, "ACTION"?, strict?, "zone_id"?]`
-     *
-     * 数组是最高频写法（实测 376 处 COLLECT 都用它）。之前只处理 `JsonObject`，
-     * 数组路点会被 `continue` 整段跳过——动作一个都不执行，而日志只显示
-     * 「path done (N steps)」，看起来一切正常。
+     * INTERACT：带文字（或 `{"node":...}` 解出来的文字）走子流水线，
+     * `rec` 时只认不按；没有文字时连按交互键 5 次（上游 navi_config 的 5 连击）。
      */
-    private fun parseMapNavigateStep(raw: JsonElement): MapNavStep? {
-        (raw as? JsonObject)?.let { obj ->
-            val action = obj["action"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                ?: obj["actions"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.contentOrNull.orEmpty()
-            val yaw = obj["yaw"]?.jsonPrimitive?.doubleOrNull
-                ?: obj["angle"]?.jsonPrimitive?.doubleOrNull
-                ?: obj["heading"]?.jsonPrimitive?.doubleOrNull
-                ?: 0.0
-            return MapNavStep(action, obj["zone_id"]?.jsonPrimitive?.contentOrNull.orEmpty(), yaw.toInt())
+    private fun runMapNavInteract(lib: MaaFrameworkLibrary, context: Pointer, wp: MapNaviParam.Waypoint) {
+        val expected = resolveMapNavExpectedText(lib, context, wp.interactText, wp.interactTextNode)
+        if (expected.isNotEmpty()) {
+            runMapNavPromptSubtask(lib, context, mapNavInteractSpec, expected, wp.interactRec)
+            return
         }
-        (raw as? JsonArray)?.let { arr ->
-            // 位置固定：[x, y, action?, strict?, zone_id?]
-            if (arr.size < 2) return null
-            val action = (arr.getOrNull(2) as? JsonPrimitive)?.contentOrNull.orEmpty()
-            val zoneId = (arr.getOrNull(4) as? JsonPrimitive)?.contentOrNull.orEmpty()
-            return MapNavStep(action, zoneId, 0)
+        if (wp.interactRec) {
+            Ln.i("MaaRunner: MapNavigate INTERACT 只认不按（rec=true）")
+            return
         }
-        return null
+        repeat(5) { MotionSupport.interact(100) }
+    }
+
+    /** 把 `{"node": "..."}` 形态解成该节点 recognition.param.expected 的文字列表。 */
+    private fun resolveMapNavExpectedText(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        inline: List<String>,
+        nodeName: String,
+    ): List<String> {
+        if (inline.isNotEmpty()) return inline
+        if (nodeName.isEmpty()) return emptyList()
+        val nodeJson = nodeDefinitionJson(lib, context, nodeName) ?: return emptyList()
+        return try {
+            val expected = Json.parseToJsonElement(nodeJson).jsonObject["recognition"]
+                ?.jsonObject?.get("param")?.jsonObject?.get("expected")
+            when (expected) {
+                is JsonArray -> expected.mapNotNull { it.jsonPrimitive.contentOrNull }
+                is JsonPrimitive -> listOfNotNull(expected.contentOrNull)
+                else -> emptyList()
+            }
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: MapNavigate 解析交互文字节点 '$nodeName' 失败：${t.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * 跑一个「提示驱动」子流水线：截断共用出口，按需注入 expected 与「只认不按」。
+     * 对齐上游 async_prompt_action.cpp。
+     */
+    private fun runMapNavPromptSubtask(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        spec: MapNavPromptSpec,
+        expected: List<String>?,
+        rec: Boolean,
+    ) {
+        val override = buildJsonObject {
+            put(spec.exit, buildJsonObject { put("next", JsonArray(emptyList())) })
+            if (expected != null || rec) {
+                put(spec.recognition, buildJsonObject {
+                    if (expected != null) {
+                        put("recognition", buildJsonObject {
+                            put("param", buildJsonObject {
+                                put("expected", JsonArray(expected.map { JsonPrimitive(it) }))
+                            })
+                        })
+                    }
+                    if (rec) put("action", buildJsonObject { put("type", "DoNothing") })
+                })
+            }
+        }
+        lib.MaaContextRunTask(context, spec.entry, override.toString())
+        Thread.sleep(80)
+    }
+
+    /**
+     * FIND：只用 find_stop 做视觉伺服（转视角搜索 + 识别）。
+     *
+     * 只配了 `find_arrive` 的点在 P1 无法完成（需要定位），**明确失败**而不是静默跳过——
+     * 静默跳过会让调用方以为走到了。
+     */
+    private fun runMapNavFind(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        nodeName: String,
+        index: Int,
+        wp: MapNaviParam.Waypoint,
+    ): Boolean {
+        if (wp.findStop.isEmpty()) {
+            Ln.e("MaaRunner: MapNavigate [$nodeName] #$index FIND 只配了 find_arrive，需要定位（未移植）")
+            return false
+        }
+        repeat(MAP_NAV_FIND_MAX_STEPS) { step ->
+            if (probeMapNavRecognition(lib, context, wp.findStop)) {
+                Ln.i("MaaRunner: MapNavigate [$nodeName] #$index FIND 命中 ${wp.findStop}（第 ${step + 1} 步）")
+                return true
+            }
+            MotionSupport.yawDelta(MAP_NAV_FIND_TURN_DEGREES)
+            Thread.sleep(150)
+        }
+        // 上游到预算是放弃该点；这里保留这个语义但打 warn，不拖垮整条路线
+        Ln.w("MaaRunner: MapNavigate [$nodeName] #$index FIND 用尽搜索预算未命中 ${wp.findStop}")
+        return true
+    }
+
+    /** 截图后跑一次识别节点，返回是否命中。 */
+    private fun probeMapNavRecognition(lib: MaaFrameworkLibrary, context: Pointer, nodeName: String): Boolean {
+        val ctrl = controller ?: return false
+        val capId = lib.MaaControllerPostScreencap(ctrl)
+        if (capId > 0) lib.MaaControllerWait(ctrl, capId)
+        val imgBuf = lib.MaaImageBufferCreate() ?: return false
+        return try {
+            if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return false
+            lib.MaaContextRunRecognition(context, nodeName, "{}", imgBuf) > 0L
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: MapNavigate 识别 '$nodeName' 失败：${t.message}")
+            false
+        } finally {
+            lib.MaaImageBufferDestroy(imgBuf)
+        }
     }
 
     /** 读全局滑索偏好（MapNavigatorZiplinePreference.attach.zipline）；auto/true→true */
