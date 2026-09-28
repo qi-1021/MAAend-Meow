@@ -177,7 +177,7 @@ class MaaRunner(private val agentHost: AgentHost) {
     private val betterSlidingHost = MaaBetterSlidingHost()
     private val betterSlidingSession = BetterSlidingSession(betterSlidingHost)
 
-    private val betterSlidingCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, recoId, _, _ ->
+    private val betterSlidingCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, recoId, box, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
         if (context == null || nodeName == null) {
             Ln.w("MaaRunner: BetterSliding 收到空 context/node")
@@ -185,12 +185,26 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
         betterSlidingHost.hostLib = lib
         betterSlidingHost.hostContext = context
+        // 回调第 7 个参数就是本节点的命中框（const MaaRect*）。滑条起点/终点必须用它：
+        // detail_json 里没有 And 节点的顶层 box，走那条路真机永远读不到（见 BetterSlidingSession）。
+        val actionBox = readCallbackBox(lib, box)
         try {
-            if (betterSlidingSession.run(nodeName, customActionParam, recoId)) 1 else 0
+            if (betterSlidingSession.run(nodeName, customActionParam, recoId, actionBox)) 1 else 0
         } catch (t: Throwable) {
             Ln.e("MaaRunner: BetterSliding 执行异常 node=$nodeName", t)
             0
         }
+    }
+
+    /**
+     * 把回调里的 `const MaaRect*` 读成 [x,y,w,h]；退化框返回 null（交给调用方兜底）。
+     *
+     * JNA 取四个 Int 的动作留在这一层，是否有效交给纯函数 [BetterSlidingOcr.boxOfRect] 判定。
+     */
+    private fun readCallbackBox(lib: MaaFrameworkLibrary, rect: Pointer?): List<Int>? {
+        if (rect == null) return null
+        val r = getBoxRect(lib, rect)
+        return BetterSlidingOcr.boxOfRect(r.x, r.y, r.w, r.h)
     }
 
     /**

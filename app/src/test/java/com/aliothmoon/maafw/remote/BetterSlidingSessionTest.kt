@@ -270,4 +270,60 @@ class BetterSlidingSessionTest {
         host.pipelineOk = false
         assertEquals(false, session(host).run(BetterSlidingSupport.NODE_MAIN, """{"Direction":"right"}""", 0))
     }
+
+    // ───────────── 回调 box（真机 bug 回归） ─────────────
+    // 真机：BetterSlidingFindStart 是 And 节点，detail_json 没有顶层 box，
+    // 旧路径永远读不到 → “读不到滑条起点框”。起点/终点必须用回调参数。
+
+    private val targetParam =
+        """{"TargetQuantity":5,"Direction":"right","SliderQuantity":{"Box":[300,500,100,40]}}"""
+
+    /**
+     * 起点(100,500) 终点(600,500)，偏移默认 (-10,0)，target=5/max=10：
+     * startCenterX=100, endCenterX=600, dx=500, clickX=100+round(500*4/9)=322, clickY=510。
+     */
+    @Test
+    fun `起点终点改用回调 box，detail_json 为空也能算精确点击`() {
+        val host = FakeHost() // details 全空：旧路径在这里必然失败
+        val s = session(host)
+        assertTrue(s.run(BetterSlidingSupport.NODE_MAIN, targetParam, 0))
+
+        assertTrue(
+            "回调 box 必须能记录起点",
+            s.run(BetterSlidingSupport.NODE_FIND_START, targetParam, 0, listOf(100, 500, 20, 20)),
+        )
+        host.details[3L] = textDetail("10")
+        assertTrue(s.run(BetterSlidingSupport.NODE_GET_SLIDER_MAX_QUANTITY, targetParam, 3))
+
+        host.overrides.clear()
+        assertTrue(s.run(BetterSlidingSupport.NODE_FIND_END, targetParam, 0, listOf(600, 500, 20, 20)))
+        assertTrue(
+            "期望用回调 box 算出 (322,510)，实际：\n${host.joined()}",
+            host.joined().contains("\"target\":[322,510]"),
+        )
+    }
+
+    @Test
+    fun `回调 box 优先于 detail_json`() {
+        val host = FakeHost()
+        val s = session(host)
+        assertTrue(s.run(BetterSlidingSupport.NODE_MAIN, targetParam, 0))
+
+        // detail_json 里的起点框是 (200,500)，若被误用会算出 clickX=378；
+        // 回调 box 是 (100,500)，应算出 322。
+        host.details[2L] = boxDetail(200, 500)
+        assertTrue(s.run(BetterSlidingSupport.NODE_FIND_START, targetParam, 2, listOf(100, 500, 20, 20)))
+        host.details[3L] = textDetail("10")
+        assertTrue(s.run(BetterSlidingSupport.NODE_GET_SLIDER_MAX_QUANTITY, targetParam, 3))
+
+        host.overrides.clear()
+        // 终点 detail 框是 (999,500)（若被误用会算出 clickX=500），回调框才是 (600,500)。
+        host.details[4L] = boxDetail(999, 500)
+        assertTrue(s.run(BetterSlidingSupport.NODE_FIND_END, targetParam, 4, listOf(600, 500, 20, 20)))
+
+        val joined = host.joined()
+        assertTrue("应使用回调起点框，实际：\n$joined", joined.contains("\"target\":[322,510]"))
+        assertEquals(false, joined.contains("\"target\":[378,510]"))
+        assertEquals(false, joined.contains("\"target\":[500,510]"))
+    }
 }

@@ -40,6 +40,19 @@ object BetterSlidingOcr {
     }
 
     /**
+     * 从 `const MaaRect*` 解出的四元组构造 hit box，并做有效性判定。
+     *
+     * **这是 BetterSliding 起点/终点框的正路**：MaaCustomActionCallback 第 7 个参数
+     * 就是本节点的命中框（框架识别成功后必然给出，见真机 `action_details.box`）。
+     *
+     * 有效性只要求**宽高为正**：`w == 0 || h == 0` 的退化框会让精确点击算出贴边坐标，
+     * 必须当成「没拿到框」。`x` / `y` 允许为 0（识别结果贴屏幕左边/上边）。
+     * `MaaRect` 的读取（JNA）交给调用方，这里是可单测的纯函数。
+     */
+    fun boxOfRect(x: Int, y: Int, w: Int, h: Int): List<Int>? =
+        if (w > 0 && h > 0) listOf(x, y, w, h) else null
+
+    /**
      * 上游 ocr.go:11 `readHitBox`。
      *
      * 优先取 [BetterSlidingSupport.NODE_SWIPE_BUTTON] 子节点（滑条手柄）的框；
@@ -47,6 +60,12 @@ object BetterSlidingOcr {
      *
      * 上游还有一级「换了候选节点时退回原始 detail 的框」——这里的树本来就是从根节点取的，
      * 所以那一级由「退回根节点框」承担。
+     *
+     * **真机实测：这条 detail_json 路径读不到 `And` 节点的框，只作兜底、不可依赖。**
+     * `MaaTaskerGetRecognitionDetail(...).detail_json` 的 `And` 根是**数组**，
+     * 没有顶层 `box`、也没有带节点名的子结构（子项只有 algorithm/box/detail）；
+     * [fromRecognizedDetail] 对数组根直接返回 null。box 只在框架的事件/回调侧。
+     * 新代码请走 [boxOfRect]（回调参数），别把这条当主路。
      */
     fun readHitBox(detail: Detail?): List<Int>? {
         if (detail == null) return null

@@ -178,4 +178,27 @@ class BetterSlidingOcrTest {
     fun `box 多于四个数时只取前四个`() {
         assertEquals(listOf(1, 2, 3, 4), OCR.readHitBox(detail(tree("root", box = listOf(1, 2, 3, 4, 5, 6)))))
     }
+
+    // ── 回调 box（MaaRect 四元组）构造与有效性 ──
+    // 真机 bug：起点/终点框走 detail_json 读不到，改由回调第 7 个参数解出四元组。
+    // 这一段是那条路的纯逻辑收口。
+
+    @Test
+    fun `boxOfRect 正宽高才构造`() {
+        assertEquals(listOf(487, 521, 39, 37), OCR.boxOfRect(487, 521, 39, 37))
+    }
+
+    @Test
+    fun `boxOfRect 宽或高非正时视为无效`() {
+        assertNull(OCR.boxOfRect(1, 2, 0, 4))
+        assertNull(OCR.boxOfRect(1, 2, 3, 0))
+        assertNull(OCR.boxOfRect(1, 2, -3, 4))
+        assertNull(OCR.boxOfRect(1, 2, 3, -4))
+    }
+
+    @Test
+    fun `boxOfRect 允许识别结果贴屏幕边`() {
+        assertEquals(listOf(0, 0, 5, 5), OCR.boxOfRect(0, 0, 5, 5))
+        assertEquals(listOf(0, 700, 10, 10), OCR.boxOfRect(0, 700, 10, 10))
+    }
 }

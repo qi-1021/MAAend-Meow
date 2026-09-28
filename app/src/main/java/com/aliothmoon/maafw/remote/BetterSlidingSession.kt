@@ -46,8 +46,18 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
      * 上游 handlers.go:12 `Run`。
      *
      * 被**内部驱动节点**调用时走分发；被**外部调用方**调用时启动内部子流水线。
+     *
+     * [actionBox] 是 MaaCustomActionCallback 第 7 个参数解出的「本节点命中框」
+     * （见 [BetterSlidingOcr.boxOfRect]）。起点/终点识别都必须是它——
+     * `detail_json` 里没有顶层 box，真机上永远读不到（详见 [BetterSlidingOcr.readHitBox]）。
+     * 只有 [MaaRunner] 那侧能拿到指针，所以由它解好四元组后传进来，本层不碰 JNA。
      */
-    fun run(nodeName: String, customActionParam: String?, recoId: Long): Boolean {
+    fun run(
+        nodeName: String,
+        customActionParam: String?,
+        recoId: Long,
+        actionBox: List<Int>? = null,
+    ): Boolean {
         return try {
             if (!BetterSlidingDecision.isActionNode(nodeName)) {
                 runInternalPipeline(nodeName, customActionParam)
@@ -56,7 +66,7 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
                 if (!loadActionParams(tree)) {
                     false
                 } else {
-                    dispatch(nodeName, recoId)
+                    dispatch(nodeName, recoId, actionBox)
                 }
             }
         } catch (t: Throwable) {
@@ -66,12 +76,12 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
     }
 
     /** 上游 handlers.go:33 `dispatchActionNode`。 */
-    private fun dispatch(nodeName: String, recoId: Long): Boolean = when (nodeName) {
+    private fun dispatch(nodeName: String, recoId: Long, actionBox: List<Int>?): Boolean = when (nodeName) {
         BetterSlidingSupport.NODE_MAIN -> handleMain(nodeName)
-        BetterSlidingSupport.NODE_FIND_START -> handleFindStart(recoId)
+        BetterSlidingSupport.NODE_FIND_START -> handleFindStart(recoId, actionBox)
         BetterSlidingSupport.NODE_GET_SLIDER_MAX_QUANTITY -> handleGetSliderMaxQuantity(nodeName, recoId)
         BetterSlidingSupport.NODE_GET_AVAILABLE_QUANTITY -> handleGetAvailableQuantity(recoId)
-        BetterSlidingSupport.NODE_FIND_END -> handleFindEnd(nodeName, recoId)
+        BetterSlidingSupport.NODE_FIND_END -> handleFindEnd(nodeName, recoId, actionBox)
         BetterSlidingSupport.NODE_CHECK_QUANTITY -> handleCheckQuantity(nodeName, recoId)
         BetterSlidingSupport.NODE_DONE -> true
         else -> {
@@ -216,9 +226,18 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
         return true
     }
 
-    /** 上游 handlers.go:191 `handleFindStart`。 */
-    private fun handleFindStart(recoId: Long): Boolean {
-        val box = readHitBox(recoId) ?: run {
+    /**
+     * 上游 handlers.go:191 `handleFindStart`。
+     *
+     * 起点框来自回调参数 [actionBox]（`BetterSlidingFindStart` 是 `And` 节点，
+     * 其命中框即子节点 `BetterSlidingSwipeButton` 的模板框）。
+     *
+     * `readHitBox(recoId)` 那条 `detail_json` 路径**只作兜底**：真机证明它读不到
+     * `And` 根节点的顶层 box，之前把警告「读不到滑条起点框」刷满日志就是它。
+     * 别把它改回主路。
+     */
+    private fun handleFindStart(recoId: Long, actionBox: List<Int>?): Boolean {
+        val box = actionBox ?: readHitBox(recoId) ?: run {
             host.warn("BetterSliding 读不到滑条起点框")
             return false
         }
@@ -318,15 +337,20 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
         return true
     }
 
-    /** 上游 handlers.go:416 `handleFindEnd`。 */
-    private fun handleFindEnd(nodeName: String, recoId: Long): Boolean {
+    /**
+     * 上游 handlers.go:416 `handleFindEnd`。
+     *
+     * 终点框同样优先用回调参数 [actionBox]，`detail_json` 只作兜底（原因见
+     * [handleFindStart]）。
+     */
+    private fun handleFindEnd(nodeName: String, recoId: Long, actionBox: List<Int>?): Boolean {
         val p = params ?: return false
 
         if (state.sliderMaxQuantity < 1) {
             host.warn("BetterSliding 滑条上限非法，无法计算精确点击（max=${state.sliderMaxQuantity}）")
             return false
         }
-        val endBox = readHitBox(recoId) ?: run {
+        val endBox = actionBox ?: readHitBox(recoId) ?: run {
             host.warn("BetterSliding 读不到滑条终点框")
             return false
         }
@@ -502,8 +526,13 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
         ),
     )
 
+    /**
+     * 仅兜底：从 `detail_json` 找框。真机证明 `And` 节点读不到（见 [handleFindStart]），
+     * 起点/终点框请用回调参数 [actionBox]。
+     */
     private fun readHitBox(recoId: Long): List<Int>? = BetterSlidingOcr.readHitBox(detailOf(recoId))
 
+    /** 数量是 OCR 文本，不是 box，仍走 `detail_json`——这条路是有效的。 */
     private fun readQuantityValue(recoId: Long): Int? = BetterSlidingOcr.readQuantityValue(detailOf(recoId))
 
     private fun detailOf(recoId: Long): BetterSlidingOcr.Detail? {
