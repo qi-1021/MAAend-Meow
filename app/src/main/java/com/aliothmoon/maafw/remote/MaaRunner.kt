@@ -454,7 +454,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             val ctx = hostContext ?: return null
             val image = hostImage ?: return null
             if (roi.size != 4) return null
-            val items = ocrProbe(lib, ctx, image, intArrayOf(roi[0], roi[1], roi[2], roi[3]))
+            // 干员列表一屏多行多卡片，要靠检测分出各个名字框，必须完整检测（onlyRec=false）
+            val items = ocrProbe(lib, ctx, image, intArrayOf(roi[0], roi[1], roi[2], roi[3]), onlyRec = false)
             // OcrItem 的 box 可能为空（极少）；匹配仍然有效，但点击框退化到 0,0
             return items.map { item ->
                 val b = item.box
@@ -542,7 +543,8 @@ class MaaRunner(private val agentHost: AgentHost) {
         operatorHost.hostLocation = p.location
         try {
             val r = getBoxRect(lib, roi)
-            val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h)).map { item ->
+            // 冲突弹窗是多段文字（来源据点名 + 提示语），findConflictSource 按位置逐条匹配，需完整检测
+            val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h), onlyRec = false).map { item ->
                 val b = item.box
                 OperatorOcrMatch.Item(
                     item.text,
@@ -2017,7 +2019,6 @@ class MaaRunner(private val agentHost: AgentHost) {
         return names.sortedWith(compareByDescending { spread(it) })
     }
 
-    /** 用临时 OCR 探针节点识别指定区域，返回 (文本, 框) */
     /** 解析 JSON 里的 [x,y,w,h] 数组；不是四个整数就当没给 */
     private fun intArrayOrNull(el: kotlinx.serialization.json.JsonElement?): IntArray? {
         val arr = el as? kotlinx.serialization.json.JsonArray ?: return null
@@ -2025,17 +2026,21 @@ class MaaRunner(private val agentHost: AgentHost) {
         return if (nums.size >= 4) intArrayOf(nums[0], nums[1], nums[2], nums[3]) else null
     }
 
-    private fun ocrProbe(
+    /** 一帧 OCR 探针的原始结果：hit 与从 detail 收集到的条目。 */
+    private data class OcrProbeFrame(val hit: Boolean, val items: List<GoodsSupport.OcrItem>)
+
+    /**
+     * 跑一帧探针 OCR（不重试）。hit 单独留着：`best_result_=null` 时命中为假，
+     * 这正是坏帧防御要识别的信号，不能只看 collect 出来的条目。
+     */
+    private fun runOcrProbeFrame(
         lib: MaaFrameworkLibrary,
         context: Pointer,
         image: Pointer,
         roiBox: IntArray?,
-        allowRetry: Boolean = true,
-        colorFilter: String? = null,
-    ): List<GoodsSupport.OcrItem> {
-        val roiPart = if (roiBox != null && roiBox[2] > 0 && roiBox[3] > 0) {
-            ",\"roi\":[${roiBox[0]},${roiBox[1]},${roiBox[2]},${roiBox[3]}]"
-        } else ""
+        onlyRec: Boolean,
+        colorFilter: String?,
+    ): OcrProbeFrame {
         // 货卡上大片彩色插画，不做颜色过滤的话 OCR 只能读出零星几个偏旁
         // （实测整屏只回 ['手','手','手']）。上游 AutoStockpileGetGoods 用的就是
         // AutoStockpileGoodsFilter：把灰度 60~150 的像素留下、其余刷黑，等价于
@@ -2043,39 +2048,41 @@ class MaaRunner(private val agentHost: AgentHost) {
         //
         // 默认关掉：这个过滤是为货卡调的，套到据点交易等别的界面上会把内容刷没。
         // 只有 [goodsOcrProbe] 显式打开。
-        val filterPart = if (colorFilter.isNullOrBlank()) "" else ",\"color_filter\":\"$colorFilter\""
-        val override =
-            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\"$roiPart$filterPart,\"only_rec\":true}}"
-        lib.MaaContextOverridePipeline(context, override)
-        val res = runRecognitionOnce(lib, context, image, "__GoodsOcrProbe") ?: return emptyList()
-        if (!res.hit) return emptyList()
-        val items = GoodsSupport.collectOcrItems(res.detailJson)
-        if (!isSuspiciousOcr(items) || !allowRetry) return items
-        // 坏帧防御：撕裂帧的 OCR 会整体空掉或只剩全帧噪声（如仅一个低分「手」字且框盖住全帧），
-        // 此时空结果或单条全框结果时刷帧重探；cachedOcrProbe 内部调 ocrProbe 时关掉重试防递归
-        val ctrl = controller ?: return items
-        return cachedOcrProbe(lib, ctrl, context, roiBox)
+        lib.MaaContextOverridePipeline(context, OcrProbeSupport.buildOverride(roiBox, onlyRec, colorFilter))
+        val res = runRecognitionOnce(lib, context, image, OcrProbeSupport.NODE)
+        val hit = res?.hit == true
+        val items = if (res == null) emptyList() else GoodsSupport.collectOcrItems(res.detailJson)
+        return OcrProbeFrame(hit, items)
     }
 
     /**
-     * 可疑 OCR 结果：空、全帧噪声，或只剩一堆单字偏旁。
+     * 用临时 OCR 探针节点识别指定区域，返回 (文本, 框)。
      *
-     * 单字这一条是实测补的：不做颜色过滤时整屏 OCR 稳定回 ['手','手','手']，
-     * 每条都带框、条数不为 1，旧的判断放它过去，于是上层拿着三个偏旁去匹配货组名，
-     * 只会得到「什么都没找到」，看不出是 OCR 根本没读出来。
+     * [onlyRec] 默认关：只有 ROI 里确定只有一个数值（价格、数量…）时才开，
+     * 多条目网格/列表必须保持 false，否则整段 ROI 会被当成一行文字、只回一个大框。
+     * 判定原则见 [OcrProbeSupport]。
      */
-    private fun isSuspiciousOcr(items: List<GoodsSupport.OcrItem>): Boolean {
-        if (items.isEmpty()) return true
-        if (items.size == 1) {
-            val b = items[0].box ?: return true
-            return b[2] >= 1200 && b[3] >= 640
+    private fun ocrProbe(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        image: Pointer,
+        roiBox: IntArray?,
+        allowRetry: Boolean = true,
+        colorFilter: String? = null,
+        onlyRec: Boolean = false,
+    ): List<GoodsSupport.OcrItem> {
+        val frame = runOcrProbeFrame(lib, context, image, roiBox, onlyRec, colorFilter)
+        if (!OcrProbeSupport.isSuspicious(frame.hit, frame.items) || !allowRetry) {
+            // 非命中帧里的条目只是 all_results_ 的原始候选/噪声，不交给上层做文本匹配
+            return if (frame.hit) frame.items else emptyList()
         }
-        // 全是单字：颜色过滤失效 / 帧上真的没有可读文字
-        if (items.size <= 4 && items.all { it.text.length == 1 }) return true
-        return false
+        // 坏帧防御：撕裂帧的 OCR 会整体空掉、整帧单框，或所有候选都不过阈值（hit=false）。
+        // 这些情况都刷帧重探；cachedOcrProbe 内部直接走 runOcrProbeFrame，不会递归重试。
+        val ctrl = controller ?: return if (frame.hit) frame.items else emptyList()
+        return cachedOcrProbe(lib, ctrl, context, roiBox, onlyRec = onlyRec, colorFilter = colorFilter)
     }
 
-    /** 从 controller 缓存帧做 OCR 探针；空结果时刷帧重试一次（坏帧防御） */
+    /** 从 controller 缓存帧做 OCR 探针；可疑结果时刷帧重试（坏帧防御） */
     private fun cachedOcrProbe(
         lib: MaaFrameworkLibrary,
         ctrl: Pointer,
@@ -2083,6 +2090,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         roiBox: IntArray?,
         attempts: Int = 2,
         colorFilter: String? = null,
+        onlyRec: Boolean = false,
     ): List<GoodsSupport.OcrItem> {
         var items: List<GoodsSupport.OcrItem> = emptyList()
         repeat(attempts) {
@@ -2092,8 +2100,10 @@ class MaaRunner(private val agentHost: AgentHost) {
             try {
                 if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return@repeat
                 if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return@repeat
-                items = ocrProbe(lib, context, imgBuf, roiBox, allowRetry = false, colorFilter = colorFilter)
-                if (!isSuspiciousOcr(items)) return items
+                val frame = runOcrProbeFrame(lib, context, imgBuf, roiBox, onlyRec, colorFilter)
+                // 非命中帧的条目只是 all_results_ 噪声，别让上层拿去匹配文本（保持旧语义）
+                items = if (frame.hit) frame.items else emptyList()
+                if (!OcrProbeSupport.isSuspicious(frame.hit, frame.items)) return items
             } finally {
                 lib.MaaImageBufferDestroy(imgBuf)
             }
@@ -2124,7 +2134,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                 else -> null
             }
             val r = getBoxRect(lib, roi)
-            val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h))
+            // 货卡网格：一个 ROI 里多个货名+价格，只有完整检测才能分出多条（onlyRec=false）
+            val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h), onlyRec = false)
             if (result == "exhausted") {
                 val tried = outpostTried[location].orEmpty()
                 val m = GoodsSupport.findBestMatch(items, names, tried, prefer)
@@ -2166,7 +2177,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                 OutpostData.locationItems.values.flatten().distinct()
             } ?: return@MaaCustomRecognitionCallback 0
             val r = getBoxRect(lib, roi)
-            val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h))
+            // 货卡网格：一个 ROI 里多个货名+价格，只有完整检测才能分出多条（onlyRec=false）
+            val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h), onlyRec = false)
             val m = GoodsSupport.findFirstMatch(items, names)
                 ?: return@MaaCustomRecognitionCallback 0
             if (outBox != null && m.box != null) {
@@ -2308,7 +2320,8 @@ class MaaRunner(private val agentHost: AgentHost) {
         roiBox: IntArray?,
         region: String,
     ): List<GoodsSupport.OcrItem> {
-        val filtered = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = GOODS_COLOR_FILTER)
+        // 货卡是一页多张卡，必须完整检测分框；only_rec 会把整段 ROI 退化成一个大框
+        val filtered = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = GOODS_COLOR_FILTER, onlyRec = false)
         val filteredHits = AutoStockpileSupport.scan(filtered, region).size
         if (filteredHits > 0) {
             Ln.i(
@@ -2316,7 +2329,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             )
             return filtered
         }
-        val plain = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = null)
+        val plain = cachedOcrProbe(lib, ctrl, context, roiBox, colorFilter = null, onlyRec = false)
         val plainHits = AutoStockpileSupport.scan(plain, region).size
         Ln.i(
             "MaaRunner: goods OCR [$region] filtered=$filteredHits plain=$plainHits " +
@@ -2439,7 +2452,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         r: RectData,
     ): Int? {
         val ctrl = controller ?: return null
-        val items = cachedOcrProbe(lib, ctrl, context, intArrayOf(r.x, r.y, r.w, r.h))
+        // 详情页实价是这个 ROI 里唯一的一个数值，只识别不做检测更稳
+        // （对齐上游 bettersliding 对单个数值开 only_rec 的做法）
+        val items = cachedOcrProbe(lib, ctrl, context, intArrayOf(r.x, r.y, r.w, r.h), onlyRec = true)
         for (item in items) {
             val digits = item.text.replace("[^\\d]".toRegex(), "")
             val value = digits.toIntOrNull() ?: continue
@@ -2465,7 +2480,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                 if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return@MaaCustomActionCallback 0
                 if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return@MaaCustomActionCallback 0
                 // 页签这类小目标必须限 ROI：整屏彩色插画会把 OCR 淹掉，实测只剩几个偏旁
-                val items = cachedOcrProbe(lib, ctrl, context, roi, colorFilter = null)
+                // 通用点选：ROI 内可能是单个页签也可能是整列菜单，判断不了时保守用完整检测
+                val items = cachedOcrProbe(lib, ctrl, context, roi, colorFilter = null, onlyRec = false)
                 val m = items.firstOrNull { it.text.contains(text) || text.contains(it.text) }
                 if (m == null) {
                     Ln.w("MaaRunner: OcrTapAction [$nodeName] '$text' not found, roi=${roi?.joinToString(",")} got=${items.take(8).map { it.text }}")
@@ -2504,16 +2520,14 @@ class MaaRunner(private val agentHost: AgentHost) {
             if (text.isBlank()) return@MaaCustomRecognitionCallback 0
             val roi = intArrayOrNull(p["roi"])
             // 页签文字是浅色，压在深色页签条上；套货卡的颜色过滤会把它刷成全黑，
-            // 所以这里显式关掉过滤，只靠 ROI 把范围收窄
+            // 所以这里显式关掉过滤，只靠 ROI 把范围收窄。
+            // 这是通用存在性检查，ROI 内可能是单个页签、也可能是多项文本，判断不了时
+            // 保守用完整检测（onlyRec=false）。
             lib.MaaContextOverridePipeline(
                 context,
-                buildString {
-                    append("{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"only_rec\":true")
-                    if (roi != null) append(",\"roi\":[${roi[0]},${roi[1]},${roi[2]},${roi[3]}]")
-                    append("}}")
-                },
+                OcrProbeSupport.buildOverride(roi, onlyRec = false, colorFilter = null),
             )
-            val res = runRecognitionOnce(lib, context, image, "__GoodsOcrProbe")
+            val res = runRecognitionOnce(lib, context, image, OcrProbeSupport.NODE)
                 ?: return@MaaCustomRecognitionCallback 0
             if (!res.hit) return@MaaCustomRecognitionCallback 0
             val items = GoodsSupport.collectOcrItems(res.detailJson)

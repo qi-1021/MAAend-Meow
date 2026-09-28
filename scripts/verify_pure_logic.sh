@@ -66,6 +66,8 @@ MAIN_FILES=(
   "$SRC/JsonTree.kt"
   "$SRC/BetterSlidingSession.kt"
   "$SRC/MaaJsonTree.kt"
+  "$SRC/GoodsSupport.kt"
+  "$SRC/OcrProbeSupport.kt"
   "$SRC/AutoStockStapleSupport.kt"
   "$SRC/ScheduleSupport.kt"
   "$SRC/OperatorOcrMatch.kt"
@@ -98,6 +100,7 @@ TEST_FILES=(
   "$TST/BetterSlidingOcrTest.kt"
   "$TST/BetterSlidingSessionTest.kt"
   "$TST/JsonTreeTest.kt"
+  "$TST/OcrProbeSupportTest.kt"
   "$TST/AutoStockStapleSupportTest.kt"
   "$TST/ScheduleSupportTest.kt"
   "$TST/OperatorOcrMatchTest.kt"
@@ -129,6 +132,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.BetterSlidingOcrTest
   com.aliothmoon.maafw.remote.BetterSlidingSessionTest
   com.aliothmoon.maafw.remote.JsonTreeTest
+  com.aliothmoon.maafw.remote.OcrProbeSupportTest
   com.aliothmoon.maafw.remote.AutoStockStapleSupportTest
   com.aliothmoon.maafw.remote.ScheduleSupportTest
   com.aliothmoon.maafw.remote.OperatorOcrMatchTest
@@ -259,6 +263,7 @@ fun main() {
         "com.aliothmoon.maafw.remote.BetterSlidingOcrTest",
         "com.aliothmoon.maafw.remote.BetterSlidingSessionTest",
         "com.aliothmoon.maafw.remote.JsonTreeTest",
+        "com.aliothmoon.maafw.remote.OcrProbeSupportTest",
         "com.aliothmoon.maafw.remote.AutoStockStapleSupportTest",
         "com.aliothmoon.maafw.remote.ScheduleSupportTest",
         "com.aliothmoon.maafw.remote.OperatorOcrMatchTest",
