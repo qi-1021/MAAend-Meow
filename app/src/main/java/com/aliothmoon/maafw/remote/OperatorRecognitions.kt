@@ -15,7 +15,16 @@ package com.aliothmoon.maafw.remote
  *  3. `OperatorListBottom` 的 **retry 分支**：claim 失败会把 hasCandidate 置回 false
  *     并写 error，于是同一帧的 ScanOutcome 会走到「失败」而不是「没找到」。
  */
-class OperatorRecognitions(private val host: Host) {
+class OperatorRecognitions(
+    private val host: Host,
+    /**
+     * 诊断埋点出口；由宿主注入到 `RunDiagnostics.note("operator", ...)`。
+     * 默认丢弃——纯逻辑单测不关心埋点，这一层也不依赖 Android/JNA。
+     */
+    private val note: (String, Map<String, Any?>) -> Unit = { _, _ -> },
+    /** 埋点是否真的会落盘；false 时跳过昂贵的诊断计算（如整帧 OCR×候选匹配摘要）。 */
+    private val diagnosticsEnabled: () -> Boolean = { false },
+) {
 
     private typealias Candidate = OperatorDataset.OperatorCandidate
     private typealias OcrItem = OperatorOcrMatch.Item
@@ -160,24 +169,100 @@ class OperatorRecognitions(private val host: Host) {
      * 即使次优可见也不降级——继续滚动列表。
      */
     fun decideSelectBest(p: Param): Outcome {
-        val sp = host.resolveSelection(p) ?: return Outcome.Miss
+        val sp = host.resolveSelection(p)
+        if (sp == null) {
+            noteDedup(
+                "select_best",
+                "unresolved|${p.mode}|${p.usage}|${p.location}",
+                "target 选择跳过｜selection 参数不可用（usage=${p.usage} location=${p.location} mode=${p.mode}）",
+                mapOf("stage" to "select_best", "result" to "unresolved", "usage" to p.usage, "location" to p.location),
+            )
+            return Outcome.Miss
+        }
         val owned = host.loadOwnedNames() ?: return Outcome.Miss
         val candidates = OperatorSelection.candidatesForOwnership(sp, OperatorSelection.Ownership(owned))
-        if (candidates.isEmpty()) return Outcome.Miss
+        if (candidates.isEmpty()) {
+            noteDedup(
+                "select_best",
+                "no_candidate|${p.usage}|${p.location}",
+                "target 无可用候选｜owned=${owned.size} 拉黑=${sp.excludedOperators.size} 据点=${p.location} usage=${p.usage}",
+                mapOf(
+                    "stage" to "select_best",
+                    "result" to "no_candidate",
+                    "usage" to p.usage,
+                    "location" to p.location,
+                    "owned" to owned.size,
+                    "excluded" to sp.excludedOperators.toList(),
+                ),
+            )
+            return Outcome.Miss
+        }
 
         setPlannedRestore(sp, candidates)
 
         val items = host.listOcr(p.roi) ?: return Outcome.Miss
-        val found = OperatorMatching.findBestVisibleOperator(candidates, items) ?: return Outcome.Miss
+        val found = OperatorMatching.findBestVisibleOperator(candidates, items)
+        if (found == null) {
+            if (diagnosticsEnabled()) {
+                val digest = digestMatches(items, candidates)
+                val picked = candidates.first()
+                noteDedup(
+                    "select_best",
+                    "miss|${p.usage}|${p.location}|${items.map { it.text }.sorted().joinToString("|")}",
+                    buildString {
+                        append("target 选定 ").append(picked.name).append(" 但本帧未命中｜")
+                        append(if (digest.names.isEmpty()) "画面无任何候选" else "画面可见其他候选=${digest.names}")
+                        append("，期望名=").append(picked.expected)
+                        append("，OCR 样本=").append(preview(items.map { it.text }, 3))
+                    },
+                    mapOf(
+                        "stage" to "select_best",
+                        "result" to "ocr_miss",
+                        "usage" to p.usage,
+                        "location" to p.location,
+                        "picked" to picked.name,
+                        "expected" to picked.expected,
+                        "visible" to digest.names,
+                        "unmatched" to digest.unmatched,
+                        "ocr" to items.map { it.text },
+                    ),
+                )
+            }
+            return Outcome.Miss
+        }
 
         recordTargetAssignment(p, found.first)
         host.scanStates.delete(OperatorScan.scanStateKey(host.currentUid(), p.mode, p.usage, p.location))
+        if (diagnosticsEnabled()) {
+            noteSelection(sp, owned, candidates)
+            note(
+                "target 命中｜${found.first.name}←'${found.second.ocrText}'(tier=${found.second.tier})",
+                mapOf(
+                    "stage" to "select_best",
+                    "result" to "hit",
+                    "usage" to p.usage,
+                    "location" to p.location,
+                    "picked" to found.first.name,
+                    "ocr" to found.second.ocrText,
+                    "tier" to found.second.tier,
+                ),
+            )
+        }
         return Outcome.Hit(found.second.box, "${found.second.ocrText}:${found.first.name}")
     }
 
     /** 上游 recognition.go:109 `CurrentBestOperatorRecognition`。 */
     fun decideCurrentBest(p: Param): Outcome {
-        val sp = host.resolveSelection(p) ?: return Outcome.Miss
+        val sp = host.resolveSelection(p)
+        if (sp == null) {
+            noteDedup(
+                "current_best",
+                "unresolved|${p.mode}|${p.usage}|${p.location}",
+                "当前派驻选择跳过｜selection 参数不可用（usage=${p.usage} location=${p.location} mode=${p.mode}）",
+                mapOf("stage" to "current_best", "result" to "unresolved", "usage" to p.usage, "location" to p.location),
+            )
+            return Outcome.Miss
+        }
         val owned = host.loadOwnedNames() ?: return Outcome.Miss
         val ownership = OperatorSelection.Ownership(owned)
 
@@ -187,16 +272,70 @@ class OperatorRecognitions(private val host: Host) {
         } else {
             OperatorSelection.candidatesForOwnership(sp, ownership)
         }
-        if (candidates.isEmpty()) return Outcome.Miss
+        if (candidates.isEmpty()) {
+            noteDedup(
+                "current_best",
+                "no_candidate|${p.usage}|${p.location}",
+                "当前派驻无可用候选｜owned=${owned.size} 拉黑=${sp.excludedOperators.size} 据点=${p.location} usage=${p.usage}",
+                mapOf(
+                    "stage" to "current_best",
+                    "result" to "no_candidate",
+                    "usage" to p.usage,
+                    "location" to p.location,
+                    "owned" to owned.size,
+                    "excluded" to sp.excludedOperators.toList(),
+                ),
+            )
+            return Outcome.Miss
+        }
 
         setPlannedRestore(sp, candidates)
 
         val items = host.currentOcr(p.roi, reuse = true) ?: return Outcome.Miss
         val found = OperatorMatching.findCurrentBestOperator(candidates, sp.knownOperators, items)
-            ?: return Outcome.Miss
+        if (found == null) {
+            if (diagnosticsEnabled()) {
+                val digest = digestMatches(items, candidates)
+                noteDedup(
+                    "current_best",
+                    "miss|${p.usage}|${p.location}|${items.map { it.text }.sorted().joinToString("|")}",
+                    buildString {
+                        append("当前派驻未命中候选=").append(candidates.take(3).map { it.name })
+                        append("｜画面").append(if (digest.names.isEmpty()) "无任何候选" else "可见=${digest.names}")
+                        append("，OCR 样本=").append(preview(items.map { it.text }, 3))
+                    },
+                    mapOf(
+                        "stage" to "current_best",
+                        "result" to "ocr_miss",
+                        "usage" to p.usage,
+                        "location" to p.location,
+                        "candidates" to candidates.map { it.name },
+                        "visible" to digest.names,
+                        "unmatched" to digest.unmatched,
+                        "ocr" to items.map { it.text },
+                    ),
+                )
+            }
+            return Outcome.Miss
+        }
 
         recordTargetAssignment(p, found.first)
         host.scanStates.delete(OperatorScan.scanStateKey(host.currentUid(), p.mode, p.usage, p.location))
+        if (diagnosticsEnabled()) {
+            noteSelection(sp, owned, candidates)
+            note(
+                "当前派驻命中｜${found.first.name}←'${found.second.ocrText}'(tier=${found.second.tier})",
+                mapOf(
+                    "stage" to "current_best",
+                    "result" to "hit",
+                    "usage" to p.usage,
+                    "location" to p.location,
+                    "picked" to found.first.name,
+                    "ocr" to found.second.ocrText,
+                    "tier" to found.second.tier,
+                ),
+            )
+        }
         return Outcome.Hit(found.second.box, "${found.second.ocrText}:${found.first.name}")
     }
 
@@ -212,14 +351,59 @@ class OperatorRecognitions(private val host: Host) {
 
         val items = host.currentOcr(p.roi, reuse = false) ?: return Outcome.Miss
         val found = OperatorMatching.findUncachedCurrentOperator(data.knownOperators, owned, items)
-            ?: return Outcome.Miss
+        if (found == null) return Outcome.Miss
+
+        if (diagnosticsEnabled()) {
+            val digest = digestMatches(items, data.knownOperators)
+            if (digest.names.size > 1) {
+                note(
+                    "当前派驻命中多个已知干员=${digest.names}，取首个 ${found.first.name}",
+                    mapOf("stage" to "uncached_multi", "location" to p.location, "matched" to digest.names),
+                )
+            }
+        }
 
         // claim 必须在 Refreshed 检查之前：即使被拒，配额也已消耗
-        if (!host.session.claimCacheRescan()) return Outcome.Miss
-        if (host.session.isRefreshed()) return Outcome.Miss
-        if (!host.invalidateSnapshot(host.currentUid())) return Outcome.Miss
+        if (!host.session.claimCacheRescan()) {
+            noteDedup(
+                "uncached",
+                "quota",
+                "当前派驻 ${found.first.name} 未缓存，但本任务重扫配额已用尽",
+                mapOf("stage" to "uncached", "result" to "quota_used", "picked" to found.first.name),
+            )
+            return Outcome.Miss
+        }
+        if (host.session.isRefreshed()) {
+            noteDedup(
+                "uncached",
+                "refreshed",
+                "当前派驻 ${found.first.name} 未缓存，但本任务已全量扫过，不再重扫",
+                mapOf("stage" to "uncached", "result" to "already_refreshed", "picked" to found.first.name),
+            )
+            return Outcome.Miss
+        }
+        if (!host.invalidateSnapshot(host.currentUid())) {
+            noteDedup(
+                "uncached",
+                "invalidate",
+                "当前派驻 ${found.first.name} 未缓存，但清快照失败",
+                mapOf("stage" to "uncached", "result" to "invalidate_failed", "picked" to found.first.name),
+            )
+            return Outcome.Miss
+        }
 
         host.log("干员快照已过期，触发全量重扫（当前派驻=${found.first.name}）")
+        note(
+            "检出当前派驻未缓存：${found.first.name}（ocr='${found.second.ocrText}' tier=${found.second.tier}），已清快照触发全量重扫",
+            mapOf(
+                "stage" to "uncached",
+                "result" to "invalidate_ok",
+                "picked" to found.first.name,
+                "ocr" to found.second.ocrText,
+                "tier" to found.second.tier,
+                "owned" to owned.size,
+            ),
+        )
         return Outcome.Hit(found.second.box, "${found.second.ocrText}:${found.first.name}")
     }
 
@@ -228,6 +412,10 @@ class OperatorRecognitions(private val host: Host) {
         // 先 claim 再判 ready：不 ready 时这一次提示也已经用掉
         if (host.session.claimCacheNotice()) {
             host.log("干员缓存状态：ready=${status.ready} updated_at=${status.updatedAt}")
+            note(
+                "缓存就绪检查｜ready=${status.ready} updated_at=${status.updatedAt}",
+                mapOf("stage" to "cache_ready", "ready" to status.ready, "updated_at" to status.updatedAt),
+            )
         }
         return if (status.ready) Outcome.Hit(null, "cache_ready") else Outcome.Miss
     }
@@ -249,6 +437,11 @@ class OperatorRecognitions(private val host: Host) {
         fun fail(error: String): Outcome {
             state = state.copy(completed = true, error = error)
             host.scanStates.put(state)
+            clearScanPage(key)
+            note(
+                "扫描失败｜$error（usage=${p.usage} location=${p.location} mode=${p.mode}）",
+                mapOf("stage" to "scan_fail", "usage" to p.usage, "location" to p.location, "error" to error),
+            )
             return Outcome.Miss
         }
 
@@ -261,6 +454,47 @@ class OperatorRecognitions(private val host: Host) {
         state = state.copy(observed = (state.observed + frameObserved).toMutableList())
 
         val signature = OperatorScan.signature(frameObserved)
+
+        // 埋点：只有「新的一屏」（签名相对上一帧变化）才记。同一帧被识别框架重复回调、
+        // 或 OCR 短暂失败后重试导致的同签名，都不会重复刷屏。
+        if (signature.isNotEmpty() && signature != state.previousSignature && diagnosticsEnabled()) {
+            val page = bumpScanPage(key)
+            val digest = digestMatches(listItems, scanCandidates)
+            val message = buildString {
+                append("扫描第 ").append(page).append(" 页｜OCR ").append(listItems.size)
+                append(" 条，可见候选 ").append(digest.names.size)
+                if (digest.names.isNotEmpty()) append("=").append(digest.names)
+                append("，样本=").append(preview(listItems.map { it.text }))
+                if (digest.unmatched.isNotEmpty()) append("，未匹配 ").append(digest.unmatched.size).append(" 条")
+            }
+            note(
+                message,
+                mapOf(
+                    "stage" to "scan",
+                    "page" to page,
+                    "usage" to p.usage,
+                    "mode" to p.mode,
+                    "location" to p.location,
+                    "count" to listItems.size,
+                    "observed" to frameObserved,
+                    "matched" to digest.pairs,
+                    "unmatched" to digest.unmatched,
+                    "sample" to listItems.map { it.text },
+                ),
+            )
+            if (digest.names.size > 1) {
+                note(
+                    "扫描第 $page 页命中多个候选（${digest.names.size}）：${digest.names}",
+                    mapOf(
+                        "stage" to "scan_multi",
+                        "page" to page,
+                        "location" to p.location,
+                        "matched" to digest.names,
+                    ),
+                )
+            }
+        }
+
         if (!OperatorScan.reachedBottom(state.previousSignature, signature)) {
             state = state.copy(previousSignature = signature)
             host.scanStates.put(state)
@@ -275,6 +509,29 @@ class OperatorRecognitions(private val host: Host) {
 
         val candidates = OperatorSelection.candidatesForOwnership(sp, OperatorSelection.Ownership(owned))
         setPlannedRestore(sp, candidates)
+
+        if (diagnosticsEnabled()) {
+            val pages = currentScanPage(key)
+            val observed = state.observed.distinct()
+            note(
+                buildString {
+                    append("扫描到底｜共 ").append(pages).append(" 页，累计可见候选 ").append(observed.size)
+                    append(" 个，owned=").append(owned.size)
+                    append("，本轮可用候选=").append(candidates.size)
+                    if (candidates.isNotEmpty()) append("（首选 ${candidates.first().name}）")
+                },
+                mapOf(
+                    "stage" to "scan_bottom",
+                    "pages" to pages,
+                    "usage" to p.usage,
+                    "location" to p.location,
+                    "observed" to observed,
+                    "owned" to owned.size,
+                    "candidates" to candidates.map { it.name },
+                ),
+            )
+        }
+        clearScanPage(key)
 
         val configured = configuredCandidatesForOutcome(sp)
         state = state.copy(
@@ -306,11 +563,34 @@ class OperatorRecognitions(private val host: Host) {
             "error" -> {
                 if (state.error.isEmpty()) return Outcome.Miss
                 host.log("干员列表扫描失败：${state.error}")
+                note(
+                    "扫描结论=失败｜${state.error}（usage=${p.usage} location=${p.location}）",
+                    mapOf(
+                        "stage" to "scan_outcome",
+                        "result" to "error",
+                        "usage" to p.usage,
+                        "location" to p.location,
+                        "error" to state.error,
+                        "observed" to state.observedCandidates,
+                    ),
+                )
             }
 
             "not_found" -> {
                 if (state.error.isNotEmpty() || state.hasCandidate) return Outcome.Miss
                 if (p.usage == OperatorSelection.USAGE_TARGET) host.log("没有可用的售卖干员")
+                note(
+                    "扫描结论=无可用候选｜usage=${p.usage} location=${p.location} " +
+                        "期望=${state.expectedCandidates} 实际可见=${state.observedCandidates}",
+                    mapOf(
+                        "stage" to "scan_outcome",
+                        "result" to "not_found",
+                        "usage" to p.usage,
+                        "location" to p.location,
+                        "expected" to state.expectedCandidates,
+                        "observed" to state.observedCandidates,
+                    ),
+                )
             }
 
             else -> return Outcome.Miss
@@ -342,6 +622,19 @@ class OperatorRecognitions(private val host: Host) {
         if (source.isNotEmpty()) payload["source_location"] = source
         payload["source_managed"] = managed
         if (promptText.isNotEmpty()) payload["prompt_text"] = promptText
+        note(
+            "冲突识别｜result=${p.result} 来源=${source.ifEmpty { "未识别" }} 启用=$managed 提示='$promptText'",
+            mapOf(
+                "stage" to "conflict",
+                "result" to p.result,
+                "usage" to p.usage,
+                "location" to p.location,
+                "source" to source,
+                "managed" to managed,
+                "recognized" to recognized,
+                "prompt" to promptText,
+            ),
+        )
         return Outcome.Hit(null, JsonTree.toJson(payload))
     }
 
@@ -378,5 +671,138 @@ class OperatorRecognitions(private val host: Host) {
         } else {
             Outcome.Hit(null, p.result)
         }
+    }
+
+    // ───────────────────────── 诊断埋点（只读，不参与任何判定） ─────────────────────────
+    //
+    // 这里的东西全部只服务 RunDiagnostics 报告：读 OCR / 候选 / 会话快照，拼人话与 extra。
+    // 刻意不碰判定分支、不写回任何决策状态，也不依赖 Android；关闭埋点时根本不会被调用。
+
+    /** 每个扫描 key 已记录到第几页，仅用于人话里的页码。 */
+    private val scanPageCount = mutableMapOf<String, Int>()
+
+    /** 连续重复帧去重：scope -> 上一次记录的帧指纹。 */
+    private val lastFingerprint = mutableMapOf<String, String>()
+
+    private fun bumpScanPage(key: String): Int = synchronized(scanPageCount) {
+        val next = (scanPageCount[key] ?: 0) + 1
+        scanPageCount[key] = next
+        next
+    }
+
+    private fun currentScanPage(key: String): Int = synchronized(scanPageCount) {
+        scanPageCount[key] ?: 0
+    }
+
+    private fun clearScanPage(key: String) {
+        synchronized(scanPageCount) { scanPageCount.remove(key) }
+    }
+
+    /** 同一 scope 连续相同指纹只记一次；指纹变化则覆盖并放行，避免同帧重试刷屏。 */
+    private fun noteDedup(scope: String, fingerprint: String, message: String, extra: Map<String, Any?>) {
+        val previous = synchronized(lastFingerprint) {
+            val prev = lastFingerprint[scope]
+            lastFingerprint[scope] = fingerprint
+            prev
+        }
+        if (previous != fingerprint) note(message, extra)
+    }
+
+    /** 一帧 OCR 与候选集匹配情况的只读摘要。 */
+    private data class MatchDigest(
+        /** 形如 `赛希←'赛希'(tier=A)`，按屏幕顺序。 */
+        val pairs: List<String>,
+        /** 命中的候选名（去重）。 */
+        val names: List<String>,
+        /** 未与任何候选对上的 OCR 明细：原始文本 + 两层归一化结果。 */
+        val unmatched: List<Map<String, Any?>>,
+    )
+
+    /**
+     * 逐个 OCR 文本去试候选集，得到「认出了谁 / 谁没认出 + 归一化后长什么样」。
+     *
+     * 只是诊断视角（item → 第一个命中候选），与 [OperatorScan.observedOperatorIds]
+     * 的「候选 → 是否可见」互补；顺序按屏幕位置，便于对着真机截图看。
+     */
+    private fun digestMatches(items: List<OcrItem>, candidates: List<Candidate>): MatchDigest {
+        val pairs = mutableListOf<String>()
+        val names = mutableListOf<String>()
+        val unmatched = mutableListOf<Map<String, Any?>>()
+        for (item in OperatorOcrMatch.sortItemsByPosition(items)) {
+            var hitName: String? = null
+            var hitTier = ""
+            for (candidate in candidates) {
+                val m = OperatorOcrMatch.findBest(listOf(item), candidate.expected) ?: continue
+                hitName = candidate.name
+                hitTier = m.tier
+                break
+            }
+            if (hitName != null) {
+                pairs += "$hitName←'${item.text}'(tier=$hitTier)"
+                names += hitName
+            } else {
+                val norm = OperatorOcrMatch.stripSeparators(item.text)
+                val core = OperatorOcrMatch.stripAsciiAlnum(norm)
+                unmatched += mapOf<String, Any?>(
+                    "ocr" to item.text,
+                    "norm" to norm,
+                    "core" to core,
+                    // 「为什么没认出来」：是归一化后整个空了，还是归一化没问题但不在任何候选期望名里
+                    "reason" to if (norm.isEmpty()) "归一化后为空" else "归一化后不在候选期望名中",
+                )
+            }
+        }
+        return MatchDigest(pairs, names.distinct(), unmatched)
+    }
+
+    /** 列表样本截断，避免单条 note 过长。 */
+    private fun preview(values: List<String>, limit: Int = 3): List<String> =
+        if (values.size <= limit) values else values.take(limit) + "…(+${values.size - limit})"
+
+    /** 选人依据：usage、档位池大小、是否完美候选、优先级，以及本轮被拉黑的干员。 */
+    private fun noteSelection(
+        sp: OperatorSelection.SelectionParam,
+        owned: Set<String>,
+        candidates: List<Candidate>,
+    ) {
+        val picked = candidates.first()
+        val isTarget = sp.usage == OperatorSelection.USAGE_TARGET
+        val pool = if (isTarget) {
+            OperatorSelection.equivalentTargetCandidatesForOwnership(sp, OperatorSelection.Ownership(owned))
+        } else {
+            candidates
+        }
+        val perfect = OperatorSelection.restoreCandidateNames(sp.restoreGroups, sp.location)?.contains(picked.name) == true
+        // 其它据点已锁定的恢复干员：本据点选择时被剔除，属于「被排除」但不进拉黑集合
+        val lockedOther = sp.lockedRestoreAssignments
+            .filterKeys { it != sp.location }
+            .values.map { it.name }
+        val message = buildString {
+            append("选人｜usage=").append(sp.usage)
+            append(" 选定=").append(picked.name)
+            append("（bonusTier=").append(picked.bonusTier)
+            append(" priority=").append(picked.priority).append("）")
+            append(" 档位候选=").append(pool.size)
+            if (isTarget) append(" 完美候选=").append(if (perfect) "是" else "否")
+            append(" 拉黑=").append(sp.excludedOperators.size)
+            if (sp.excludedOperators.isNotEmpty()) append(sp.excludedOperators.toList())
+            if (lockedOther.isNotEmpty()) append(" 他据已锁=").append(lockedOther)
+        }
+        note(
+            message,
+            mapOf(
+                "stage" to "selection",
+                "usage" to sp.usage,
+                "location" to sp.location,
+                "picked" to picked.name,
+                "bonus_tier" to picked.bonusTier,
+                "priority" to picked.priority,
+                "tier_pool" to pool.map { it.name },
+                "perfect" to perfect,
+                "owned" to owned.size,
+                "excluded" to sp.excludedOperators.toList(),
+                "locked_other" to lockedOther,
+            ),
+        )
     }
 }

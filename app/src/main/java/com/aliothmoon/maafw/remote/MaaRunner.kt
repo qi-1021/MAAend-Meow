@@ -453,7 +453,23 @@ class MaaRunner(private val agentHost: AgentHost) {
             p: OperatorRecognitions.Param,
             scanCandidates: List<OperatorDataset.OperatorCandidate>,
             observed: List<String>,
-        ): Boolean = OperatorRuntime.writeSnapshot(scanCandidates, observed)
+        ): Boolean {
+            val ok = OperatorRuntime.writeSnapshot(scanCandidates, observed)
+            RunDiagnostics.note(
+                "operator",
+                "写干员快照｜${if (ok) "成功" else "失败"} scan域=${scanCandidates.size} observed=${observed.size} " +
+                    "usage=${p.usage} location=${p.location}",
+                mapOf(
+                    "stage" to "snapshot",
+                    "result" to if (ok) "write_ok" else "write_fail",
+                    "usage" to p.usage,
+                    "location" to p.location,
+                    "scan" to scanCandidates.size,
+                    "observed" to observed.size,
+                ),
+            )
+            return ok
+        }
 
         override fun lastError(): String = OperatorRuntime.lastError()
 
@@ -482,7 +498,17 @@ class MaaRunner(private val agentHost: AgentHost) {
     }
 
     private val operatorHost = MaaOperatorHost()
-    private val operatorRecognitions = OperatorRecognitions(operatorHost)
+
+    /**
+     * 干员子系统的决策埋点统一进 RunDiagnostics（tag=operator）。判定逻辑仍在
+     * [OperatorRecognitions] 里，这里只把出口接到报告；`diagnosticsEnabled` 为 false
+     * （release 或报告未开）时连昂贵的匹配摘要都不算。
+     */
+    private val operatorRecognitions = OperatorRecognitions(
+        host = operatorHost,
+        note = { message, extra -> RunDiagnostics.note("operator", message, extra) },
+        diagnosticsEnabled = { RunDiagnostics.isEnabled() },
+    )
 
     /** 六个干员识别共用的回调骨架：解析参数 → 刷新宿主 → 决策 → 回写 outBox。 */
     private fun makeOperatorRecognition(
@@ -588,10 +614,27 @@ class MaaRunner(private val agentHost: AgentHost) {
             if (p.operation == "reset" && OperatorRuntime.session.lastResetClearedScanStates) {
                 OperatorRuntime.scanStates.clear()
                 OperatorRuntime.ocrHandoff.clear()
+                RunDiagnostics.note(
+                    "operator",
+                    "会话重置｜mode=${p.mode}，已清扫描状态与 OCR 交接槽",
+                    mapOf("stage" to "session", "operation" to "reset", "mode" to p.mode),
+                )
             }
             when (outcome) {
                 is OperatorSession.SessionOutcome.Failed -> {
                     Ln.w("MaaRunner: $nodeName ${outcome.reason}")
+                    RunDiagnostics.note(
+                        "operator",
+                        "会话动作失败｜operation=${p.operation} reason=${outcome.reason}",
+                        mapOf(
+                            "stage" to "session",
+                            "operation" to p.operation,
+                            "result" to "failed",
+                            "location" to p.location,
+                            "usage" to p.usage,
+                            "reason" to outcome.reason,
+                        ),
+                    )
                     0
                 }
 
@@ -600,16 +643,52 @@ class MaaRunner(private val agentHost: AgentHost) {
                         "MaaRunner: $nodeName ${outcome.usage} 干员=${outcome.candidate.name} " +
                             "changed=${outcome.changed} 据点=${outcome.location}",
                     )
+                    RunDiagnostics.note(
+                        "operator",
+                        "会话选定｜${outcome.usage} 干员=${outcome.candidate.name} " +
+                            "changed=${outcome.changed} 据点=${outcome.location}",
+                        mapOf(
+                            "stage" to "session",
+                            "operation" to p.operation,
+                            "result" to "assigned",
+                            "usage" to outcome.usage,
+                            "location" to outcome.location,
+                            "picked" to outcome.candidate.name,
+                            "changed" to outcome.changed,
+                        ),
+                    )
                     1
                 }
 
                 is OperatorSession.SessionOutcome.RestoreSkipped -> {
                     Ln.i("MaaRunner: $nodeName 跳过售后派驻 据点=${outcome.location}")
+                    RunDiagnostics.note(
+                        "operator",
+                        "跳过售后派驻｜据点=${outcome.location}",
+                        mapOf(
+                            "stage" to "session",
+                            "operation" to "skip_restore",
+                            "result" to "skipped",
+                            "location" to outcome.location,
+                        ),
+                    )
                     1
                 }
 
                 is OperatorSession.SessionOutcome.ConflictExcluded -> {
                     Ln.i("MaaRunner: $nodeName 拉黑干员=${outcome.candidate.name} 据点=${outcome.location}")
+                    RunDiagnostics.note(
+                        "operator",
+                        "冲突拉黑｜干员=${outcome.candidate.name} usage=${outcome.usage} 据点=${outcome.location}",
+                        mapOf(
+                            "stage" to "session",
+                            "operation" to "exclude_selected",
+                            "result" to "excluded",
+                            "usage" to outcome.usage,
+                            "location" to outcome.location,
+                            "excluded" to outcome.candidate.name,
+                        ),
+                    )
                     1
                 }
 

@@ -93,6 +93,14 @@ object RunDiagnostics {
             .onFailure { enabled.set(false) }
     }
 
+    /**
+     * 诊断当前是否真正落盘（debug 且已成功 [start]）。
+     *
+     * 供调用方在 [note] 之外做**昂贵的诊断计算**前先判断：release/未启动时直接跳过，
+     * 不为了一份不会写的报告去遍历 OCR 匹配。只读，不改变任何状态。
+     */
+    fun isEnabled(): Boolean = enabled.get()
+
     /** 记一条 MaaFramework 事件。`detailsJson` 原样保留，不解析。 */
     fun event(message: String, detailsJson: String) {
         if (!enabled.get()) return
