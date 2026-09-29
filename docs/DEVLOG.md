@@ -8,6 +8,86 @@
 
 ---
 
+## 2026-09-29 · MapLocator 移植：结构测绘 + 分片方案（含一个必须说清的阻碍）
+
+### 一、测绘结论（关键事实，均带行号）
+
+- `MapLocateAssertLocation` 注册的是 **Custom Recognition**（不是 action），
+  实现在 `MapLocateAction.cpp:404-471`：**轮询最多 60 帧、每帧 250ms**，
+  第 0 帧用回调给的图、之后自己截图；定位成功且落在目标矩形内就返回。
+- 主入口 `Impl::locate`（`MapLocator.cpp:1801-2138`，**338 行**）主干：
+  **追踪优先**（`tryTrackingLocate` 144 行 → `tryTracking` 199 行）→ 否则**全局搜索**
+  （起批任务 → 峰位精修 → 阴值判定），中间夹着遮挡守卫、冷启动共识、
+  远跳保护、双策略互证、运动仲裁。**`force_global_search=true` 时完全跳过追踪**
+  （这正是 AssertLocation 的用法）。
+- 模型：
+  - `map/cls.onnx`：**256 类**分类器，输入 **1×3×128×128 float32 RGB [0,1]**
+    （原图**不缩放**、居中裁剪/贴入 128×128、叠直径 106 圆形 mask），
+    **直接 argmax**（无阈值比较——`yoloConfThreshold` 实际是惰性参数）；
+    输出经 `cls.json` 的 `classes`/`region_mapping` 映射成 zone / tile。
+  - `map/cameraorientation/{preprocess,polar_with_ref}.onnx`：**必须成对**才能用
+    （只给一个 → 整个预测器禁用）；两级串联（前一后输出 7 通道 NHWC 再喂后一个），
+    结果只是**附带的朝向输出**，不参与定位判断。
+- 资产：`tile_mapping.json`（328 个 tile 的 ROI + `infer_margin` 全为 64）、
+  `cls.json`；底图 `resource/image/MapLocator/<Zone>/`。
+- 依赖：**OpenCV**（`matchTemplate` 带 mask、`remap`、`Canny`、
+  `distanceTransform`、轮廓处理、`resize`）、ONNX Runtime、`boost::regex`、meojson；
+  并发模型是 **11 线程优先级池 + 异步 YOLO + std::async 角度推理**。
+- **纯算法（不碰 `cv::Mat`）与图像依赖有清晰分界**（函数级）：
+  `MotionTracker.cpp` 全部、几何/映射/状态/置信度裁决、`convertYoloNameToZoneId`、
+  `decodePmf`、策略的 validate 函数等——这部分可**原样移植且本机可单测**。
+
+### 二、真正的阻碍（必须说清）
+
+**图像处理核心需要 OpenCV 级原语**：带掩膜的多尺度 `matchTemplate`、`remap` 亚像素重采样、
+`Canny`/`distanceTransform`（Chamfer 补偿）、轮廓几何。
+**Kotlin 没有等价能力，手写性能也不够**（地图是 1600×1600 量级、模板 118×120、
+多尺度 + 逐帧追踪）。这是本项移植**唯一实质性的阻碍**，其余都是工作量问题。
+
+### 三、三条路线（评估）
+
+| 路线 | 内容 | 代价 | 精度 |
+|---|---|---|---|
+| (a) 打包 OpenCV Android | 真·移植 | APK +100MB 级 + 与 JNA/构建集成 | 与上游一致 |
+| **(b+) 框架 TemplateMatch（粗搜）+ Kotlin（精修/决策）** | 见下 | **零新原生依赖** | 需真机校准 |
+| (c) Kotlin 金字塔 ZNCC | 全自研 | 性能风险（粗搜可能秒级） | 可接受但需校准 |
+
+#### (b+) 为什么可行（三个关键事实凑出来的）
+
+1. **框架 TemplateMatch 没有多尺度**（schema 里 `scales` 0 处），但——
+2. **上游的地图缩放本来就是分区的固定值**：`ZoneTemplateScale` 只有
+   `ValleyIV_Base` 是 15/16，其余全 1.0（`MapTypes.h:214-217`）。
+   也就是说**不需要连续多尺度**，按 zone 选对模板缩放即可 ✓。
+3. **搜索不是全图盲扫**：先由 YOLO 分类给出 zone 与 tile，
+   搜索被约束到该 tile 的 ROI（`infer_margin=64` 外扩）——
+   这也正好是框架 TemplateMatch 的 `roi` 能表达的形状 ✓。
+
+**一个必须绕过的形状问题**：上游是 `matchTemplate(map图, 小地图模板)`，
+即**搜索图是地图资产、模板是小地图**；而框架 TemplateMatch 的"被搜图"是**截图**。
+但我们的 `MaaContextRunRecognition` **可以传任意图像**（现有 OCR 探针就是这么用的）——
+所以把**地图**作为 image 传进去即可 ✓。
+模板则需是资源里的**文件**：把运行时裁下来的小地图写成 PNG
+（圆形遮罩按 MAA 的 `green_mask` 语义编码成绿色），再用 `template` 指向它 ✓。
+亚像素精修（上游用抛物线/`remap` 连续精修）在 Kotlin 里对
+Maa 返回位置附近的小邻域做局部 ZNCC 即可（代价极低）✓。
+
+> 该路线的前提是"**能用任意图像跑 TemplateMatch 且模板可动态写入**"——
+> 这正是第 1 步真机验证要确认的东西。
+
+### 四、分片与里程碑（每步都能真机验证）
+
+1. **前提验证**：装上 `map-locate` 包 → 确认资产落点 + 框架能跑 `cls.onnx`
+   （最小 NN 节点试跑）。**这一步决定 (a)/(b)/(c) 哪些成立**，必须先做。
+2. **纯逻辑层**（与路线无关、本机可单测）：MotionTracker + 几何/映射/决策。
+3. **粗搜**：按第 1 步结论选路线。
+4. **追踪状态机**：`tryTrackingLocate` 的仲裁/守护逻辑。
+5. **朝向**：先用 Kotlin 近似（角速度/预测），两级 ONNX 放到最后。
+
+**注意**：这是**多阶段工程**，不是一次会话能完成的量。按上面的顺序做，
+每一步都留下可真机验证的产物，避免"写了几千行才发现模型跑不起来"。
+
+---
+
 ## 2026-09-29 · 据点交易首次成功跑完：绕过框架崩溃（`dd4e756`）
 
 **这是本项工作第一个「两个核心功能都在真机跑通」的里程碑**：
