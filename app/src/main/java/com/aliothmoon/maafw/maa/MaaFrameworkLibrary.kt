@@ -188,6 +188,25 @@ interface MaaFrameworkLibrary : Library {
 
     fun MaaTaskerPostTask(tasker: Pointer?, entry: String, pipelineOverride: String): Long
 
+    /**
+     * 只跑一次识别，不驱动 pipeline、也不需要 controller 的实时帧。
+     *
+     * [image] 是本次识别用的图（一个 `MaaImageBuffer`）；[recoType] 是识别算法名（探针传 `"Custom"`），
+     * [recoParam] 是该算法的参数对象。对应
+     * `MaaTaskId MaaTaskerPostRecognition(MaaTasker*, const char* reco_type, const char* reco_param, const MaaImageBuffer* image)`
+     * （`include/MaaFramework/Instance/MaaTasker.h`）。
+     *
+     * 与 `MaaTaskerPostTask` **共用同一个单线程串行队列**（`Tasker::post_recognition` → `post_task`
+     * → 同一个 `AsyncRunner`，见 framework `source/MaaFramework/Tasker/Tasker.cpp:97-133`），
+     * 所以运行中若要并行，必须用第二个 tasker。
+     */
+    fun MaaTaskerPostRecognition(
+        tasker: Pointer?,
+        recoType: String,
+        recoParam: String,
+        image: Pointer?,
+    ): Long
+
     fun MaaTaskerStatus(tasker: Pointer?, id: Long): Int
 
     fun MaaTaskerWait(tasker: Pointer?, id: Long): Int

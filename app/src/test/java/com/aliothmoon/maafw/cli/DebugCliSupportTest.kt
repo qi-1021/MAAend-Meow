@@ -199,6 +199,28 @@ class DebugCliSupportTest {
         assertTrue(failure("run StartUp", ctx(controllerReady = false)).contains("controller 未就绪"))
     }
 
+    // ───────────────────── probe-result ─────────────────────
+
+    @Test
+    fun `probe-result 返回 ProbeResult 意图`() {
+        assertEquals(DebugCliIntent.ProbeResult, ok("probe-result"))
+    }
+
+    @Test
+    fun `probe-result 命令名大小写不敏感`() {
+        assertEquals(DebugCliIntent.ProbeResult, ok("Probe-Result"))
+    }
+
+    @Test
+    fun `probe-result 不需要 controller 就绪`() {
+        assertEquals(DebugCliIntent.ProbeResult, ok("probe-result", ctx(controllerReady = false)))
+    }
+
+    @Test
+    fun `probe-result 不接受参数`() {
+        assertTrue(failure("probe-result now").contains("不接受参数"))
+    }
+
     // ───────────────────── overrideprobe ─────────────────────
 
     @Test
@@ -310,7 +332,7 @@ class DebugCliSupportTest {
     @Test
     fun `helpText 列出全部命令`() {
         val text = DebugCliSupport.helpText()
-        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "overrideprobe", "yoloprobe", "coarselocate")) {
+        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "probe-result", "overrideprobe", "yoloprobe", "coarselocate")) {
             assertTrue("helpText 缺少 $command", text.contains(command))
         }
     }

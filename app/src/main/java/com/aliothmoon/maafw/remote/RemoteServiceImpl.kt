@@ -474,6 +474,8 @@ class RemoteServiceImpl : RemoteService.Stub() {
 
         override fun run(nodeName: String): String = runner.debugRunOnce(nodeName)
 
+        override fun probeResult(): List<String> = runner.debugLastProbeResult()
+
         override fun overrideProbe(): List<String> = runner.debugOverrideProbe()
 
         override fun yoloProbe(imagePath: String): List<String> = runner.debugYoloProbe(imagePath)

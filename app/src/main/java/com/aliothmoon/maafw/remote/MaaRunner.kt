@@ -45,6 +45,7 @@ import kotlinx.serialization.json.put
 import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -3899,41 +3900,154 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    // ────────────────────── 运行中调试探针：借第二个 tasker 并行 ──────────────────────
+    //
+    // 结论（读框架源码 v5.14.x）：
+    //  - Tasker 内部只有一个 `AsyncRunner`（单线程串行队列，`Tasker.cpp:32`）；post_task /
+    //    post_recognition / post_action 都进这同一队列（`Tasker.cpp:97-133, 289-315`）。所以运行中
+    //    往主 tasker 再 post 只会排在当前任务之后，`MaaTaskerWait` 会一直阻塞到任务结束。
+    //  - 第二个 tasker 是独立队列，可真正并行；但**不能给它绑同一个 controller**：框架在每个 task
+    //    结束时会调用 `controller_->auto_release_pressed()`（`Tasker::run_task`，`Tasker.cpp:355-357`），
+    //    会把运行中任务的按压（Android 原生 controller 用 `UseMouseDownAndUpInsteadOfClick`，点击/滑动
+    //    都靠 auto_up 按压）提前放掉；而且它绕开 controller 的动作队列直接调 native，是明确的状态错乱面。
+    //
+    // 因此运行中的探针只绑 resource、**不绑 controller**，走 `MaaTaskerPostRecognition`：识别算法直接吃
+    // 传入的图（内存图或主 controller 的缓存帧），完全不碰输入状态。真正需要 controller 的 `debugRunOnce`
+    // 则改为「排到任务结束后、独占主 tasker 执行」。
+
+    /** 运行中提交的 `run` 节点名，任务结束、独占主 tasker 时按序补跑。 */
+    private val deferredDebugRuns = ConcurrentLinkedQueue<String>()
+
+    /** 最近一次「排队执行」的调试节点结果，供 CLI `probe-result` 读回。 */
+    @Volatile
+    private var lastDebugProbeOutcome: DebugProbeOutcome? = null
+
+    /**
+     * 提交一次「只识别」探针并等待完成。返回 null 表示探针已跑完（结果写在各探针的 @Volatile 字段里），
+     * 否则返回给用户看的原因。
+     *
+     * - 任务空闲：沿用主 tasker（`PostTask` + 临时探针节点），与既有行为一致。
+     * - 任务运行中：新建一个只绑 resource 的临时 tasker，走 `MaaTaskerPostRecognition`；队列独立、
+     *   返回快，且绝不触碰 controller。用完即销毁。
+     *
+     * [requireFrame] 为 true 时需要一张「当前帧」（OCR 探针）；取不到直接失败。为 false 时优先用缓存帧，
+     * 没有就塞一张 1×1 占位图（override / yolo / coarse 探针自己造图，不读这张）。
+     */
+    private fun postProbeAndWait(
+        lib: MaaFrameworkLibrary,
+        probeNode: String,
+        probeReco: String,
+        probeParam: JsonObject?,
+        requireFrame: Boolean,
+    ): String? {
+        if (!isRunning()) {
+            val tasker = synchronized(lifecycleLock) { tasker }
+                ?: return "tasker 未初始化（先跑一次任务）"
+            if (lib.MaaTaskerInited(tasker).toInt() == 0) return "tasker 未就绪"
+            // MaaTaskerPostTask 的 pipeline_override 是**对象数组**（按序合并），不是单个对象
+            val node = buildJsonObject {
+                put(
+                    probeNode,
+                    buildJsonObject {
+                        put(
+                            "recognition",
+                            buildJsonObject {
+                                put("type", "Custom")
+                                put(
+                                    "param",
+                                    buildJsonObject {
+                                        put("custom_recognition", probeReco)
+                                        if (probeParam != null) put("custom_recognition_param", probeParam)
+                                    },
+                                )
+                            },
+                        )
+                        // 只认不按：临时节点不触发任何动作
+                        put("action", buildJsonObject { put("type", "DoNothing") })
+                    },
+                )
+            }
+            val id = lib.MaaTaskerPostTask(tasker, probeNode, JsonArray(listOf(node)).toString())
+            if (id == INVALID_ID) return "PostTask 被拒绝"
+            lib.MaaTaskerWait(tasker, id)
+            return null
+        }
+
+        val res = synchronized(lifecycleLock) { resource } ?: return "resource 未初始化（先跑一次任务）"
+        val image = currentFrameOrPlaceholder(lib, requireFrame) ?: return "取当前缓存帧失败（当前无帧）"
+        val probe = lib.MaaTaskerCreate() ?: run {
+            lib.MaaImageBufferDestroy(image)
+            return "MaaTaskerCreate 失败"
+        }
+        return try {
+            if (lib.MaaTaskerBindResource(probe, res).toInt() == 0 ||
+                lib.MaaTaskerInited(probe).toInt() == 0
+            ) {
+                return "调试 tasker 绑定失败"
+            }
+            val recoParam = buildJsonObject {
+                put("custom_recognition", probeReco)
+                if (probeParam != null) put("custom_recognition_param", probeParam)
+            }.toString()
+            val id = lib.MaaTaskerPostRecognition(probe, "Custom", recoParam, image)
+            if (id == INVALID_ID) return "PostRecognition 被拒绝"
+            lib.MaaTaskerWait(probe, id)
+            null
+        } finally {
+            lib.MaaTaskerDestroy(probe)
+            lib.MaaImageBufferDestroy(image)
+        }
+    }
+
+    /**
+     * 取主 controller 的缓存帧。没有缓存帧时，[requireFrame] 为 true 返回 null，否则退化成一张 1×1 BGR
+     * 占位图（`PostRecognition` 需要非空图；override / yolo / coarse 探针不读这张图）。
+     */
+    private fun currentFrameOrPlaceholder(lib: MaaFrameworkLibrary, requireFrame: Boolean): Pointer? {
+        val ctrl = synchronized(lifecycleLock) { controller }
+        if (ctrl != null) {
+            val buf = lib.MaaImageBufferCreate()
+            if (buf != null) {
+                if (lib.MaaControllerCachedImage(ctrl, buf).toInt() != 0 &&
+                    lib.MaaImageBufferIsEmpty(buf).toInt() == 0
+                ) {
+                    return buf
+                }
+                lib.MaaImageBufferDestroy(buf)
+            }
+        }
+        if (requireFrame) return null
+        val tiny = lib.MaaImageBufferCreate() ?: return null
+        val one = Memory(3)
+        return if (lib.MaaImageBufferSetRawData(tiny, one, 1, 1, MaaImageType.CV_8UC3).toInt() != 0) {
+            tiny
+        } else {
+            lib.MaaImageBufferDestroy(tiny)
+            null
+        }
+    }
+
+    /** CLI `probe-result`：读回最近一次「排队执行」的调试节点结果。 */
+    fun debugLastProbeResult(): List<String> {
+        val outcome = lastDebugProbeOutcome
+            ?: return listOf("还没有排队的调试探针结果（运行中执行 run 会排到任务结束后并写回）")
+        return listOf("command: ${outcome.command}") + outcome.lines
+    }
+
     /**
      * 对当前帧跑一次识别节点，返回 best 文本。
      *
      * MaaFramework 的 `MaaContextRunRecognition` 需要 task context，而 context 只在任务回调里存在；
-     * 外部拿不到。于是注册一个探针识别 `DebugCliOcr`，用 `MaaTaskerPostTask` 跑一个只含该探针的
-     * 临时节点——探针回调里再用现成的 [runRecognitionOnce] 跑目标节点。
+     * 外部拿不到。于是注册一个探针识别 `DebugCliOcr`，借一个只含该探针的临时节点回调拿到 context，
+     * 探针回调里再用现成的 [runRecognitionOnce] 跑目标节点。任务运行中见 [postProbeAndWait]。
      */
     fun debugOcrOnce(nodeName: String): DebugRecoOutcome {
         val lib = MaaFrameworkLoader.library ?: return DebugRecoOutcome(false, null, "MaaFramework 未加载")
-        if (isRunning()) return DebugRecoOutcome(false, null, "任务运行中，无法执行调试识别")
-        val tasker = synchronized(lifecycleLock) { tasker }
-            ?: return DebugRecoOutcome(false, null, "tasker 未初始化（先跑一次任务）")
-        if (lib.MaaTaskerInited(tasker).toInt() == 0) {
-            return DebugRecoOutcome(false, null, "tasker 未就绪")
-        }
         synchronized(debugOcrLock) {
             debugOcrResult = null
-            // MaaTaskerPostTask 的 pipeline_override 是**对象数组**（按序合并），不是单个对象
-            val probeNode = buildJsonObject {
-                put(DEBUG_OCR_NODE, buildJsonObject {
-                    put("recognition", buildJsonObject {
-                        put("type", "Custom")
-                        put("param", buildJsonObject {
-                            put("custom_recognition", DEBUG_OCR_RECO)
-                            put("custom_recognition_param", buildJsonObject { put("node", nodeName) })
-                        })
-                    })
-                    // 只认不按：临时节点不触发任何动作
-                    put("action", buildJsonObject { put("type", "DoNothing") })
-                })
-            }
-            val override = JsonArray(listOf(probeNode)).toString()
-            val id = lib.MaaTaskerPostTask(tasker, DEBUG_OCR_NODE, override)
-            if (id == INVALID_ID) return DebugRecoOutcome(false, null, "PostTask 被拒绝")
-            lib.MaaTaskerWait(tasker, id)
+            val param = buildJsonObject { put("node", nodeName) }
+            val error = postProbeAndWait(lib, DEBUG_OCR_NODE, DEBUG_OCR_RECO, param, requireFrame = true)
+            if (error != null) return DebugRecoOutcome(false, null, error)
             return debugOcrResult ?: DebugRecoOutcome(false, null, "识别未返回结果")
         }
     }
@@ -3941,7 +4055,12 @@ class MaaRunner(private val agentHost: AgentHost) {
     /** 跑一次节点 [nodeName]（截断其 next，避免顺链跑下去），返回结果描述。 */
     fun debugRunOnce(nodeName: String): String {
         val lib = MaaFrameworkLoader.library ?: return "MaaFramework 未加载"
-        if (isRunning()) return "任务运行中，无法执行调试节点"
+        // 运行中必须独占 controller（节点可能带动作），不能并行：排到任务结束后再跑，立刻返回避免卡 CLI。
+        if (isRunning()) {
+            deferredDebugRuns.add(nodeName)
+            Ln.i("MaaRunner: debug run '$nodeName' 已排队，任务结束后执行")
+            return "已排队（任务结束后自动执行）；用 probe-result 读回结果"
+        }
         val tasker = synchronized(lifecycleLock) { tasker }
             ?: return "tasker 未初始化（先跑一次任务）"
         // 同 debugOcrOnce：pipeline_override 是对象数组
@@ -3956,6 +4075,31 @@ class MaaRunner(private val agentHost: AgentHost) {
     }
 
     /**
+     * 任务结束、[isRunning] 已置 false 且主 tasker 空闲时，把运行中排队的调试节点按序补跑。
+     *
+     * 只在 [runPlan] 的收尾里调用：此时 worker 独占主 tasker，不会有任何任务并发，安全。
+     */
+    private fun drainDeferredDebugRuns() {
+        val lib = MaaFrameworkLoader.library ?: return
+        while (true) {
+            val node = deferredDebugRuns.poll() ?: break
+            val tasker = synchronized(lifecycleLock) { tasker } ?: break
+            val patch = buildJsonObject {
+                put(node, buildJsonObject { put("next", JsonArray(emptyList())) })
+            }
+            val id = lib.MaaTaskerPostTask(tasker, node, JsonArray(listOf(patch)).toString())
+            val status = if (id == INVALID_ID) {
+                "PostTask 被拒绝（节点不存在？）"
+            } else {
+                statusText(lib.MaaTaskerWait(tasker, id))
+            }
+            lastDebugProbeOutcome = DebugProbeOutcome("run $node", listOf("node: $node", "status: $status"))
+            RunDiagnostics.note("debugcli", "排队的调试节点 run $node -> $status")
+            Ln.i("MaaRunner: deferred debug run '$node' -> $status")
+        }
+    }
+
+    /**
      * 路线 (b+) 前提验证（仅 debug CLI 调用）：用合成图走完
      * `MaaImageBufferSetRawData` → `MaaContextOverrideImage` → `MaaContextRunRecognition(TemplateMatch)`
      * → 校验返回框。不依赖游戏/补充包，也不需要 controller 的实时帧（整图与模板都在内存里合成）。
@@ -3967,37 +4111,10 @@ class MaaRunner(private val agentHost: AgentHost) {
         // 硬门控：release 下不注册探针、也不执行任何链路（方法体直接短路）
         if (!BuildConfig.DEBUG) return listOf("error: overrideprobe 仅在 debug 构建可用")
         val lib = MaaFrameworkLoader.library ?: return listOf("error: MaaFramework 未加载")
-        if (isRunning()) return listOf("error: 任务运行中，无法执行调试探针")
-        val tasker = synchronized(lifecycleLock) { tasker }
-            ?: return listOf("error: tasker 未初始化（先跑一次任务）")
-        if (lib.MaaTaskerInited(tasker).toInt() == 0) {
-            return listOf("error: tasker 未就绪")
-        }
         synchronized(debugOverrideLock) {
             debugOverrideResult = null
-            // MaaTaskerPostTask 的 pipeline_override 是对象数组（与 debugOcrOnce 一致）
-            val probeNode = buildJsonObject {
-                put(
-                    DEBUG_OVERRIDE_NODE,
-                    buildJsonObject {
-                        put(
-                            "recognition",
-                            buildJsonObject {
-                                put("type", "Custom")
-                                put(
-                                    "param",
-                                    buildJsonObject { put("custom_recognition", DEBUG_OVERRIDE_RECO) },
-                                )
-                            },
-                        )
-                        put("action", buildJsonObject { put("type", "DoNothing") })
-                    },
-                )
-            }
-            val override = JsonArray(listOf(probeNode)).toString()
-            val id = lib.MaaTaskerPostTask(tasker, DEBUG_OVERRIDE_NODE, override)
-            if (id == INVALID_ID) return listOf("error: PostTask 被拒绝")
-            lib.MaaTaskerWait(tasker, id)
+            val error = postProbeAndWait(lib, DEBUG_OVERRIDE_NODE, DEBUG_OVERRIDE_RECO, null, requireFrame = false)
+            if (error != null) return listOf("error: $error")
             return debugOverrideResult ?: listOf("error: 探针未返回结果")
         }
     }
@@ -4131,12 +4248,6 @@ class MaaRunner(private val agentHost: AgentHost) {
     fun debugYoloProbe(imagePath: String): List<String> {
         if (!BuildConfig.DEBUG) return listOf("error: yoloprobe 仅在 debug 构建可用")
         val lib = MaaFrameworkLoader.library ?: return listOf("error: MaaFramework 未加载")
-        if (isRunning()) return listOf("error: 任务运行中，无法执行调试探针")
-        val tasker = synchronized(lifecycleLock) { tasker }
-            ?: return listOf("error: tasker 未初始化（先跑一次任务）")
-        if (lib.MaaTaskerInited(tasker).toInt() == 0) {
-            return listOf("error: tasker 未就绪")
-        }
         val res = synchronized(lifecycleLock) { resource }
             ?: return listOf("error: resource 未初始化（先跑一次任务）")
         val root = projectRoot?.let { File(it).parentFile }
@@ -4155,7 +4266,9 @@ class MaaRunner(private val agentHost: AgentHost) {
             return listOf("error: 预处理异常：${it.javaClass.simpleName}: ${it.message}")
         } ?: return listOf("error: 图片解码失败或尺寸非法：$imagePath")
 
-        ensureYoloClassifyBundle(lib, res, root, supplementDir)?.let { return listOf("error: $it") }
+        ensureYoloClassifyBundle(lib, res, root, supplementDir, allowResourceWrite = !isRunning())?.let {
+            return listOf("error: $it")
+        }
 
         synchronized(debugYoloLock) {
             debugYoloResult = null
@@ -4163,24 +4276,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             debugYoloConfig = config
             debugYoloMapping = mapping
 
-            val probeNode = buildJsonObject {
-                put(
-                    DEBUG_YOLO_NODE,
-                    buildJsonObject {
-                        put(
-                            "recognition",
-                            buildJsonObject {
-                                put("type", "Custom")
-                                put("param", buildJsonObject { put("custom_recognition", DEBUG_YOLO_RECO) })
-                            },
-                        )
-                        put("action", buildJsonObject { put("type", "DoNothing") })
-                    },
-                )
-            }
-            val id = lib.MaaTaskerPostTask(tasker, DEBUG_YOLO_NODE, JsonArray(listOf(probeNode)).toString())
-            if (id == INVALID_ID) return listOf("error: PostTask 被拒绝")
-            lib.MaaTaskerWait(tasker, id)
+            val error = postProbeAndWait(lib, DEBUG_YOLO_NODE, DEBUG_YOLO_RECO, null, requireFrame = false)
+            if (error != null) return listOf("error: $error")
             return debugYoloResult ?: listOf("error: 探针未返回结果")
         }
     }
@@ -4201,6 +4298,16 @@ class MaaRunner(private val agentHost: AgentHost) {
     }
 
     /**
+     * 已把 `debug/yolo-classify` bundle 追加进哪个 resource；重复调用直接短路。
+     *
+     * 关键在于**避免任务运行中再 `MaaResourcePostBundle`**：框架的 Pipeline/ONNX res manager
+     * 没有锁，边跑边改 resource 会与运行中任务的数据读取竞争。于是改由 [prepare] 在空闲时预加载，
+     * 探针侧只读。
+     */
+    @Volatile
+    private var ensuredYoloBundleFor: Pointer? = null
+
+    /**
      * 让框架能读到 `cls.onnx`。补充包把它放在 `<root>/supplements/map-locate/map/cls.onnx`，
      * 而框架只从 bundle 的 `model/classify/` 下按名懒加载（`ONNXResMgr::classifier`）。
      *
@@ -4209,6 +4316,8 @@ class MaaRunner(private val agentHost: AgentHost) {
      * **已加载的 resource**——`lazy_load_classifier` 只登记 root，真正加载在首次识别，
      * 所以追加即可生效，无需重建 resource。
      *
+     * @param allowResourceWrite 是否允许真的去 `MaaResourcePostBundle` 改 resource。任务运行中必须为
+     *   false：框架 res manager 无锁，边跑边改会与运行中任务竞争。空闲（含 [prepare] 预加载）为 true。
      * @return null 表示就绪；否则返回给用户看的原因。
      */
     private fun ensureYoloClassifyBundle(
@@ -4216,7 +4325,12 @@ class MaaRunner(private val agentHost: AgentHost) {
         res: Pointer,
         root: File,
         supplementDir: File,
+        allowResourceWrite: Boolean,
     ): String? {
+        if (ensuredYoloBundleFor == res) return null
+        if (!allowResourceWrite) {
+            return "任务运行中且分类模型尚未加载：请先空闲时跑一次 yoloprobe/coarselocate（或重启任务）"
+        }
         val src = File(supplementDir, "cls.onnx")
         if (!src.isFile) {
             return "缺少分类模型：请先在设置里安装补充包 map-locate（${src.absolutePath} 不存在）"
@@ -4238,7 +4352,23 @@ class MaaRunner(private val agentHost: AgentHost) {
         val id = lib.MaaResourcePostBundle(res, bundleDir.absolutePath)
         if (id == INVALID_ID) return "MaaResourcePostBundle 被拒绝"
         if (lib.MaaResourceWait(res, id) != MaaStatus.SUCCEEDED) return "分类模型 bundle 加载失败"
+        ensuredYoloBundleFor = res
         return null
+    }
+
+    /**
+     * 空闲时预加载 YOLO 分类模型（仅 debug）：补充包存在才做，失败只记日志。
+     *
+     * 这样 `yoloprobe` / `coarselocate` 在任务运行中也不会去改 resource。
+     */
+    private fun preloadYoloClassifyBundle(lib: MaaFrameworkLibrary) {
+        val res = synchronized(lifecycleLock) { resource } ?: return
+        val base = projectRoot?.let { File(it).parentFile } ?: return
+        val supplementDir = File(base, "supplements/map-locate/map")
+        if (!File(supplementDir, "cls.onnx").isFile) return
+        ensureYoloClassifyBundle(lib, res, base, supplementDir, allowResourceWrite = true)?.let {
+            Ln.w("MaaRunner: 预加载 cls.onnx 跳过：$it")
+        }
     }
 
     private val debugCliYoloCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, _, _, _, _, _, _, _, _ ->
@@ -4363,12 +4493,6 @@ class MaaRunner(private val agentHost: AgentHost) {
     fun debugCoarseLocate(imagePath: String, zone: String?): List<String> {
         if (!BuildConfig.DEBUG) return listOf("error: coarselocate 仅在 debug 构建可用")
         val lib = MaaFrameworkLoader.library ?: return listOf("error: MaaFramework 未加载")
-        if (isRunning()) return listOf("error: 任务运行中，无法执行调试探针")
-        val tasker = synchronized(lifecycleLock) { tasker }
-            ?: return listOf("error: tasker 未初始化（先跑一次任务）")
-        if (lib.MaaTaskerInited(tasker).toInt() == 0) {
-            return listOf("error: tasker 未就绪")
-        }
         val res = synchronized(lifecycleLock) { resource }
             ?: return listOf("error: resource 未初始化（先跑一次任务）")
         val root = projectRoot ?: return listOf("error: PI 根未就绪")
@@ -4406,7 +4530,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         }.getOrDefault(emptyMap())
         val mapping = YoloMapping(config.regionMapping, tileRegions)
 
-        ensureYoloClassifyBundle(lib, res, base, supplementDir)?.let { return listOf("error: $it") }
+        ensureYoloClassifyBundle(lib, res, base, supplementDir, allowResourceWrite = !isRunning())?.let {
+            return listOf("error: $it")
+        }
 
         synchronized(debugCoarseLock) {
             debugCoarseResult = null
@@ -4419,24 +4545,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             debugCoarseMapping = mapping
             debugCoarseMapIndex = mapIndex
 
-            val probeNode = buildJsonObject {
-                put(
-                    DEBUG_COARSE_NODE,
-                    buildJsonObject {
-                        put(
-                            "recognition",
-                            buildJsonObject {
-                                put("type", "Custom")
-                                put("param", buildJsonObject { put("custom_recognition", DEBUG_COARSE_RECO) })
-                            },
-                        )
-                        put("action", buildJsonObject { put("type", "DoNothing") })
-                    },
-                )
-            }
-            val id = lib.MaaTaskerPostTask(tasker, DEBUG_COARSE_NODE, JsonArray(listOf(probeNode)).toString())
-            if (id == INVALID_ID) return listOf("error: PostTask 被拒绝")
-            lib.MaaTaskerWait(tasker, id)
+            val error = postProbeAndWait(lib, DEBUG_COARSE_NODE, DEBUG_COARSE_RECO, null, requireFrame = false)
+            if (error != null) return listOf("error: $error")
             return debugCoarseResult ?: listOf("error: 探针未返回结果")
         }
     }
@@ -4930,6 +5040,9 @@ class MaaRunner(private val agentHost: AgentHost) {
                 running = false
                 stopRequested = false
             }
+            // 运行中排队的调试节点：此刻主 tasker 已空闲，独占执行不会与任何任务并发
+            runCatching { drainDeferredDebugRuns() }
+                .onFailure { Ln.w("MaaRunner: drain deferred debug runs failed: ${it.message}") }
             // 报告收尾：结局行排在所有已入队事件之后，随后关文件。
             // finish 只是排队，不阻塞这里；写盘进度落后于 onFinished 无妨
             val outcomeName = when (outcome) {
@@ -5051,6 +5164,9 @@ class MaaRunner(private val agentHost: AgentHost) {
             }
             synchronized(lifecycleLock) { tasker = tsk }
         }
+        // debug 探针在运行中也可能用到 YOLO 分类模型；趁任务还没跑、resource 空闲时先登记好，
+        // 免得运行中再 PostBundle 去改 resource（框架 res manager 无锁，会与运行中任务竞争）。
+        if (BuildConfig.DEBUG) preloadYoloClassifyBundle(lib)
         return null
     }
 
@@ -5756,6 +5872,8 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
         resource = null
         loadedResourcePaths = emptyList()
+        // resource 换了，YOLO 分类 bundle 的登记也要重来
+        ensuredYoloBundleFor = null
     }
 
     private inline fun notify(block: IMaaRunnerCallback.() -> Unit) {
@@ -5841,4 +5959,14 @@ data class DebugRecoOutcome(
     val hit: Boolean,
     val text: String?,
     val reason: String?,
+)
+
+/**
+ * 「排队执行」的调试探针结果（运行中提交的 `run`，任务结束后补跑）。
+ *
+ * 供 CLI `probe-result` 读回：`command` 是命令描述，`lines` 是给用户看的多行结果。
+ */
+data class DebugProbeOutcome(
+    val command: String,
+    val lines: List<String>,
 )

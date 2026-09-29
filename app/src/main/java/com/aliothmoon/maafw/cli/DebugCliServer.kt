@@ -158,6 +158,8 @@ object DebugCliServer {
 
         is DebugCliIntent.Run -> listOf("run: ${intent.nodeName} -> ${host.run(intent.nodeName)}")
 
+        DebugCliIntent.ProbeResult -> host.probeResult()
+
         DebugCliIntent.OverrideProbe -> host.overrideProbe()
 
         is DebugCliIntent.YoloProbe -> host.yoloProbe(intent.imagePath)
@@ -219,6 +221,12 @@ interface DebugCliHost {
 
     /** 跑一次节点 [nodeName]，返回结果描述。 */
     fun run(nodeName: String): String
+
+    /**
+     * 读回最近一次「排队执行」的调试结果（运行中 `run` 会在任务结束后补跑）。
+     * 没有结果时返回一行说明。
+     */
+    fun probeResult(): List<String>
 
     /**
      * 路线 (b+) 前提验证：合成图 → OverrideImage → TemplateMatch → 校验返回框。

@@ -57,6 +57,14 @@ sealed interface DebugCliIntent {
     data class Run(val nodeName: String) : DebugCliIntent
 
     /**
+     * 读回最近一次「排队执行」的调试结果。
+     *
+     * 任务运行中执行 `run` 会与运行中任务争抢 controller 输入，因此改为排到任务结束后独占执行、
+     * 立刻返回；结果落到 RunDiagnostics/日志，并可由本命令读回。
+     */
+    data object ProbeResult : DebugCliIntent
+
+    /**
      * 路线 (b+) 前提验证：合成图 → `MaaContextOverrideImage` 覆盖运行时模板 →
      * `MaaContextRunRecognition(TemplateMatch)` → 校验返回框。不依赖游戏/补充包。
      */
@@ -122,6 +130,7 @@ object DebugCliSupport {
 
             "ocr" -> nodeIntent(command, args, context) { DebugCliIntent.Ocr(it) }
             "run" -> nodeIntent(command, args, context) { DebugCliIntent.Run(it) }
+            "probe-result" -> noArgs(command, args) { DebugCliIntent.ProbeResult }
             "overrideprobe" -> when {
                 args.isNotEmpty() -> DebugCliParse.Failure("overrideprobe 不接受参数")
                 !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
@@ -155,7 +164,8 @@ object DebugCliSupport {
         appendLine("logtail [n]         主日志的末 n 行（默认 $DEBUG_CLI_DEFAULT_TAIL）")
         appendLine("screenshot          把当前缓存帧存成 png，返回路径")
         appendLine("ocr <nodeName>      对当前帧跑该识别节点，返回 best 文本")
-        appendLine("run <nodeName>      跑一次该节点")
+        appendLine("run <nodeName>      跑一次该节点（运行中会排到任务结束后执行，结果见 probe-result）")
+        appendLine("probe-result        读回最近一次排队执行的调试结果")
         appendLine("overrideprobe       验证 OverrideImage+TemplateMatch 链（合成图，不依赖游戏/补充包）")
         appendLine("yoloprobe <img>     小地图预处理 → NeuralNetworkClassify(cls.onnx)，输出 zone/ROI")
         appendLine("coarselocate <frame> [zone]  全帧裁小地图 → YOLO → 地图资产上 TemplateMatch 粗定位")
