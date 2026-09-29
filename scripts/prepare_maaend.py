@@ -343,6 +343,20 @@ def tag_unimplemented_tasks():
         # 环境监测：相机扫描（CameraScanAction）与失败收集器已实现；路线里仍依赖
         # `MapLocateAssertLocation`（C++ MapLocator 未移植）→ 路线定位是降级近似。
         "EnvironmentMonitoring": "🌿环境监测【移动端基础版：相机扫描已实现；路线定位待 MapLocator 移植】",
+        # ---- 以下 5 个在移动端的可见分组里（贵重品库/大世界/理智消耗），但整条链都跑不起来 ----
+        # 基质筛选：上游 essencefilter 的 9 个组件全未移植 → 选中后空转。
+        "EssenceFilter": "🔒基质筛选锁定【暂不可用·移动端未实现基质筛选】",
+        # 基质刷取：依赖基质筛选链（EssenceInventory 由它产出），且自身 2 个 action 未注册
+        # （未注册=硬失败，比 noop 更糟）。
+        "AutoEssence": "🎱基质刷取【暂不可用·依赖基质筛选链，移动端未实现】",
+        # 浮空回收：上游 aerosalvage 的网格检测/拖拽规划组件全为 noop。
+        "AeroSalvage": "🎈浮空回收【暂不可用·移动端未实现】",
+        # 一键导入蓝图：上游 blueprintimport 的 3 个组件全为 noop。
+        "ImportBluePrints": "📐一键导入蓝图【暂不可用·移动端未实现】",
+        # 解拼图：上游 puzzle-solver 的识别与求解全为 noop。
+        "PuzzleSolver": "🧩解拼图【暂不可用·移动端未实现求解】",
+        # 删除共享滑索：删除动作本身可用；自动寻图依赖 `MapFind`（C++ WorldMap 未移植）。
+        "SharedZiplineDelete": "✂️删除共享滑索【移动端基础版：删除可用；自动寻图待 MapFind】",
     }
     tasks_dir = ASSETS_ROOT / "tasks"
     if not tasks_dir.exists():
