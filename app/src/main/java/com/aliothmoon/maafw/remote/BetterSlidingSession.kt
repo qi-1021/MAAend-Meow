@@ -43,6 +43,15 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
     private var params: BetterSlidingParams.ParsedParams? = null
 
     /**
+     * [applyOutcomeOverrides] 里**被我们开启过**的结果节点。
+     *
+     * 这些节点默认就是 `enabled: false`，只有"我们开过、现在要关"才需要真正下发——
+     * 否则那条 `{"节点":{"enabled":false}}` 是空操作，而框架在它上面会偶发 SIGSEGV
+     * （详见 [applyOutcomeOverrides] 的注释）。
+     */
+    private val outcomeNodesEnabledByUs = mutableSetOf<String>()
+
+    /**
      * 上游 handlers.go:12 `Run`。
      *
      * 被**内部驱动节点**调用时走分发；被**外部调用方**调用时启动内部子流水线。
@@ -161,13 +170,21 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
         )
         for ((node, enabled) in outcomes) {
             if (node.isEmpty()) continue
-            // 当前状态已等于目标值时**省掉这次调用**：行为完全不变，但能绕开框架在
-            // `MaaContextOverridePipeline` 里对这条 override 的偶发 SIGSEGV。
-            // 真机实测（2026-09-29）：同一条 {"<节点>":{"enabled":false}} 前三次成功、
-            // 第四次崩溃（tombstone pc 落在该函数 +592），而那两个节点默认就是
-            // enabled:false —— 这些调用本来就是空操作。
-            if (currentNodeEnabled(node) == enabled) {
-                host.info("BetterSliding 结果覆盖跳过（caller=$caller, node=$node 已是 enabled=$enabled）")
+            if (enabled) {
+                // 打开：记下"这个节点是我们开的"，将来才需要撤销
+                outcomeNodesEnabledByUs.add(node)
+            } else if (!outcomeNodesEnabledByUs.remove(node)) {
+                // 关闭：**只有我们此前真的开过它，才需要下发**。
+                //
+                // 真机实测（2026-09-29）两条决定性事实：
+                //  1. 同一条 {"<节点>":{"enabled":false}} 前三次成功、第四次让框架
+                //     SIGSEGV（tombstone pc 落在 MaaContextOverridePipeline+592）；
+                //  2. 为判断"是不是空操作"而加的 MaaContextGetNodeData 查询，
+                //     **在同一个节点名上同样崩**。
+                // 而这两个节点（…ReserveAlreadySatisfied / …ReserveQuantityReached）
+                // 在上游 SellCore.json 里**默认就是 enabled:false**，所以没开过就不必关，
+                // 这条调用本来就是空操作——省掉它，行为不变，且不再触碰会崩的框架查询。
+                host.info("BetterSliding 结果覆盖跳过（caller=$caller, node=$node 未由本会话开启过，保持默认关闭）")
                 continue
             }
             if (!applyPipeline(BetterSlidingOverrides.buildNodeEnableOverride(node, enabled))) {
@@ -178,17 +195,12 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
         return true
     }
 
-    /** 读节点当前的 `enabled`；读不到（或不是对象）返回 null＝未知，此时按原样下发覆盖。 */
-    private fun currentNodeEnabled(node: String): Boolean? {
-        val json = host.callerNodeJson(node) ?: return null
-        return BetterSlidingOverrides.readNodeEnabled(host.parseJson(json))
-    }
-
     // ────────────────────────── 各驱动节点 ──────────────────────────
 
     /** 上游 handlers.go:56 `handleMain`。 */
     private fun handleMain(nodeName: String): Boolean {
         state.reset()
+        outcomeNodesEnabledByUs.clear()
         val p = params ?: return false
 
         state.minimumTargetShortCircuit = !p.swipeOnlyMode && BetterSlidingSupport.isMinimumTargetShortCircuit(

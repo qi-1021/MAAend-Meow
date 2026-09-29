@@ -72,24 +72,6 @@ object BetterSlidingOverrides {
     fun buildNodeEnableOverride(nodeName: String, enabled: Boolean): Map<String, Any?> =
         mapOf(nodeName to mapOf("enabled" to enabled))
 
-    /**
-     * 从节点定义里读 `enabled`。缺省为 `true`（框架语义）；不是对象则返回 null 表示"未知"。
-     *
-     * 为什么需要它：真机实测（2026-09-29）`{"<节点>":{"enabled":false}}` 这条 override
-     * 在框架 `MaaContextOverridePipeline` 里 **SIGSEGV**（tombstone 的 pc 就落在这个函数），
-     * 而且**同一条 override 前三次成功、第四次崩**——与内容无关，是框架侧的状态/竞态问题。
-     * 那两个节点（OutpostTradingReserveAlreadySatisfied / ReserveQuantityReached）
-     * **默认就是 enabled:false**，所以这些调用大多是**空操作**。
-     *
-     * 于是：当前状态已等于目标值时**省掉这次调用**——行为完全不变，却绕开了崩溃。
-     */
-    fun readNodeEnabled(tree: Any?): Boolean? {
-        val map = tree as? Map<*, *> ?: return null
-        // 缺省即启用（框架语义）；字段存在但类型不对 → null＝未知，**不冒然跳过**覆盖
-        if (!map.containsKey("enabled")) return true
-        return map["enabled"] as? Boolean
-    }
-
     /** 上游 overrides.go:232 `buildTemplateMatchButtonHelperOverride`。 */
     fun buildTemplateMatchButtonHelperOverride(template: String): Map<String, Any?> =
         recognitionParam("template" to listOf(template), "green_mask" to BetterSlidingSupport.DEFAULT_GREEN_MASK)

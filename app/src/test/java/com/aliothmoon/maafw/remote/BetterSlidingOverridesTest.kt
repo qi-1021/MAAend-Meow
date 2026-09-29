@@ -182,19 +182,6 @@ class BetterSlidingOverridesTest {
     }
 
     @Test
-    fun `readNodeEnabled 缺省即启用、未知则不冒然跳过`() {
-        // 定义里没写 enabled → 框架默认启用
-        assertEquals(true, OV.readNodeEnabled(emptyMap<String, Any?>()))
-        assertEquals(false, OV.readNodeEnabled(mapOf("enabled" to false)))
-        assertEquals(true, OV.readNodeEnabled(mapOf("enabled" to true)))
-        // 不是对象 / 字段类型不对 → null＝未知（调用方按原样下发覆盖，不冒然跳过）
-        assertEquals(null, OV.readNodeEnabled(null))
-        assertEquals(null, OV.readNodeEnabled("not-an-object"))
-        assertEquals(null, OV.readNodeEnabled(listOf(1, 2)))
-        assertEquals(null, OV.readNodeEnabled(mapOf("enabled" to "false")))
-    }
-
-    @Test
     fun `buildResetSwipeOverride 改写复位节点`() {
         val override = OV.buildResetSwipeOverride("right", true)
         assertEquals(mapOf("enabled" to true), override["BetterSlidingFindSwipeForReset"])
