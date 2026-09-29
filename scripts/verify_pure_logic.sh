@@ -70,6 +70,9 @@ MAIN_FILES=(
   "$SRC/OcrProbeSupport.kt"
   "$SRC/AutoStockpileSupport.kt"
   "$SRC/AutoStockStapleSupport.kt"
+  "$SRC/OutpostData.kt"
+  "$SRC/OutpostReserveSupport.kt"
+  "$SRC/OutpostPrioritySupport.kt"
   "$SRC/ScheduleSupport.kt"
   "$SRC/OperatorOcrMatch.kt"
   "$SRC/OperatorDataset.kt"
@@ -105,6 +108,8 @@ TEST_FILES=(
   "$TST/OcrProbeSupportTest.kt"
   "$TST/AutoStockpileSupportTest.kt"
   "$TST/AutoStockStapleSupportTest.kt"
+  "$TST/OutpostReserveSupportTest.kt"
+  "$TST/OutpostPrioritySupportTest.kt"
   "$TST/ScheduleSupportTest.kt"
   "$TST/OperatorOcrMatchTest.kt"
   "$TST/OperatorDatasetTest.kt"
@@ -139,6 +144,8 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.OcrProbeSupportTest
   com.aliothmoon.maafw.remote.AutoStockpileSupportTest
   com.aliothmoon.maafw.remote.AutoStockStapleSupportTest
+  com.aliothmoon.maafw.remote.OutpostReserveSupportTest
+  com.aliothmoon.maafw.remote.OutpostPrioritySupportTest
   com.aliothmoon.maafw.remote.ScheduleSupportTest
   com.aliothmoon.maafw.remote.OperatorOcrMatchTest
   com.aliothmoon.maafw.remote.OperatorDatasetTest
@@ -272,6 +279,8 @@ fun main() {
         "com.aliothmoon.maafw.remote.OcrProbeSupportTest",
         "com.aliothmoon.maafw.remote.AutoStockpileSupportTest",
         "com.aliothmoon.maafw.remote.AutoStockStapleSupportTest",
+        "com.aliothmoon.maafw.remote.OutpostReserveSupportTest",
+        "com.aliothmoon.maafw.remote.OutpostPrioritySupportTest",
         "com.aliothmoon.maafw.remote.ScheduleSupportTest",
         "com.aliothmoon.maafw.remote.OperatorOcrMatchTest",
         "com.aliothmoon.maafw.remote.OperatorDatasetTest",

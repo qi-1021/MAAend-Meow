@@ -2102,12 +2102,35 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
-    /** 据点各 location 已尝试过的货物名（select 去重；exhausted 确认后清空） */
-    private val outpostTried = ConcurrentHashMap<String, MutableSet<String>>()
+    /**
+     * 据点交易货品会话（对齐上游 `OutpostTradingPrioritySession` / 选品）。
+     *
+     * 已尝试 / 待确认 / 当前物品 / 缺货 / 用户优先顺序都在这里；任务开始时由
+     * [resetOutpostTransientState] 清空。此前移动端用裸 [ConcurrentHashMap] 记
+     * 「已尝试」且从不清，导致同进程第二次跑任务把上次残留当已尝试、提前 exhausted。
+     */
+    private val outpostPrioritySession = OutpostPrioritySupport.Session()
 
-    /** 任务 option 注入的选品策略（对齐上游 configure_strategy：price/rarity/stock） */
-    @Volatile
-    private var outpostStrategy: String = ""
+    /** 据点交易的独立保留规则会话（对齐上游 `OutpostTradingReserveSession`）。 */
+    private val outpostReserveSession = OutpostReserveSupport.Session()
+
+    /**
+     * `OutpostTradingCurrentGoods` 识别到的当前货品名，按 location 暂存，
+     * 供同节点的 `adopt` 动作读取（动作回调拿不到商品名，只有识别回调能 OCR）。
+     */
+    private val outpostCurrentGoods = ConcurrentHashMap<String, String>()
+
+    /**
+     * 任务开始时清据点交易瞬态：保留规则、已尝试/待确认/当前/缺货、当前货品交接槽。
+     *
+     * 上游由 `OutpostTradingInitializeReserveSession` 的 reset 连带清空；移动端此前
+     * 「已尝试」表从不清，同进程第二次跑任务会把上次残留当已尝试、提前 exhausted。
+     */
+    private fun resetOutpostTransientState() {
+        outpostReserveSession.reset()
+        outpostPrioritySession.resetAll()
+        outpostCurrentGoods.clear()
+    }
 
     /**
      * 低买高卖套利排序：对每个候选货物算跨据点价差
@@ -2128,6 +2151,29 @@ class MaaRunner(private val agentHost: AgentHost) {
             return if (bestSell == Int.MIN_VALUE) Int.MIN_VALUE else bestSell - buy
         }
         return names.sortedWith(compareByDescending { spread(it) })
+    }
+
+    /**
+     * 选品排除集合（对齐上游 selection.go:80-91）：
+     * 已尝试 / 任务级缺货 / 永不售卖 / 保留已满足，四类一律不得再入选。
+     */
+    private fun outpostExcludedNames(location: String): Set<String> =
+        outpostPrioritySession.attemptedNames(location) +
+            outpostPrioritySession.outOfStockNames() +
+            outpostReserveSession.blacklistedItems() +
+            outpostReserveSession.satisfiedItems()
+
+    /**
+     * 候选基础顺序：`bias`（低买价升序优先表）优先，其次 strategy=price 走跨据点套利排序，
+     * 否则保持据点原始顺序。bias 表外的货物按原顺序接在后面，保证仍可被选品过滤看到。
+     */
+    private fun outpostBaseOrder(names: List<String>, location: String, bias: String): List<String> {
+        val biasOrder = bias.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        if (biasOrder.isNotEmpty()) {
+            val known = biasOrder.filter { it in names }
+            return known + names.filter { it !in known }
+        }
+        return if (outpostPrioritySession.strategy == "price") outpostArbitrageOrder(names, location) else names
     }
 
     /** 解析 JSON 里的 [x,y,w,h] 数组；不是四个整数就当没给 */
@@ -2282,7 +2328,11 @@ class MaaRunner(private val agentHost: AgentHost) {
         return items
     }
 
-    /** 对齐上游 OutpostTradingPriorityItem：按 location 贪心选首个未尝试货物 */
+    /**
+     * 对齐上游 OutpostTradingPriorityItem（recognition.go）：
+     * 按当前选品规则 + 排除集合选下一个可售货品；`select` 记为 pending 等 commit 确认，
+     * `exhausted` 需连续两帧同一「仅剩已尝试/不可选」集合才确认。
+     */
     private val outpostTradingPriorityItemCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, roi, _, outBox, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
         if (context == null || image == null) return@MaaCustomRecognitionCallback 0
@@ -2299,33 +2349,64 @@ class MaaRunner(private val agentHost: AgentHost) {
                 Ln.w("MaaRunner: OutpostTradingPriorityItem unknown location='$location' on node=$nodeName")
                 return@MaaCustomRecognitionCallback 0
             }
-            val prefer: List<String>? = when {
-                bias.isNotBlank() -> bias.split(',').map { it.trim() }.filter { it.isNotEmpty() }
-                outpostStrategy == "price" -> outpostArbitrageOrder(names, location)
-                else -> null
-            }
             val r = getBoxRect(lib, roi)
             // 货卡网格：一个 ROI 里多个货名+价格，只有完整检测才能分出多条（onlyRec=false）
             val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h), onlyRec = false)
+
             if (result == "exhausted") {
-                val tried = outpostTried[location].orEmpty()
-                val m = GoodsSupport.findBestMatch(items, names, tried, prefer)
-                if (m == null) {
-                    outpostTried.remove(location)
-                    Ln.i("MaaRunner: OutpostTradingPriorityItem [$nodeName] location=$location exhausted")
-                    if (outBox != null) lib.MaaRectSet(outBox, r.x, r.y, r.w, r.h)
+                // pending 表示上次点击尚未确认，不能改选其他物品或误判耗尽（上游 recognition.go:85-93）
+                if (outpostPrioritySession.pendingName(location).isNotEmpty()) {
+                    return@MaaCustomRecognitionCallback 0
+                }
+                val saved = outpostPrioritySession.goodsSelectionExhausted(location)
+                val observed = saved.ifEmpty { OutpostPrioritySupport.visibleStandardNames(items, names) }
+                if (outpostPrioritySession.observeExhaustion(location, observed)) {
+                    Ln.i("MaaRunner: OutpostTradingPriorityItem [$nodeName] location=$location exhausted (observed=$observed)")
                     return@MaaCustomRecognitionCallback 1
                 }
                 return@MaaCustomRecognitionCallback 0
             }
-            val tried = outpostTried.getOrPut(location) { ConcurrentHashMap.newKeySet() }
-            val m = GoodsSupport.findBestMatch(items, names, tried, prefer)
-                ?: return@MaaCustomRecognitionCallback 0
-            GoodsSupport.standardName(m.text, names)?.let { tried += it }
-            if (outBox != null && m.box != null) {
-                lib.MaaRectSet(outBox, m.box[0], m.box[1], m.box[2], m.box[3])
+
+            outpostPrioritySession.beginGoodsSelection(location)
+            val pending = outpostPrioritySession.pendingName(location)
+            if (pending.isNotEmpty()) {
+                // 已选待确认：只允许在仍可见时重报同一项，绝不改选
+                val m = items.firstOrNull { o ->
+                    o.box != null && (o.text.contains(pending) || pending.contains(o.text))
+                }
+                if (m?.box != null) {
+                    if (outBox != null) lib.MaaRectSet(outBox, m.box[0], m.box[1], m.box[2], m.box[3])
+                    return@MaaCustomRecognitionCallback 1
+                }
+                return@MaaCustomRecognitionCallback 0
             }
-            Ln.i("MaaRunner: OutpostTradingPriorityItem [$nodeName] location=$location select='${m.text}'")
+
+            val policy = outpostPrioritySession.policy()
+            val excluded = outpostExcludedNames(location)
+            val order = OutpostPrioritySupport.selectableNames(
+                baseOrder = outpostBaseOrder(names, location, bias),
+                preferred = policy.preferred,
+                onlyPreferred = policy.onlyPreferred,
+                excluded = excluded,
+            )
+            val match = OutpostPrioritySupport.firstVisible(items, order)
+            if (match == null) {
+                // 本帧没有可选货物：保存识别集合，交给下一个 exhausted 节点做稳定确认
+                outpostPrioritySession.setGoodsSelectionExhausted(
+                    location,
+                    OutpostPrioritySupport.visibleStandardNames(items, names),
+                )
+                return@MaaCustomRecognitionCallback 0
+            }
+            val (standard, ocr) = match
+            outpostPrioritySession.setPending(location, standard)
+            if (outBox != null && ocr.box != null) {
+                lib.MaaRectSet(outBox, ocr.box[0], ocr.box[1], ocr.box[2], ocr.box[3])
+            }
+            Ln.i(
+                "MaaRunner: OutpostTradingPriorityItem [$nodeName] location=$location select='$standard' " +
+                    "order=${order.size} excluded=${excluded.size}",
+            )
             1
         } catch (t: Throwable) {
             Ln.w("MaaRunner: OutpostTradingPriorityItem error on node=$nodeName", t)
@@ -2333,7 +2414,12 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
-    /** OutpostTradingCurrentGoods：返回当前可见的首个货物框 */
+    /**
+     * OutpostTradingCurrentGoods：识别当前选中的货品图标。只有它仍在可选集合内
+     * （未被尝试/缺货/永不售卖/保留已满足排除，且未违反 only_preferred）才命中，
+     * 否则返回 0，让 Pipeline 落到更换货品流程——否则会把永不出售的物品沿用下来。
+     * 命中时把商品名暂存 [outpostCurrentGoods]，供同节点 adopt 动作绑定当前物品。
+     */
     private val outpostTradingCurrentGoodsCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, roi, _, outBox, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
         if (context == null || image == null) return@MaaCustomRecognitionCallback 0
@@ -2346,16 +2432,30 @@ class MaaRunner(private val agentHost: AgentHost) {
                 OutpostData.locationItems[location]
             } else {
                 OutpostData.locationItems.values.flatten().distinct()
-            } ?: return@MaaCustomRecognitionCallback 0
+            }
+            if (names.isNullOrEmpty()) return@MaaCustomRecognitionCallback 0
             val r = getBoxRect(lib, roi)
             // 货卡网格：一个 ROI 里多个货名+价格，只有完整检测才能分出多条（onlyRec=false）
             val items = ocrProbe(lib, context, image, intArrayOf(r.x, r.y, r.w, r.h), onlyRec = false)
             val m = GoodsSupport.findFirstMatch(items, names)
                 ?: return@MaaCustomRecognitionCallback 0
+            val standard = GoodsSupport.standardName(m.text, names)
+                ?: return@MaaCustomRecognitionCallback 0
+            val policy = outpostPrioritySession.policy()
+            val excluded = if (location.isNotBlank()) {
+                outpostExcludedNames(location)
+            } else {
+                outpostReserveSession.blacklistedItems() + outpostReserveSession.satisfiedItems()
+            }
+            if (!OutpostPrioritySupport.isSelectable(standard, policy.preferred, policy.onlyPreferred, excluded)) {
+                Ln.i("MaaRunner: OutpostTradingCurrentGoods [$nodeName] '$standard' not selectable, fall through to change goods")
+                return@MaaCustomRecognitionCallback 0
+            }
+            if (location.isNotBlank()) outpostCurrentGoods[location] = standard
             if (outBox != null && m.box != null) {
                 lib.MaaRectSet(outBox, m.box[0], m.box[1], m.box[2], m.box[3])
             }
-            Ln.i("MaaRunner: OutpostTradingCurrentGoods [$nodeName] '${m.text}'")
+            Ln.i("MaaRunner: OutpostTradingCurrentGoods [$nodeName] '$standard'")
             1
         } catch (t: Throwable) {
             Ln.w("MaaRunner: OutpostTradingCurrentGoods error on node=$nodeName", t)
@@ -2364,32 +2464,304 @@ class MaaRunner(private val agentHost: AgentHost) {
     }
 
     /**
-     * OutpostTradingPrioritySession：对齐上游据点交易会话 action。Android 侧已移植
-     * configure_strategy：接收任务 option 注入的选品策略（price = 价升序，低买高卖用），
-     * 买侧 OutpostTradingPriorityItem 识别回调按该策略重排候选优先序。
-     * 其余 operation（reset_goods_selection/adopt/configure）尚未移植，保持 noop 成功。
+     * OutpostTradingPrioritySession：对齐上游据点交易会话 action（session.go）。
+     *
+     * 覆盖全部 operation：configure / configure_strategy / reset_preferred /
+     * reset_goods_selection / register / commit / adopt / out_of_stock。
+     * 仍不接受空 strategy：上游 `sellstrategy.New("")` 会失败，不再静默接受。
      */
     private val outpostPrioritySessionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, _, _ ->
         try {
-            val p = runCatching {
-                Json.parseToJsonElement(customActionParam.orEmpty()).jsonObject
-            }.getOrNull()
-            when (p?.get("operation")?.jsonPrimitive?.contentOrNull.orEmpty()) {
-                "configure_strategy" -> {
-                    val strategy = p?.get("strategy")?.jsonPrimitive?.contentOrNull.orEmpty()
-                    if (strategy in listOf("price", "rarity", "stock", "")) {
-                        outpostStrategy = strategy
-                        Ln.i("MaaRunner: OutpostTradingPrioritySession [$nodeName] configure_strategy=$strategy")
+            val p = OutpostPrioritySupport.parseParam(MaaJsonTree.parse(customActionParam))
+            if (p == null) {
+                Ln.w("MaaRunner: OutpostTradingPrioritySession [$nodeName] 参数不合法: $customActionParam")
+                return@MaaCustomActionCallback 0
+            }
+            when (p.operation) {
+                OutpostPrioritySupport.OPERATION_CONFIGURE -> {
+                    outpostPrioritySession.configure(p.enabled, p.onlyPreferred)
+                    Ln.i(
+                        "MaaRunner: OutpostTradingPrioritySession [$nodeName] configure " +
+                            "enabled=${p.enabled} only_preferred=${p.onlyPreferred}",
+                    )
+                }
+
+                OutpostPrioritySupport.OPERATION_CONFIGURE_STRATEGY -> {
+                    outpostPrioritySession.configureStrategy(p.strategy, p.minimumPrice)
+                    Ln.i(
+                        "MaaRunner: OutpostTradingPrioritySession [$nodeName] configure_strategy=" +
+                            "${p.strategy} min_unit_price=${p.minimumPrice}",
+                    )
+                }
+
+                OutpostPrioritySupport.OPERATION_RESET_PREFERRED -> {
+                    outpostPrioritySession.resetPreferred(p.enabled)
+                    Ln.i("MaaRunner: OutpostTradingPrioritySession [$nodeName] reset_preferred enabled=${p.enabled}")
+                }
+
+                OutpostPrioritySupport.OPERATION_RESET_GOODS_SELECTION -> {
+                    outpostPrioritySession.resetGoodsSelection()
+                    Ln.i("MaaRunner: OutpostTradingPrioritySession [$nodeName] reset_goods_selection")
+                }
+
+                OutpostPrioritySupport.OPERATION_REGISTER -> {
+                    if (p.itemId.isEmpty()) {
+                        Ln.d("MaaRunner: OutpostTradingPrioritySession [$nodeName] unconfigured priority slot skipped")
                     } else {
-                        Ln.w("MaaRunner: OutpostTradingPrioritySession [$nodeName] unknown strategy=$strategy, keep=$outpostStrategy")
+                        val name = OutpostData.nameOfItem(p.itemId)
+                        if (name == null) {
+                            Ln.e("MaaRunner: OutpostTradingPrioritySession [$nodeName] unknown item_id='${p.itemId}'")
+                            return@MaaCustomActionCallback 0
+                        }
+                        val registered = outpostPrioritySession.registerPreferred(name)
+                        Ln.i(
+                            "MaaRunner: OutpostTradingPrioritySession [$nodeName] register " +
+                                "item_id=${p.itemId} name='$name' registered=$registered",
+                        )
                     }
                 }
-                else -> {}
+
+                OutpostPrioritySupport.OPERATION_COMMIT -> {
+                    val name = outpostPrioritySession.commit(p.location)
+                    if (name == null) {
+                        Ln.e("MaaRunner: OutpostTradingPrioritySession [$nodeName] commit 没有待确认物品 location=${p.location}")
+                        return@MaaCustomActionCallback 0
+                    }
+                    outpostReserveSession.setSelected(name)
+                    Ln.i("MaaRunner: OutpostTradingPrioritySession [$nodeName] commit location=${p.location} item='$name'")
+                }
+
+                OutpostPrioritySupport.OPERATION_ADOPT -> {
+                    val name = outpostCurrentGoods.remove(p.location)
+                    if (name.isNullOrEmpty()) {
+                        Ln.e("MaaRunner: OutpostTradingPrioritySession [$nodeName] adopt 没有识别到的当前货品 location=${p.location}")
+                        return@MaaCustomActionCallback 0
+                    }
+                    outpostPrioritySession.adopt(p.location, name)
+                    outpostReserveSession.setSelected(name)
+                    Ln.i("MaaRunner: OutpostTradingPrioritySession [$nodeName] adopt location=${p.location} item='$name'")
+                }
+
+                OutpostPrioritySupport.OPERATION_OUT_OF_STOCK -> {
+                    val outcome = outpostPrioritySession.markOutOfStock(p.location)
+                    if (!outcome.ok) {
+                        Ln.e("MaaRunner: OutpostTradingPrioritySession [$nodeName] out_of_stock 没有已提交物品 location=${p.location}")
+                        return@MaaCustomActionCallback 0
+                    }
+                    Ln.i(
+                        "MaaRunner: OutpostTradingPrioritySession [$nodeName] out_of_stock " +
+                            "location=${p.location} item='${outcome.name}' marked=${outcome.marked}",
+                    )
+                }
             }
             1
         } catch (t: Throwable) {
             Ln.w("MaaRunner: OutpostTradingPrioritySession error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * 售卖界面右上角据点调度券数量的 OCR 节点（上游 OutpostShared.json:78）。
+     * 活动物品按「额度 ÷ 单价」换算本批可卖量时按需触发。
+     */
+    private val outpostStockBillsQuantityNode = "OutpostTradingStockBillsQuantity"
+
+    /**
+     * OutpostTradingReserveSession：对齐上游 reserve.go 的完整保留规则状态机。
+     *
+     * 此前移动端整个 action 是 noop-success：用户配置的「保留 N 件 / 永不出售」被静默丢弃，
+     * 活动物品缺额度换算还可能卖到超额度触发整任务 Stop。这里：
+     *  - reset：清保留规则 + 优先会话（上游 reserve.go:273）
+     *  - register：读 custom_action_param.item_id，缺失时回退节点 attach.item_id，
+     *    映射成商品名注册；未知 item_id 判失败（不再静默丢规则）
+     *  - select/satisfy：维护当前物品 / 已满足集合
+     *  - apply：OCR 调度券额度（活动物品）后 OverridePipeline 改写 BetterSliding 与 next
+     */
+    private val outpostReserveSessionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) {
+            Ln.e("MaaRunner: OutpostTradingReserveSession [$nodeName] context is nil")
+            return@MaaCustomActionCallback 0
+        }
+        try {
+            val p = OutpostReserveSupport.parseParam(MaaJsonTree.parse(customActionParam))
+            if (p == null) {
+                Ln.e("MaaRunner: OutpostTradingReserveSession [$nodeName] 参数不合法: $customActionParam")
+                return@MaaCustomActionCallback 0
+            }
+            when (p.operation) {
+                OutpostReserveSupport.OPERATION_RESET -> {
+                    outpostReserveSession.reset()
+                    // 上游 reserve.go:279 reset 会连带清空优先选品会话
+                    outpostPrioritySession.resetAll()
+                    outpostCurrentGoods.clear()
+                    Ln.i("MaaRunner: OutpostTradingReserveSession [$nodeName] reset")
+                }
+
+                OutpostReserveSupport.OPERATION_REGISTER -> {
+                    var itemId = p.itemId
+                    if (itemId.isEmpty()) {
+                        itemId = OutpostReserveSupport
+                            .parseAttachItemId(nodeDefinitionJson(lib, context, nodeName.orEmpty()))
+                            .orEmpty()
+                    }
+                    if (itemId.isEmpty()) {
+                        Ln.i("MaaRunner: OutpostTradingReserveSession [$nodeName] unconfigured reserve slot skipped")
+                    } else {
+                        val name = OutpostData.nameOfItem(itemId)
+                        if (name == null) {
+                            Ln.e("MaaRunner: OutpostTradingReserveSession [$nodeName] unknown item_id='$itemId'")
+                            return@MaaCustomActionCallback 0
+                        }
+                        val replaced = outpostReserveSession.registerRule(name, p.quantity)
+                        if (replaced) {
+                            Ln.w(
+                                "MaaRunner: OutpostTradingReserveSession [$nodeName] reserve rule replaced " +
+                                    "item_id=$itemId name='$name' quantity=${p.quantity}",
+                            )
+                        } else {
+                            Ln.i(
+                                "MaaRunner: OutpostTradingReserveSession [$nodeName] reserve rule registered " +
+                                    "item_id=$itemId name='$name' quantity=${p.quantity}",
+                            )
+                        }
+                    }
+                }
+
+                OutpostReserveSupport.OPERATION_SELECT -> {
+                    val name = OutpostData.nameOfItem(p.itemId)
+                    if (name == null) {
+                        Ln.e("MaaRunner: OutpostTradingReserveSession [$nodeName] select unknown item_id='${p.itemId}'")
+                        return@MaaCustomActionCallback 0
+                    }
+                    outpostReserveSession.setSelected(name)
+                    Ln.d("MaaRunner: OutpostTradingReserveSession [$nodeName] select item='$name'")
+                }
+
+                OutpostReserveSupport.OPERATION_APPLY -> {
+                    val selected = outpostReserveSession.selectedRule()
+                    if (selected.quantity == OutpostReserveSupport.BLACKLIST_QUANTITY) {
+                        Ln.e(
+                            "MaaRunner: OutpostTradingReserveSession [$nodeName] blacklisted item reached apply " +
+                                "item='${selected.name}'",
+                        )
+                        return@MaaCustomActionCallback 0
+                    }
+                    val name = selected.name
+                    if (name.isEmpty()) {
+                        Ln.e("MaaRunner: OutpostTradingReserveSession [$nodeName] apply 没有已选中物品")
+                        return@MaaCustomActionCallback 0
+                    }
+                    val unitPrice = OutpostData.unitPriceByLocation[p.location]?.get(name)
+                    if (unitPrice == null || unitPrice <= 0) {
+                        Ln.e(
+                            "MaaRunner: OutpostTradingReserveSession [$nodeName] 取不到单价 " +
+                                "location=${p.location} item='$name'",
+                        )
+                        return@MaaCustomActionCallback 0
+                    }
+                    val activity = OutpostData.isActivityItemName(name)
+                    var stockBills = 0
+                    if (activity) {
+                        val read = readStockBillsQuantity(lib, context)
+                        if (read == null) {
+                            Ln.e("MaaRunner: OutpostTradingReserveSession [$nodeName] 读不到调度券额度，无法换算活动物品可卖量")
+                            return@MaaCustomActionCallback 0
+                        }
+                        stockBills = read
+                    }
+                    when (
+                        val plan = OutpostReserveSupport.planApply(
+                            nodeName = nodeName.orEmpty(),
+                            slidingNode = p.slidingNode,
+                            quantity = selected.quantity,
+                            configured = selected.configured,
+                            unitPrice = unitPrice,
+                            activity = activity,
+                            stockBills = stockBills,
+                        )
+                    ) {
+                        is OutpostReserveSupport.ApplyPlan.Failed -> {
+                            Ln.e("MaaRunner: OutpostTradingReserveSession [$nodeName] apply 失败: ${plan.reason}")
+                            return@MaaCustomActionCallback 0
+                        }
+
+                        is OutpostReserveSupport.ApplyPlan.Override -> {
+                            if (lib.MaaContextOverridePipeline(context, plan.overrideJson).toInt() == 0) {
+                                Ln.e(
+                                    "MaaRunner: OutpostTradingReserveSession [$nodeName] OverridePipeline 失败 " +
+                                        "sliding=${p.slidingNode}",
+                                )
+                                return@MaaCustomActionCallback 0
+                            }
+                            Ln.i(
+                                "MaaRunner: OutpostTradingReserveSession [$nodeName] apply item='$name' " +
+                                    "quantity=${selected.quantity} configured=${selected.configured} " +
+                                    "activity=$activity unit_price=$unitPrice stock_bills=$stockBills next=${plan.next}",
+                            )
+                        }
+                    }
+                }
+
+                OutpostReserveSupport.OPERATION_SATISFY -> {
+                    val outcome = outpostReserveSession.markSatisfied()
+                    if (!outcome.ok) {
+                        Ln.e(
+                            "MaaRunner: OutpostTradingReserveSession [$nodeName] satisfy 无有效保留规则 " +
+                                "item='${outcome.name}' quantity=${outcome.quantity}",
+                        )
+                        return@MaaCustomActionCallback 0
+                    }
+                    Ln.i(
+                        "MaaRunner: OutpostTradingReserveSession [$nodeName] satisfy item='${outcome.name}' " +
+                            "quantity=${outcome.quantity} marked=${outcome.marked}",
+                    )
+                }
+            }
             1
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: OutpostTradingReserveSession error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * 截当前画面并跑 `OutpostTradingStockBillsQuantity` OCR，返回调度券数量。
+     * 动作回调拿不到框架帧，只能经控制器缓存取当前帧（与 [readOwnedQuantity] 同法）。
+     */
+    private fun readStockBillsQuantity(lib: MaaFrameworkLibrary, context: Pointer): Int? {
+        val ctrl = controller ?: run {
+            Ln.w("MaaRunner: OutpostTradingReserveSession controller 为空，无法读取调度券额度")
+            return null
+        }
+        val capId = lib.MaaControllerPostScreencap(ctrl)
+        if (capId > 0) lib.MaaControllerWait(ctrl, capId)
+        val imgBuf = lib.MaaImageBufferCreate() ?: return null
+        return try {
+            if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) {
+                Ln.w("MaaRunner: OutpostTradingReserveSession 取当前画面失败")
+                return null
+            }
+            if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) {
+                Ln.w("MaaRunner: OutpostTradingReserveSession 当前画面为空")
+                return null
+            }
+            val recoId = lib.MaaContextRunRecognition(context, outpostStockBillsQuantityNode, "{}", imgBuf)
+            if (recoId <= 0L) {
+                Ln.w("MaaRunner: OutpostTradingReserveSession 调度券额度识别未命中")
+                return null
+            }
+            val detailText = recognitionDetailJson(lib, context, recoId) ?: return null
+            val text = RecoDetail.collectOcrTexts(detailText)
+                .firstOrNull { it.any(Char::isDigit) }
+                ?: return null
+            OcrNum.parse(text).takeIf { it >= 0 }
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: OutpostTradingReserveSession 调度券额度解析失败: ${t.message}")
+            null
+        } finally {
+            lib.MaaImageBufferDestroy(imgBuf)
         }
     }
 
@@ -3439,6 +3811,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                     cancelled = true
                     return@forEachIndexed
                 }
+                // 任务级瞬态：据点交易的「已尝试/缺货/保留」不能跨任务残留
+                resetOutpostTransientState()
                 notify { onTaskStarted(task.taskName, index, payload.tasks.size) }
 
                 val overrides = JsonArray(task.pipelineOverrides).toString()
@@ -3475,6 +3849,7 @@ class MaaRunner(private val agentHost: AgentHost) {
                         cancelled = true
                         return@forEachIndexed
                     }
+                    resetOutpostTransientState()
                     notify { onTaskStarted("[重试] ${task.taskName}", retryStart + retryIndex, retryStart + failedTasks.size) }
 
                     val overrides = JsonArray(task.pipelineOverrides).toString()
@@ -4110,8 +4485,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             "ImportBluePrintsInitTextAction",
 
             "OutpostTradingLocationPlan",
-            // OutpostTradingPrioritySession 不在此列：已显式注册为 outpostPrioritySessionCallback
-            "OutpostTradingReserveSession",
+            // OutpostTradingPrioritySession / OutpostTradingReserveSession 不在此列：
+            // 已显式注册为 outpostPrioritySessionCallback / outpostReserveSessionCallback
             "PullCountCalculatorAction",
             "PuzzleAction",
             "RealTimeTaskAction",
@@ -4152,6 +4527,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         regReco("OutpostTradingPriorityItem", outpostTradingPriorityItemCallback)
         regReco("OutpostTradingCurrentGoods", outpostTradingCurrentGoodsCallback)
         regAction("OutpostTradingPrioritySession", outpostPrioritySessionCallback)
+        regAction("OutpostTradingReserveSession", outpostReserveSessionCallback)
         // 干员智能选择：数据/选择/缓存/会话/扫描全部已移植并单测
         regReco("OutpostTradingSelectBestOperator", outpostOperatorSelectBestCallback)
         regReco("OutpostTradingCurrentBestOperator", outpostOperatorCurrentBestCallback)
