@@ -1841,18 +1841,68 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    /**
+     * `PipelineOverride` / `PipelineOverrideAction`：运行时合并覆盖节点。
+     * 注册表里两个名字指向同一 runner（对齐上游 register.go），所以两处行为天然一致。
+     *
+     * 语义对齐上游 `common/pipelineoverride/action.go`：
+     *  - 参数解析 / 开关判定 / strip next 全在纯逻辑层 [PipelineOverrideSupport]；
+     *  - 默认 strip 掉每个节点片段顶层的 `next`，`allow_next=true` 才保留；
+     *  - `strict=true` 且 `allow_next=false` 时，patch 带 next 直接失败；
+     *  - **解析失败即失败**（返回 0 + 日志），不再 warn 后返回 1。
+     */
     private val pipelineOverrideCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
-        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 1
-        if (context == null || customActionParam.isNullOrBlank()) return@MaaCustomActionCallback 1
-        try {
-            val json = Json.parseToJsonElement(customActionParam).jsonObject
-            val patch = json["patch"] ?: json
-            lib.MaaContextOverridePipeline(context, patch.toString())
-            Ln.i("MaaRunner: PipelineOverrideAction [$nodeName] applied patch")
-        } catch (t: Throwable) {
-            Ln.w("MaaRunner: PipelineOverrideAction error on node=$nodeName", t)
+        val lib = MaaFrameworkLoader.library
+        if (lib == null) {
+            Ln.e("MaaRunner: PipelineOverrideAction [$nodeName] 框架库未加载，失败")
+            return@MaaCustomActionCallback 0
         }
-        1
+        if (context == null) {
+            Ln.e("MaaRunner: PipelineOverrideAction [$nodeName] context 为空，失败")
+            return@MaaCustomActionCallback 0
+        }
+
+        when (val outcome = PipelineOverrideSupport.parse(customActionParam)) {
+            is PipelineOverrideSupport.Outcome.Rejected -> {
+                Ln.e("MaaRunner: PipelineOverrideAction [$nodeName] 参数非法：${outcome.reason}")
+                0
+            }
+
+            is PipelineOverrideSupport.Outcome.Apply -> {
+                if (outcome.allowNext && outcome.strictRequested) {
+                    Ln.i("MaaRunner: PipelineOverrideAction [$nodeName] allow_next=true，strict 被忽略")
+                }
+                if (outcome.strippedNextNodes.isNotEmpty()) {
+                    Ln.i(
+                        "MaaRunner: PipelineOverrideAction [$nodeName] allow_next=false，" +
+                            "已从 patch 移除 next：${outcome.strippedNextNodes}",
+                    )
+                }
+                if (outcome.resourceOverride) {
+                    Ln.w(
+                        "MaaRunner: PipelineOverrideAction [$nodeName] 请求 resource_override=true，" +
+                            "但移动端宿主未绑定 MaaResourceOverridePipeline，暂时回退为 context 作用域" +
+                            "（补丁不会跨任务持久生效）",
+                    )
+                }
+                try {
+                    val overrideJson = JsonTree.toJson(outcome.cleanPatch)
+                    if (lib.MaaContextOverridePipeline(context, overrideJson).toInt() == 0) {
+                        Ln.e("MaaRunner: PipelineOverrideAction [$nodeName] OverridePipeline 调用失败")
+                        0
+                    } else {
+                        Ln.i(
+                            "MaaRunner: PipelineOverrideAction [$nodeName] applied patch " +
+                                "nodes=${outcome.cleanPatch.keys}",
+                        )
+                        1
+                    }
+                } catch (t: Throwable) {
+                    Ln.e("MaaRunner: PipelineOverrideAction error on node=$nodeName", t)
+                    0
+                }
+            }
+        }
     }
 
     private val attachToExpectedRegexCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
