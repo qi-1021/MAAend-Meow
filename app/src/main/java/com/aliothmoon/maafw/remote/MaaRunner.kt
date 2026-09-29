@@ -4310,6 +4310,394 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    // ───────────────────── 端到端粗定位探针（coarselocate，仅 debug）─────────────────────
+    //
+    // 上游 `startGlobalSearch`（MapLocator.cpp:1268-1332）的等价物第一步：
+    // 全帧 → TryExtractMinimap → YOLO 分类得 zone+tile → buildSearchConstraint 算 ROI →
+    // 在地图资产图上以「小地图裁剪」为运行时模板跑 TemplateMatch → 读回框。
+    // 不做追踪状态机/亚像素精修/朝向（后续分片）。
+
+    private val debugCoarseLock = Any()
+
+    @Volatile
+    private var debugCoarseResult: List<String>? = null
+
+    /** 128×128 BGR（YOLO 输入）。 */
+    @Volatile
+    private var debugCoarseYoloBgr: ByteArray? = null
+
+    /** 小地图 ROI 的 BGR 原图（TemplateMatch 的运行时模板）。 */
+    @Volatile
+    private var debugCoarseTemplateBgr: ByteArray? = null
+    @Volatile
+    private var debugCoarseTemplateW = 0
+    @Volatile
+    private var debugCoarseTemplateH = 0
+
+    /** 可选 expected zone selector（上游 `options.expected_zone_id`）。 */
+    @Volatile
+    private var debugCoarseZoneSelector: String = ""
+
+    @Volatile
+    private var debugCoarseConfig: YoloConfig = YoloConfig()
+
+    @Volatile
+    private var debugCoarseMapping: YoloMapping = YoloMapping()
+
+    /** zoneId → 地图资产 PNG。 */
+    @Volatile
+    private var debugCoarseMapIndex: Map<String, File> = emptyMap()
+
+    private class ArgbImage(val pixels: IntArray, val width: Int, val height: Int)
+
+    private class BgrImage(val bytes: ByteArray, val width: Int, val height: Int)
+
+    /**
+     * 第一次端到端粗定位（仅 debug CLI 调用）。真机验证方式：
+     * `screenshot` 存一张全帧 → `coarselocate <path> [zone]`。
+     *
+     * 与 [debugYoloProbe] 同样的理由：外部拿不到 `MaaContext`，借一个临时 Custom 识别节点的
+     * 回调拿到 context，再在回调里跑 YOLO 分类 + `OverrideImage` + `TemplateMatch`
+     * （见 [debugCliCoarseCallback]）。
+     */
+    fun debugCoarseLocate(imagePath: String, zone: String?): List<String> {
+        if (!BuildConfig.DEBUG) return listOf("error: coarselocate 仅在 debug 构建可用")
+        val lib = MaaFrameworkLoader.library ?: return listOf("error: MaaFramework 未加载")
+        if (isRunning()) return listOf("error: 任务运行中，无法执行调试探针")
+        val tasker = synchronized(lifecycleLock) { tasker }
+            ?: return listOf("error: tasker 未初始化（先跑一次任务）")
+        if (lib.MaaTaskerInited(tasker).toInt() == 0) {
+            return listOf("error: tasker 未就绪")
+        }
+        val res = synchronized(lifecycleLock) { resource }
+            ?: return listOf("error: resource 未初始化（先跑一次任务）")
+        val root = projectRoot ?: return listOf("error: PI 根未就绪")
+
+        val mapRoot = File(root, "resource/image/MapLocator")
+        if (!mapRoot.isDirectory) {
+            return listOf("error: 地图资产目录不存在：${mapRoot.absolutePath}")
+        }
+        val mapIndex = buildMapZoneIndex(mapRoot)
+        if (mapIndex.isEmpty()) {
+            return listOf("error: 地图资产目录为空：${mapRoot.absolutePath}")
+        }
+
+        val frame = decodeArgb(imagePath) ?: return listOf("error: 截图解码失败：$imagePath")
+        // 末影控制器是 Android 原生（非 adb/playcover），走默认 ROI、不缩放。
+        val plan = MapLocatorCoarsePure.minimapExtractPlan(frame.width, frame.height, useAdbRoi = false)
+            ?: return listOf("error: 截帧 ${frame.width}x${frame.height} 无法裁出小地图 ROI（越界？）")
+        val minimapArgb = MapLocatorCoarsePure.extractMinimapArgb(
+            frame.pixels, frame.width, frame.height, useAdbRoi = false,
+        ) ?: return listOf("error: 小地图裁剪失败")
+        val yoloBgr = YoloPreprocess.preprocessArgb(minimapArgb, plan.roi.width, plan.roi.height)
+            ?: return listOf("error: YOLO 预处理失败")
+        val templateBgr = YoloPreprocess.argbToBgr(minimapArgb)
+
+        val base = File(root).parentFile
+            ?: return listOf("error: PI 根没有父目录，无法定位补充包目录")
+        val supplementDir = File(base, "supplements/map-locate/map")
+        val config = runCatching {
+            YoloConfigParser.parseConfig(File(supplementDir, "cls.json").takeIf { it.isFile }?.readText())
+        }.getOrDefault(YoloConfig())
+        val tileRegions = runCatching {
+            YoloConfigParser.parseTileMapping(
+                File(supplementDir, "tile_mapping.json").takeIf { it.isFile }?.readText(),
+            )
+        }.getOrDefault(emptyMap())
+        val mapping = YoloMapping(config.regionMapping, tileRegions)
+
+        ensureYoloClassifyBundle(lib, res, base, supplementDir)?.let { return listOf("error: $it") }
+
+        synchronized(debugCoarseLock) {
+            debugCoarseResult = null
+            debugCoarseYoloBgr = yoloBgr
+            debugCoarseTemplateBgr = templateBgr
+            debugCoarseTemplateW = plan.roi.width
+            debugCoarseTemplateH = plan.roi.height
+            debugCoarseZoneSelector = zone.orEmpty().trim()
+            debugCoarseConfig = config
+            debugCoarseMapping = mapping
+            debugCoarseMapIndex = mapIndex
+
+            val probeNode = buildJsonObject {
+                put(
+                    DEBUG_COARSE_NODE,
+                    buildJsonObject {
+                        put(
+                            "recognition",
+                            buildJsonObject {
+                                put("type", "Custom")
+                                put("param", buildJsonObject { put("custom_recognition", DEBUG_COARSE_RECO) })
+                            },
+                        )
+                        put("action", buildJsonObject { put("type", "DoNothing") })
+                    },
+                )
+            }
+            val id = lib.MaaTaskerPostTask(tasker, DEBUG_COARSE_NODE, JsonArray(listOf(probeNode)).toString())
+            if (id == INVALID_ID) return listOf("error: PostTask 被拒绝")
+            lib.MaaTaskerWait(tasker, id)
+            return debugCoarseResult ?: listOf("error: 探针未返回结果")
+        }
+    }
+
+    /** 扫描地图资产目录，按上游 key 规则建 zoneId → 文件 索引。 */
+    private fun buildMapZoneIndex(mapRoot: File): Map<String, File> {
+        val files = mapRoot.walkTopDown()
+            .filter { it.isFile && it.extension.lowercase() in MAP_IMAGE_EXTENSIONS }
+            .toList()
+        if (files.isEmpty()) return emptyMap()
+        val entries = files.map { (it.parentFile?.name ?: "") to it.name }
+        val keys = MapLocatorCoarsePure.zoneIndex(entries)
+        val byLocation = files.associateBy { (it.parentFile?.name ?: "") to it.name }
+        return keys.mapValues { (_, location) -> byLocation.getValue(location) }
+    }
+
+    private fun decodeArgb(path: String): ArgbImage? {
+        val bitmap = BitmapFactory.decodeFile(path) ?: return null
+        return try {
+            val w = bitmap.width
+            val h = bitmap.height
+            if (w <= 0 || h <= 0) return null
+            val pixels = IntArray(w * h)
+            bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+            ArgbImage(pixels, w, h)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun decodeBgr(file: File): BgrImage? {
+        val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return null
+        return try {
+            val w = bitmap.width
+            val h = bitmap.height
+            if (w <= 0 || h <= 0) return null
+            val pixels = IntArray(w * h)
+            bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+            BgrImage(YoloPreprocess.argbToBgr(pixels), w, h)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    /** 把 BGR 裸像素写进 image buffer；[keepAlive] 用于撑住 Memory 引用到调用结束。 */
+    private fun setRawBgr(
+        lib: MaaFrameworkLibrary,
+        buffer: Pointer,
+        bgr: ByteArray,
+        width: Int,
+        height: Int,
+        keepAlive: MutableList<Memory>,
+    ): Boolean {
+        val memory = Memory(bgr.size.toLong())
+        memory.write(0, bgr, 0, bgr.size)
+        keepAlive += memory
+        return lib.MaaImageBufferSetRawData(buffer, memory, width, height, MaaImageType.CV_8UC3).toInt() != 0
+    }
+
+    /**
+     * 粗定位探针识别：在回调里走完「YOLO → 约束 ROI → 地图资产 TemplateMatch」。
+     *
+     * 任一步失败都如实写进 [debugCoarseResult]，绝不伪造成功。
+     */
+    private val debugCliCoarseCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, _, _, _, _, _, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null) {
+            debugCoarseResult = listOf("error: 探针回调缺少 context")
+            return@MaaCustomRecognitionCallback 0
+        }
+        val yoloBgr = debugCoarseYoloBgr
+        val templateBgr = debugCoarseTemplateBgr
+        if (yoloBgr == null || templateBgr == null) {
+            debugCoarseResult = listOf("error: 探针缺少预处理图/模板图")
+            return@MaaCustomRecognitionCallback 0
+        }
+        var yoloBuf: Pointer? = null
+        var mapBuf: Pointer? = null
+        var templateBuf: Pointer? = null
+        val keepAlive = mutableListOf<Memory>()
+        try {
+            // 1) YOLO 分类
+            yoloBuf = lib.MaaImageBufferCreate()
+            if (yoloBuf == null || !setRawBgr(
+                    lib, yoloBuf, yoloBgr, YoloPreprocess.OUTPUT_SIZE, YoloPreprocess.OUTPUT_SIZE, keepAlive,
+                )
+            ) {
+                debugCoarseResult = listOf("error: MaaImageBufferSetRawData(128x128) 失败")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val classifyOverride = YoloClassifySupport.buildClassifyOverride(
+                nodeName = YoloClassifySupport.DEFAULT_PROBE_NODE,
+                model = YoloClassifySupport.DEFAULT_MODEL,
+                labels = debugCoarseConfig.classes,
+            )
+            val yoloRes = runRecognitionOnce(
+                lib, context, yoloBuf, YoloClassifySupport.DEFAULT_PROBE_NODE, classifyOverride,
+            ) ?: run {
+                debugCoarseResult = listOf("error: NeuralNetworkClassify 调用失败（cls.onnx 未加载？）")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val parsed = YoloClassifySupport.parseClassifyDetail(yoloRes.detailJson) ?: run {
+                val detail = yoloRes.detailJson?.take(400) ?: "null"
+                debugCoarseResult = listOf("error: 无法解析识别详情：$detail")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val coarse = YoloClassifySupport.resolveClassify(parsed, debugCoarseConfig, debugCoarseMapping)
+
+            val selector = debugCoarseZoneSelector
+            val expectedZoneId = MapLocatorPure.normalizeExpectedZoneId(selector) {
+                debugCoarseMapping.convertYoloNameToZoneId(it)
+            }
+            val targetZoneId = expectedZoneId.ifEmpty { coarse.zoneId }
+            if (!coarse.valid) {
+                debugCoarseResult = listOf(
+                    "yolo: index=${parsed.clsIndex} class=${coarse.rawClass} valid=false",
+                    "error: YOLO 分类无效（cls_index 越界）",
+                )
+                return@MaaCustomRecognitionCallback 0
+            }
+            if (coarse.isNone || targetZoneId.isEmpty() || targetZoneId == "None") {
+                debugCoarseResult = listOf(
+                    "yolo: index=${parsed.clsIndex} class=${coarse.rawClass} zone=${coarse.zoneId} conf=${coarse.confidence}",
+                    "result: NONE（本帧没有可定位区域）",
+                )
+                return@MaaCustomRecognitionCallback 0
+            }
+            val mapFile = debugCoarseMapIndex[targetZoneId]
+            if (mapFile == null) {
+                val sample = debugCoarseMapIndex.keys.take(8).joinToString(", ")
+                debugCoarseResult = listOf(
+                    "zone: $targetZoneId",
+                    "error: 地图资产里没有这个 zone（已加载 ${debugCoarseMapIndex.size} 个；例如 $sample）",
+                )
+                return@MaaCustomRecognitionCallback 0
+            }
+            val map = decodeBgr(mapFile) ?: run {
+                debugCoarseResult = listOf("error: 地图资产解码失败：${mapFile.absolutePath}")
+                return@MaaCustomRecognitionCallback 0
+            }
+
+            // 2) 约束 ROI（buildSearchConstraint）→ startGlobalSearch 的最终搜索矩形
+            val constraint = buildSearchConstraint(
+                expectedZoneSelector = selector,
+                targetZoneId = targetZoneId,
+                coarse = coarse,
+                zones = mapOf(targetZoneId to MapDimensions(map.width, map.height)),
+            )
+            val searchRoi = MapLocatorCoarsePure.constrainedSearchRoi(
+                constraint, map.width, map.height, debugCoarseTemplateW, debugCoarseTemplateH,
+            ) ?: run {
+                debugCoarseResult = listOf(
+                    "zone: $targetZoneId",
+                    "constraint: mode=${constraint.mode} yolo_validated=${constraint.yoloValidated} roi=${constraint.roi}",
+                    "error: 搜索 ROI 裁到地图边界后为空",
+                )
+                return@MaaCustomRecognitionCallback 0
+            }
+            if (!constraint.yoloValidated) {
+                debugCoarseResult = listOf(
+                    "zone: $targetZoneId",
+                    "yolo: class=${coarse.rawClass} zone=${coarse.zoneId} conf=${coarse.confidence}",
+                    "error: YOLO 约束未通过（zone 不匹配 selector，或 ROI 缺失）",
+                )
+                return@MaaCustomRecognitionCallback 0
+            }
+
+            // 3) 地图资产作 image、小地图裁剪作运行时模板、ROI 约束搜索窗
+            templateBuf = lib.MaaImageBufferCreate()
+            if (templateBuf == null || !setRawBgr(
+                    lib, templateBuf, templateBgr, debugCoarseTemplateW, debugCoarseTemplateH, keepAlive,
+                )
+            ) {
+                debugCoarseResult = listOf("error: MaaImageBufferSetRawData(template) 失败")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val overrideOk = lib.MaaContextOverrideImage(context, DEBUG_COARSE_TEMPLATE, templateBuf).toInt() != 0
+
+            mapBuf = lib.MaaImageBufferCreate()
+            if (mapBuf == null || !setRawBgr(lib, mapBuf, map.bytes, map.width, map.height, keepAlive)) {
+                debugCoarseResult = listOf("error: MaaImageBufferSetRawData(map) 失败")
+                return@MaaCustomRecognitionCallback 0
+            }
+
+            val nodeOverride = MapLocatorProbeSupport.buildTemplateMatchOverride(
+                nodeName = DEBUG_COARSE_TM_NODE,
+                templateName = DEBUG_COARSE_TEMPLATE,
+                method = MapLocatorProbeSupport.DEFAULT_METHOD,
+                greenMask = false,
+                threshold = COARSE_MATCH_THRESHOLD,
+                roi = intArrayOf(searchRoi.x, searchRoi.y, searchRoi.width, searchRoi.height),
+            )
+            val tmRes = runRecognitionOnce(lib, context, mapBuf, DEBUG_COARSE_TM_NODE, nodeOverride)
+            val box = tmRes?.box
+            val hit = tmRes?.hit == true
+            val score = MapLocatorCoarsePure.bestMatchScore(tmRes?.detailJson)
+            val outcome = MapLocatorCoarsePure.evaluateCoarseOutcome(hit, box, map.width, map.height, searchRoi)
+            val scale = zoneTemplateScale(targetZoneId)
+            val boxText = box?.let { "[${it.joinToString(",")}]" } ?: "null"
+
+            debugCoarseResult = listOf(
+                "zone selector: ${selector.ifBlank { "-" }}",
+                "yolo: index=${parsed.clsIndex} class=${coarse.rawClass} zone=${coarse.zoneId} " +
+                    "valid=${coarse.valid} is_none=${coarse.isNone} conf=${coarse.confidence}",
+                "target zone: $targetZoneId (map ${map.width}x${map.height}, template_scale=$scale)",
+                "tile roi: " + if (coarse.hasRoi) {
+                    "[${coarse.roiX},${coarse.roiY},${coarse.roiW},${coarse.roiH}] infer_margin=${coarse.inferMargin}"
+                } else {
+                    "- (无 tile ROI，走全图细搜)"
+                },
+                "constraint: mode=${constraint.mode} yolo_validated=${constraint.yoloValidated} roi=${constraint.roi}",
+                "search roi: [${searchRoi.x},${searchRoi.y},${searchRoi.width},${searchRoi.height}]",
+                "template override: ${if (overrideOk) "ok" else "FAILED"}",
+                "hit: $hit",
+                "score: ${score ?: "-"}",
+                "box: $boxText",
+                "in_map: ${outcome.inMap}",
+                "in_roi: ${outcome.inRoi}",
+                "result: ${if (outcome.hit) "PASS" else "FAIL"}",
+            )
+
+            RunDiagnostics.note(
+                "maplocator",
+                "coarselocate｜${if (outcome.hit) "命中" else "未命中"} zone=$targetZoneId class=${coarse.rawClass}",
+                mapOf(
+                    "stage" to "coarse_locate",
+                    "zone_id" to targetZoneId,
+                    "class" to coarse.rawClass,
+                    "target_zone_selector" to selector,
+                    "cls_index" to parsed.clsIndex,
+                    "confidence" to coarse.confidence,
+                    "has_roi" to coarse.hasRoi,
+                    "constraint_mode" to constraint.mode.name,
+                    "yolo_validated" to constraint.yoloValidated,
+                    "search_roi" to listOf(searchRoi.x, searchRoi.y, searchRoi.width, searchRoi.height),
+                    "map_size" to listOf(map.width, map.height),
+                    "template_scale" to scale,
+                    "override_ok" to overrideOk,
+                    "hit" to hit,
+                    "score" to score,
+                    "box" to box?.toList(),
+                    "in_map" to outcome.inMap,
+                    "in_roi" to outcome.inRoi,
+                ),
+            )
+            Ln.i(
+                "MaaRunner: coarselocate zone=$targetZoneId class=${coarse.rawClass} hit=$hit " +
+                    "box=$boxText in_map=${outcome.inMap} in_roi=${outcome.inRoi}",
+            )
+            if (outcome.hit) 1 else 0
+        } catch (t: Throwable) {
+            debugCoarseResult = listOf("error: ${t.javaClass.simpleName}: ${t.message}")
+            Ln.e("MaaRunner: coarselocate 异常", t)
+            0
+        } finally {
+            if (yoloBuf != null) lib.MaaImageBufferDestroy(yoloBuf)
+            if (mapBuf != null) lib.MaaImageBufferDestroy(mapBuf)
+            if (templateBuf != null) lib.MaaImageBufferDestroy(templateBuf)
+        }
+    }
+
     private val debugOcrLock = Any()
 
     @Volatile
@@ -5287,6 +5675,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             regReco(DEBUG_OVERRIDE_RECO, debugCliOverrideCallback)
             // YOLO 分区分类探针（yoloprobe）：预处理图 → NeuralNetworkClassify(cls.onnx)
             regReco(DEBUG_YOLO_RECO, debugCliYoloCallback)
+            // 端到端粗定位探针（coarselocate）：YOLO → 约束 ROI → 地图资产 TemplateMatch
+            regReco(DEBUG_COARSE_RECO, debugCliCoarseCallback)
         }
         // ItemQuantitySatisfied 不再是恒真：恒真会让采集「目标库存模式」的所有 SubSkipped
         // 直接命中，任务成功结束却什么都没采（见 ItemQuantitySupport 注释）。
@@ -5415,6 +5805,18 @@ class MaaRunner(private val agentHost: AgentHost) {
         /** YOLO 分区分类探针：临时 Custom 包装节点名与注册的识别名 */
         const val DEBUG_YOLO_NODE = "__DebugCliYolo__"
         const val DEBUG_YOLO_RECO = "DebugCliYolo"
+
+        /** 端到端粗定位探针：外层 Custom 包装节点 / 内层 TemplateMatch 节点 / 注册识别名 */
+        const val DEBUG_COARSE_NODE = "__DebugCliCoarse__"
+        const val DEBUG_COARSE_RECO = "DebugCliCoarse"
+        const val DEBUG_COARSE_TM_NODE = "__DebugCliCoarseTemplateMatch"
+        const val DEBUG_COARSE_TEMPLATE = "__DebugCliCoarse/minimap.png"
+
+        /** 粗定位 TemplateMatch 的阈值；对齐上游 loc_threshold 默认 0.55。 */
+        const val COARSE_MATCH_THRESHOLD = 0.55
+
+        /** 地图资产扩展名（框架 `imread` 可读的常见几种；上游资产只有 png）。 */
+        val MAP_IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "bmp")
 
 
         /** 解释器这类 child 冷启动要几秒，超时给宽一点；连不上会整批任务失败，宁可多等 */

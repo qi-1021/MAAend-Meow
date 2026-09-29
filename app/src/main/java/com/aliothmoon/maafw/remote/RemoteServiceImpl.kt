@@ -477,6 +477,9 @@ class RemoteServiceImpl : RemoteService.Stub() {
         override fun overrideProbe(): List<String> = runner.debugOverrideProbe()
 
         override fun yoloProbe(imagePath: String): List<String> = runner.debugYoloProbe(imagePath)
+
+        override fun coarseLocate(imagePath: String, zone: String?): List<String> =
+            runner.debugCoarseLocate(imagePath, zone)
     }
 
     private companion object {

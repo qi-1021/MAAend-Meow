@@ -161,6 +161,8 @@ object DebugCliServer {
         DebugCliIntent.OverrideProbe -> host.overrideProbe()
 
         is DebugCliIntent.YoloProbe -> host.yoloProbe(intent.imagePath)
+
+        is DebugCliIntent.CoarseLocate -> host.coarseLocate(intent.imagePath, intent.zone)
     }
 
     /**
@@ -229,6 +231,14 @@ interface DebugCliHost {
      * 返回多行结果（cls_index / 类名 / zone_id / tile ROI），失败时给出原因。
      */
     fun yoloProbe(imagePath: String): List<String>
+
+    /**
+     * 第一次端到端粗定位：读全帧截图 [imagePath] → 裁小地图 → YOLO 分类 → 算搜索 ROI →
+     * 在地图资产上跑 `TemplateMatch`。返回多行结果（zone / tile / ROI / 命中框 / 是否在地图内）。
+     *
+     * [zone] 是可选 expected zone selector；为空用 YOLO 分类结果。
+     */
+    fun coarseLocate(imagePath: String, zone: String?): List<String>
 }
 
 /** [DebugCliHost.ocr] 的结果；[text] 为 null 时看 [reason]。 */

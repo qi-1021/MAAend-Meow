@@ -8,6 +8,53 @@
 
 ---
 
+## 2026-09-29 · MapLocator 第 4 片：端到端粗定位串联（`coarselocate`）
+
+把两块**已真机验证**的能力串成第一次端到端粗定位：
+
+> 小地图 → YOLO 分类得 zone + tile → 算搜索 ROI → 在**地图资产图**上跑 TemplateMatch → 粗位置
+
+新增 `MapLocatorCoarsePure.kt`（纯逻辑 247 行 + 27 测试）：
+- `mapZoneKey`：对齐 `loadAvailableZones`(`MapLocator.cpp:876-924`) 的 key 规则——
+  `base.png`（小写全等）→ `<父目录>_Base`；`Lv(\d+)Tier(\d+)\.(png|jpg|webp)$`（icase）
+  → `<父目录>_L{去零}_{去零}`；其余取 `stem`。
+- `minimapExtractPlan` / `extractMinimapArgb`：对齐 `TryExtractMinimap`(`MapTypes.h:151-172`)；
+  adb 变体（先 0.8 缩放 + y−7）的**选择与几何**已实现。
+- `constrainedSearchRoi`：对齐 `startGlobalSearch`(`MapLocator.cpp:1268-1332`)——
+  `buildSearchConstraint` 的 ROI_FINE 再外扩 `globalSearchRoiPad` 并裁到地图边界。
+- 命中判定（`in_map`/`in_roi`）与框架 detail 的 `best.score` 解析。
+
+debug CLI：`coarselocate <全帧截图> [expected-zone-selector]`，
+输出 zone/yolo/tile ROI/constraint/search ROI/template override/hit/score/box/in_map/in_roi/result，
+并写 `RunDiagnostics.note("maplocator", stage=coarse_locate)`。
+
+**如实记录的缺口**（全部写进报告）：
+1. **adb 小地图变体的 0.8 重采样未接**——几何已实现，但 `extractMinimapArgb` 对需缩放路径返回
+   null；且末影只走 native controller（非 adb），探针走不到那条分支。
+2. **控制器类型无法运行时判定**（`MaaControllerGetInfo` 未绑定），探针硬编码非 adb。
+3. **模板尺度未补偿**：框架 `TemplateMatch` 是单尺度，而
+   `ZoneTemplateScale("ValleyIV_Base") = 15/16` 不会自动生效——真机粗定位到该 zone
+   时需另做缩放（后续分片）。
+4. 地图 PNG 的 alpha 被丢弃（BGR 而非上游 BGRA）；不透明区无影响，粗定位可接受。
+
+纯逻辑测试 921 → 954 条。
+
+### 另记一条操作规范（用户明确要求）
+
+**测试间隙要关掉游戏与 App**——"手机会很烫"。做法：
+
+```bash
+adb shell am force-stop com.hypergryph.endfield
+adb shell am force-stop com.aliothmoon.maafw.maaend   # 连带特权服务/CLI/虚拟屏一起停
+```
+
+关完确认：无 `hypergryph`/`maafw` 残留进程、虚拟屏引用归零。
+下次要测时重新拉起 App + 点「启动终末地」即可——
+注意 **runner 的 `setup()` 仍只在"首次启动任务"时触发**（第 3 片踩过的坑），
+所以 CLI 要等到真正开始一次任务之后才会监听。
+
+---
+
 ## 2026-09-29 · MapLocator 第 3 片：YOLO 分区分类链路打通（真机，`d30e410`）
 
 真机 `yoloprobe` 结果：

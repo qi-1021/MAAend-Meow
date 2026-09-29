@@ -70,6 +70,16 @@ sealed interface DebugCliIntent {
      * [imagePath] 是设备上的图片路径（PNG/JPEG，Android `BitmapFactory` 可解）。
      */
     data class YoloProbe(val imagePath: String) : DebugCliIntent
+
+    /**
+     * 第一次端到端粗定位：全帧截图 → 裁小地图 → YOLO 得 zone+tile → 算搜索 ROI →
+     * 在**地图资产图**上跑 `TemplateMatch`（小地图作为运行时模板）→ 返回粗位置。
+     *
+     * [imagePath] 是设备上的**全帧截图**路径（含小地图，PNG/JPEG）；
+     * [zone] 是可选的 expected zone selector（上游 `options.expected_zone_id`），
+     * 为空时用 YOLO 分类出的 zone。
+     */
+    data class CoarseLocate(val imagePath: String, val zone: String?) : DebugCliIntent
 }
 
 /** 解析结果：要么是意图，要么是给用户看的错误。 */
@@ -125,6 +135,13 @@ object DebugCliSupport {
                 else -> DebugCliParse.Ok(DebugCliIntent.YoloProbe(args[0]))
             }
 
+            "coarselocate" -> when {
+                args.isEmpty() -> DebugCliParse.Failure("coarselocate 需要一张全帧截图路径")
+                args.size > 2 -> DebugCliParse.Failure("coarselocate 接受 <截图路径> [zone]（不要带空格）")
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> DebugCliParse.Ok(DebugCliIntent.CoarseLocate(args[0], args.getOrNull(1)))
+            }
+
             else -> DebugCliParse.Failure("未知命令：$command（输入 help 查看可用命令）")
         }
     }
@@ -141,6 +158,7 @@ object DebugCliSupport {
         appendLine("run <nodeName>      跑一次该节点")
         appendLine("overrideprobe       验证 OverrideImage+TemplateMatch 链（合成图，不依赖游戏/补充包）")
         appendLine("yoloprobe <img>     小地图预处理 → NeuralNetworkClassify(cls.onnx)，输出 zone/ROI")
+        appendLine("coarselocate <frame> [zone]  全帧裁小地图 → YOLO → 地图资产上 TemplateMatch 粗定位")
     }.trimEnd()
 
     /** `status` 的渲染文本，多行。 */

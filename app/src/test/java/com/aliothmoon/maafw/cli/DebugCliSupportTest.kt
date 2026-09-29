@@ -251,6 +251,44 @@ class DebugCliSupportTest {
         assertTrue(failure("yoloprobe /a.png", ctx(controllerReady = false)).contains("controller 未就绪"))
     }
 
+    // ───────────────────── coarselocate ─────────────────────
+
+    @Test
+    fun `coarselocate 只带路径 zone 为空`() {
+        assertEquals(
+            DebugCliIntent.CoarseLocate("/sdcard/frame.png", null),
+            ok("coarselocate /sdcard/frame.png"),
+        )
+    }
+
+    @Test
+    fun `coarselocate 带可选 zone`() {
+        assertEquals(
+            DebugCliIntent.CoarseLocate("/sdcard/frame.png", "Wuling_Base"),
+            ok("coarselocate /sdcard/frame.png Wuling_Base"),
+        )
+    }
+
+    @Test
+    fun `coarselocate 命令名大小写不敏感`() {
+        assertEquals(DebugCliIntent.CoarseLocate("/a.png", null), ok("CoarseLocate /a.png"))
+    }
+
+    @Test
+    fun `coarselocate 缺少路径报错`() {
+        assertTrue(failure("coarselocate").contains("需要一张全帧截图路径"))
+    }
+
+    @Test
+    fun `coarselocate 过多参数报错`() {
+        assertTrue(failure("coarselocate a.png Wuling_Base extra").contains("接受 <截图路径> [zone]"))
+    }
+
+    @Test
+    fun `coarselocate controller 未就绪被拒绝`() {
+        assertTrue(failure("coarselocate /a.png", ctx(controllerReady = false)).contains("controller 未就绪"))
+    }
+
     // ───────────────────── 渲染与常量 ─────────────────────
 
     @Test
@@ -272,7 +310,7 @@ class DebugCliSupportTest {
     @Test
     fun `helpText 列出全部命令`() {
         val text = DebugCliSupport.helpText()
-        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "overrideprobe", "yoloprobe")) {
+        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "overrideprobe", "yoloprobe", "coarselocate")) {
             assertTrue("helpText 缺少 $command", text.contains(command))
         }
     }
