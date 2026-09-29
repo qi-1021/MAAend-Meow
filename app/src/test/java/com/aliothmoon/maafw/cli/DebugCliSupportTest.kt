@@ -199,6 +199,28 @@ class DebugCliSupportTest {
         assertTrue(failure("run StartUp", ctx(controllerReady = false)).contains("controller 未就绪"))
     }
 
+    // ───────────────────── overrideprobe ─────────────────────
+
+    @Test
+    fun `overrideprobe controller 就绪返回意图`() {
+        assertEquals(DebugCliIntent.OverrideProbe, ok("overrideprobe"))
+    }
+
+    @Test
+    fun `overrideprobe 命令名大小写不敏感`() {
+        assertEquals(DebugCliIntent.OverrideProbe, ok("OverrideProbe"))
+    }
+
+    @Test
+    fun `overrideprobe 不接受参数`() {
+        assertTrue(failure("overrideprobe now").contains("不接受参数"))
+    }
+
+    @Test
+    fun `overrideprobe controller 未就绪被拒绝`() {
+        assertTrue(failure("overrideprobe", ctx(controllerReady = false)).contains("controller 未就绪"))
+    }
+
     // ───────────────────── 渲染与常量 ─────────────────────
 
     @Test
@@ -220,7 +242,7 @@ class DebugCliSupportTest {
     @Test
     fun `helpText 列出全部命令`() {
         val text = DebugCliSupport.helpText()
-        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run")) {
+        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "overrideprobe")) {
             assertTrue("helpText 缺少 $command", text.contains(command))
         }
     }

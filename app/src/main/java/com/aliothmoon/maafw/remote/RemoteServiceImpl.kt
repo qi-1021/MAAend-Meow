@@ -473,6 +473,8 @@ class RemoteServiceImpl : RemoteService.Stub() {
         }
 
         override fun run(nodeName: String): String = runner.debugRunOnce(nodeName)
+
+        override fun overrideProbe(): List<String> = runner.debugOverrideProbe()
     }
 
     private companion object {

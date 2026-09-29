@@ -86,6 +86,24 @@ interface MaaFrameworkLibrary : Library {
         context: Pointer?,
     ): Pointer?
 
+    /**
+     * 运行时把模板名 [imageName] 指向内存里的图 [image]（一个 MaaImageBuffer），**不落盘**。
+     *
+     * 框架侧走 `Context::override_image` → `image_override_`（`Task/Context.cpp:254-260`），
+     * 识别时 `Context::get_images` 先查这张覆盖表、命中就用内存图
+     * （`Task/Context.cpp:369-389`），而 `run_recognition` 克隆 context 时会复制覆盖表
+     * （拷贝构造 `Context.cpp:49-55`）——所以「先 OverrideImage、再 RunRecognition」
+     * 这条时序在框架内是自洽的。这条正好绕过被缓存的 `TemplateResMgr`。
+     *
+     * 对应 `MaaBool MaaContextOverrideImage(MaaContext* context, const char* image_name, const MaaImageBuffer* image)`
+     * （`include/MaaFramework/Instance/MaaContext.h`）。
+     */
+    fun MaaContextOverrideImage(
+        context: Pointer?,
+        imageName: String,
+        image: Pointer?,
+    ): Byte
+
     fun MaaContextRunRecognition(
         context: Pointer?,
         entry: String,
@@ -226,6 +244,29 @@ interface MaaFrameworkLibrary : Library {
 
     fun MaaImageBufferIsEmpty(handle: Pointer?): Byte
 
+    /**
+     * 把裸像素写进 image buffer（**不落盘**），是「内存造图」的唯一入口。
+     *
+     * 签名与参数顺序照抄上游 Go 绑定
+     * `internal/native/framework.go:311`：
+     * `MaaImageBufferSetRawData(handle uintptr, data unsafe.Pointer, width, height, imageType int32) bool`
+     * → `MaaBool MaaImageBufferSetRawData(MaaImageBuffer* handle, const void* data, int32_t width, int32_t height, int32_t image_type)`。
+     *
+     * [data] 指向 `width*height*channels` 字节的连续内存，[imageType] 用 [MaaImageType] 里的
+     * OpenCV `cv::Mat::type()` 取值。Go 绑定 `buffer/image_buffer.go` 的 `Set` 就是按
+     * BGR 三通道 + `cvType8UC3=16` 调的，所以 [MaaImageType.CV_8UC3] 的数据按 BGR 排列。
+     *
+     * 注：Go 绑定**故意不绑** `MaaImageBufferSetEncoded`（`framework.go:313-315` 有明确注释），
+     * 所以本项目只走 SetRawData 这条路径。
+     */
+    fun MaaImageBufferSetRawData(
+        handle: Pointer?,
+        data: Pointer?,
+        width: Int,
+        height: Int,
+        imageType: Int,
+    ): Byte
+
     /** 拿的是编码后（PNG）的字节，不是裸位图；长度另取 [MaaImageBufferGetEncodedSize] */
     fun MaaImageBufferGetEncoded(handle: Pointer?): Pointer?
 
@@ -301,6 +342,19 @@ object MaaGlobalOption {
     const val STDOUT_LEVEL = 4
     const val DEBUG_MODE = 6
     const val SAVE_ON_ERROR = 7
+}
+
+/**
+ * `MaaImageBufferSetRawData` 的 imageType 参数取值，即 OpenCV `cv::Mat::type()`。
+ *
+ * 来源：上游 Go 绑定 `internal/buffer/image_buffer.go` 顶部
+ * `const cvType8UC3 int32 = 16`，`Set()` 以它调用 `MaaImageBufferSetRawData`。
+ * 与 OpenCV 的 `CV_8UC3 = CV_MAKETYPE(CV_8U, 3) = 0 + (3-1)<<3 = 16` 一致。
+ * 该常量在随包 `MaaDef.h` 里没有单独枚举，故以 Go 绑定为准。
+ */
+object MaaImageType {
+    /** BGR 三通道 8 位；MaaImageBuffer 内部即此格式。 */
+    const val CV_8UC3 = 16
 }
 
 /** `MaaLoggingLevelEnum` */

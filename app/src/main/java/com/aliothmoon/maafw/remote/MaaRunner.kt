@@ -1,5 +1,6 @@
 package com.aliothmoon.maafw.remote
 
+import com.aliothmoon.maafw.BuildConfig
 import com.aliothmoon.maafw.IMaaRunnerCallback
 import com.aliothmoon.maafw.bridge.NativeBridgeLib
 import com.aliothmoon.maafw.constant.DefaultDisplayConfig
@@ -11,6 +12,7 @@ import com.aliothmoon.maafw.maa.MaaAgentClientLoader
 import com.aliothmoon.maafw.maa.MaaFrameworkLibrary
 import com.aliothmoon.maafw.maa.MaaFrameworkLoader
 import com.aliothmoon.maafw.maa.MaaGlobalOption
+import com.aliothmoon.maafw.maa.MaaImageType
 import com.aliothmoon.maafw.maa.MaaLoggingLevel
 import com.aliothmoon.maafw.maa.MaaStatus
 import com.aliothmoon.maafw.remote.internal.PrimaryDisplayManager
@@ -2056,8 +2058,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         context: Pointer,
         image: Pointer,
         nodeName: String,
+        pipelineOverride: String = "{}",
     ): RecoResult? {
-        val recoId = lib.MaaContextRunRecognition(context, nodeName, "{}", image)
+        val recoId = lib.MaaContextRunRecognition(context, nodeName, pipelineOverride, image)
         if (recoId <= 0L) return null
         val tasker = lib.MaaContextGetTasker(context) ?: return null
         val hitMem = Memory(1)
@@ -3950,6 +3953,152 @@ class MaaRunner(private val agentHost: AgentHost) {
         return statusText(status)
     }
 
+    /**
+     * 路线 (b+) 前提验证（仅 debug CLI 调用）：用合成图走完
+     * `MaaImageBufferSetRawData` → `MaaContextOverrideImage` → `MaaContextRunRecognition(TemplateMatch)`
+     * → 校验返回框。不依赖游戏/补充包，也不需要 controller 的实时帧（整图与模板都在内存里合成）。
+     *
+     * 与 [debugOcrOnce] 同样的理由：外部拿不到 `MaaContext`，只能借一个临时 Custom 识别节点的
+     * 回调拿 context，再在回调里跑真正的 TemplateMatch（见 [debugCliOverrideCallback]）。
+     */
+    fun debugOverrideProbe(): List<String> {
+        // 硬门控：release 下不注册探针、也不执行任何链路（方法体直接短路）
+        if (!BuildConfig.DEBUG) return listOf("error: overrideprobe 仅在 debug 构建可用")
+        val lib = MaaFrameworkLoader.library ?: return listOf("error: MaaFramework 未加载")
+        if (isRunning()) return listOf("error: 任务运行中，无法执行调试探针")
+        val tasker = synchronized(lifecycleLock) { tasker }
+            ?: return listOf("error: tasker 未初始化（先跑一次任务）")
+        if (lib.MaaTaskerInited(tasker).toInt() == 0) {
+            return listOf("error: tasker 未就绪")
+        }
+        synchronized(debugOverrideLock) {
+            debugOverrideResult = null
+            // MaaTaskerPostTask 的 pipeline_override 是对象数组（与 debugOcrOnce 一致）
+            val probeNode = buildJsonObject {
+                put(
+                    DEBUG_OVERRIDE_NODE,
+                    buildJsonObject {
+                        put(
+                            "recognition",
+                            buildJsonObject {
+                                put("type", "Custom")
+                                put(
+                                    "param",
+                                    buildJsonObject { put("custom_recognition", DEBUG_OVERRIDE_RECO) },
+                                )
+                            },
+                        )
+                        put("action", buildJsonObject { put("type", "DoNothing") })
+                    },
+                )
+            }
+            val override = JsonArray(listOf(probeNode)).toString()
+            val id = lib.MaaTaskerPostTask(tasker, DEBUG_OVERRIDE_NODE, override)
+            if (id == INVALID_ID) return listOf("error: PostTask 被拒绝")
+            lib.MaaTaskerWait(tasker, id)
+            return debugOverrideResult ?: listOf("error: 探针未返回结果")
+        }
+    }
+
+    private val debugOverrideLock = Any()
+
+    @Volatile
+    private var debugOverrideResult: List<String>? = null
+
+    /**
+     * 前提验证探针识别：在回调里合成图 → SetRawData → OverrideImage → 跑 TemplateMatch。
+     *
+     * 这是真机唯一能证明「覆盖进运行时的模板能被随后的识别读到」的地方，链路：
+     *  1. `MaaImageBufferSetRawData` 把合成整图与 patch 写进各自 buffer（BGR/CV_8UC3）；
+     *  2. `MaaContextOverrideImage(ctx, templateName, patchBuf)`；
+     *  3. `MaaContextRunRecognition(ctx, probeNode, overrideJson, fullBuf)`；
+     *  4. 读回 reco box，与已知裁剪点比对（纯逻辑 [MapLocatorProbeSupport.isBoxNearExpected]）。
+     *
+     * 任何一步失败都如实写进 [debugOverrideResult] 与 RunDiagnostics，绝不伪造成功。
+     */
+    private val debugCliOverrideCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, _, _, _, _, _, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null) {
+            debugOverrideResult = listOf("error: 探针回调缺少 context")
+            return@MaaCustomRecognitionCallback 0
+        }
+        val plan = MapLocatorProbeSupport.syntheticPlan()
+        if (plan == null) {
+            debugOverrideResult = listOf("error: 合成探针图失败（裁剪区域非法）")
+            return@MaaCustomRecognitionCallback 0
+        }
+        var fullBuf: Pointer? = null
+        var patchBuf: Pointer? = null
+        try {
+            val fullMem = Memory(plan.fullBgr.size.toLong())
+            fullMem.write(0, plan.fullBgr, 0, plan.fullBgr.size)
+            fullBuf = lib.MaaImageBufferCreate()
+            if (fullBuf == null ||
+                lib.MaaImageBufferSetRawData(
+                    fullBuf, fullMem, plan.fullWidth, plan.fullHeight, MaaImageType.CV_8UC3,
+                ).toInt() == 0
+            ) {
+                debugOverrideResult = listOf("error: MaaImageBufferSetRawData(full) 失败")
+                return@MaaCustomRecognitionCallback 0
+            }
+
+            val patchMem = Memory(plan.patchBgr.size.toLong())
+            patchMem.write(0, plan.patchBgr, 0, plan.patchBgr.size)
+            patchBuf = lib.MaaImageBufferCreate()
+            if (patchBuf == null ||
+                lib.MaaImageBufferSetRawData(
+                    patchBuf, patchMem, plan.patchW, plan.patchH, MaaImageType.CV_8UC3,
+                ).toInt() == 0
+            ) {
+                debugOverrideResult = listOf("error: MaaImageBufferSetRawData(patch) 失败")
+                return@MaaCustomRecognitionCallback 0
+            }
+
+            val overrideOk = lib.MaaContextOverrideImage(context, plan.templateName, patchBuf).toInt() != 0
+            val nodeOverride = MapLocatorProbeSupport.buildTemplateMatchOverride(plan.probeNode, plan.templateName)
+            val res = runRecognitionOnce(lib, context, fullBuf, plan.probeNode, nodeOverride)
+            val actual = res?.box
+            val hit = res?.hit == true
+            val near = hit && MapLocatorProbeSupport.isBoxNearExpected(actual, plan.expectedBox)
+            val summary = MapLocatorProbeSupport.describe(plan.expectedBox, actual, MapLocatorProbeSupport.DEFAULT_TOLERANCE)
+
+            RunDiagnostics.note(
+                "maplocator",
+                "override 探针｜${if (near) "通过" else "未通过"} template=${plan.templateName} " +
+                    "overrideOk=$overrideOk hit=$hit $summary",
+                mapOf(
+                    "stage" to "override_probe",
+                    "result" to if (near) "pass" else "fail",
+                    "override_ok" to overrideOk,
+                    "hit" to hit,
+                    "expected" to plan.expectedBox.toList(),
+                    "actual" to actual?.toList(),
+                    "template" to plan.templateName,
+                ),
+            )
+            Ln.i("MaaRunner: override 探针 overrideOk=$overrideOk hit=$hit $summary")
+            debugOverrideResult = listOf(
+                "override: ${if (overrideOk) "ok" else "FAILED"}",
+                "hit: $hit",
+                "expected: [${plan.expectedBox.joinToString(",")}]",
+                "actual: ${actual?.let { "[" + it.joinToString(",") + "]" } ?: "null"}",
+                "near: $near",
+                "result: ${if (near) "PASS" else "FAIL"}",
+            )
+            if (near && outBox != null && actual != null && actual.size >= 4) {
+                lib.MaaRectSet(outBox, actual[0], actual[1], actual[2], actual[3])
+            }
+            if (near) 1 else 0
+        } catch (t: Throwable) {
+            debugOverrideResult = listOf("error: ${t.javaClass.simpleName}: ${t.message}")
+            Ln.e("MaaRunner: override 探针异常", t)
+            0
+        } finally {
+            if (fullBuf != null) lib.MaaImageBufferDestroy(fullBuf)
+            if (patchBuf != null) lib.MaaImageBufferDestroy(patchBuf)
+        }
+    }
+
     private val debugOcrLock = Any()
 
     @Volatile
@@ -4921,6 +5070,11 @@ class MaaRunner(private val agentHost: AgentHost) {
         // debug CLI 的 OCR 探针：外部没有 task context，只能借一个临时节点回调拿到 context，
         // 再在回调里跑目标节点识别（见 debugOcrOnce）
         regReco(DEBUG_OCR_RECO, debugCliOcrCallback)
+        // 路线 (b+) 前提验证探针：合成图 + OverrideImage + TemplateMatch（见 debugOverrideProbe）。
+        // 仅 debug 注册，release 下不引入这个自定义识别（与 debug CLI 同样的硬门控）。
+        if (BuildConfig.DEBUG) {
+            regReco(DEBUG_OVERRIDE_RECO, debugCliOverrideCallback)
+        }
         // ItemQuantitySatisfied 不再是恒真：恒真会让采集「目标库存模式」的所有 SubSkipped
         // 直接命中，任务成功结束却什么都没采（见 ItemQuantitySupport 注释）。
         regReco("ItemQuantitySatisfied", itemQuantitySatisfiedCallback)
@@ -5040,6 +5194,10 @@ class MaaRunner(private val agentHost: AgentHost) {
         /** debug CLI 探针识别用：临时节点名与注册的识别名 */
         const val DEBUG_OCR_NODE = "__DebugCliOcr__"
         const val DEBUG_OCR_RECO = "DebugCliOcr"
+
+        /** 路线 (b+) 前提验证探针：临时节点名与注册的识别名 */
+        const val DEBUG_OVERRIDE_NODE = "__DebugCliOverride__"
+        const val DEBUG_OVERRIDE_RECO = "DebugCliOverride"
 
 
         /** 解释器这类 child 冷启动要几秒，超时给宽一点；连不上会整批任务失败，宁可多等 */

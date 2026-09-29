@@ -157,6 +157,8 @@ object DebugCliServer {
         }
 
         is DebugCliIntent.Run -> listOf("run: ${intent.nodeName} -> ${host.run(intent.nodeName)}")
+
+        DebugCliIntent.OverrideProbe -> host.overrideProbe()
     }
 
     /**
@@ -213,6 +215,12 @@ interface DebugCliHost {
 
     /** 跑一次节点 [nodeName]，返回结果描述。 */
     fun run(nodeName: String): String
+
+    /**
+     * 路线 (b+) 前提验证：合成图 → OverrideImage → TemplateMatch → 校验返回框。
+     * 返回多行结果（成功/失败与坐标），失败时给出原因。
+     */
+    fun overrideProbe(): List<String>
 }
 
 /** [DebugCliHost.ocr] 的结果；[text] 为 null 时看 [reason]。 */

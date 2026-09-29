@@ -55,6 +55,12 @@ sealed interface DebugCliIntent {
     data object Screenshot : DebugCliIntent
     data class Ocr(val nodeName: String) : DebugCliIntent
     data class Run(val nodeName: String) : DebugCliIntent
+
+    /**
+     * 路线 (b+) 前提验证：合成图 → `MaaContextOverrideImage` 覆盖运行时模板 →
+     * `MaaContextRunRecognition(TemplateMatch)` → 校验返回框。不依赖游戏/补充包。
+     */
+    data object OverrideProbe : DebugCliIntent
 }
 
 /** 解析结果：要么是意图，要么是给用户看的错误。 */
@@ -97,6 +103,12 @@ object DebugCliSupport {
 
             "ocr" -> nodeIntent(command, args, context) { DebugCliIntent.Ocr(it) }
             "run" -> nodeIntent(command, args, context) { DebugCliIntent.Run(it) }
+            "overrideprobe" -> when {
+                args.isNotEmpty() -> DebugCliParse.Failure("overrideprobe 不接受参数")
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> DebugCliParse.Ok(DebugCliIntent.OverrideProbe)
+            }
+
             else -> DebugCliParse.Failure("未知命令：$command（输入 help 查看可用命令）")
         }
     }
@@ -111,6 +123,7 @@ object DebugCliSupport {
         appendLine("screenshot          把当前缓存帧存成 png，返回路径")
         appendLine("ocr <nodeName>      对当前帧跑该识别节点，返回 best 文本")
         appendLine("run <nodeName>      跑一次该节点")
+        appendLine("overrideprobe       验证 OverrideImage+TemplateMatch 链（合成图，不依赖游戏/补充包）")
     }.trimEnd()
 
     /** `status` 的渲染文本，多行。 */
