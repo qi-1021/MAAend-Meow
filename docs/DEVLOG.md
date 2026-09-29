@@ -8,6 +8,80 @@
 
 ---
 
+## 2026-09-28 · 真机联调第一轮：5 个真实 bug + 据点交易静默 stub 审计
+
+**提交**：`7953871`、`088598d`、`64836df`、`7012830`、`1d33cad`、`d2a9fa8`、`ab52e47`、
+`4d20066`、`ccb35e0`、`c03c7cb`（CI 全绿）
+
+手机可用后做的第一轮真机验证。**这一轮几乎没加新功能，全在修"离线看不出来"的东西**——
+而它们每一个都是"能编译、单测全过、真机上行为错"的类型。这恰好印证了本项目一直的担心：
+**编译 + 单测证明不了行为**。
+
+### 一、真机拿到的真实 bug
+
+| # | 症状（真机） | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 囤货 `seen=0` 失败；干员列表扫描读不出东西 | `ocrProbe` **无条件**开 `only_rec`。它的语义是"只识别、不做文字检测"，把整个 ROI 当成**一行**文字——对货卡网格/干员列表必然只回一个大框乱码（实测 `box:[164,121,700,430] text:"注"`）。上游只在 bettersliding 的**单数值** OCR 上开它 | `only_rec` 改为逐调用点判定（单数值才开），并把"可疑结果"判据纳入 `hit=false` |
+| 2 | `BetterSliding 读不到滑条起点框` → 无限重试 | `readHitBox` 想从 `MaaTaskerGetRecognitionDetail` 的 `detail_json` 里取框。但 **`And` 组合识别的 detail_json 根是数组、且没有顶层 box**（box 只在框架回调侧） | 改用**回调第 7 个参数 `box`**（框架本来就给）；detail_json 只作兜底 |
+| 3 | `BetterSliding 读不到滑条上限` | 同一底层原因的另一半：解析器只认对象根，`And` 的数组根 `asMap` 直接 null。**凡挂在 And 节点上的读取（FindStart/FindEnd/GetSliderMaxQuantity/CheckQuantity）全都读不到** | 解析器支持数组根（包一层合成根、每项转子节点），OCR 文本优先取 `best`（对齐上游 `RecognitionResults.Best`） |
+| 4 | 首次拉起偶尔**静默**不发生（连 onError 都没有） | `connect()` 里 `scope.launch{}` 先返回、`activeLaunch=` 后执行；协程若先跑，会把自己误判成"已被取代"而静默 return | `CoroutineStart.LAZY` + 先登记再 `job.start()` |
+| 5 | 武陵货卡稳定读出同一乱码（`[2そ22 ×3]`，跨 3 秒逐字一致），而现场截图画面完全正常 | `autoStockpileRecognitionCallback` 把回调第 6 个参数 **`image`（框架本次识别用的那一帧）解构成了 `_` 丢掉**，改为自己 `PostScreencap`+`CachedImage` 重抓 → "OCR 看到的帧 ≠ 框架看到的帧" | 第一次尝试用**框架帧**，重试/无帧才自抓；只销毁自建 buffer，框架帧绝不 destroy |
+
+### 二、这一轮最大的教训
+
+**1. 框架已经给了的东西，不要自己再造一份。**
+bug #2 #3 #5 都是同一个病根：我们试图"自己取"框架已经准备好的输入——
+自己解析 detail_json 取 box、自己截屏取帧。框架的**回调参数**里就摆着
+`box`（第 7 个）和 `image`（第 6 个），而 Go 绑定里对应字段明明白白
+（`CustomActionArg.Box` / `CustomRecognitionArg.Img`）。
+**移植时先把回调签名逐个参数核对一遍**，比事后调三个 bug 便宜得多。
+
+**2. "时序 flaky 的测试"可能是真产品 bug，也可能真是测试脆弱——两条都得用桩确定性复现。**
+- `spawnFailure_reportsOnceWithoutRetry` 看着像测试脆弱 → 实际是**真产品竞态**（会静默丢弃首次拉起，生产上偶发且难查）
+- `processAliveUntilBinder_connects` 看着像产品 bug → 实际是**测试脆弱**（协程体内部回调 `countDown` 时 `isActive` 仍为 true，`awaitConnected()` 后立即读就撞窗口；拉大窗口 5/5 复现、真实 IO 2000 次自然捕到 3 次）
+
+**3. 测试不要赌毫秒。** 改用"等待目标条件本身"（条件轮询 + 足够大的兜底），
+而不是"把超时从 300ms 调到 5s 希望够用"。后者只是把概率降低，前者才是确定。
+
+**4. 诊断要能区分"两条不同的失败"。** 探针在取帧失败时会静默 `return@repeat`，
+现象（0 候选）与"真读到乱码"完全一样。所以补了取帧返回值日志 + 失败帧导出
+（`probe_dump/goods-<region>-<ts>.png`）——**没有可区分的证据，就只能猜**。
+
+### 三、据点交易「静默 stub」全量审计（本轮最大收获）
+
+真机跑完据点交易后做了一次节点覆盖审计，挖出 **4 处 `noop-success` 伪装成功**：
+
+| 缺口 | 后果 |
+|---|---|
+| `OutpostTradingReserveSession` 整个 noop | 「保留 N 件 / 永不出售」语义全丢；BetterSliding 保持管线默认 `TargetQuantity=999999` → **把库存尽可能全卖掉**；设了「永不出售」的物品**会被选中卖掉**；活动物品缺额度换算 → 可能超额度 → 触发 `AidQuotaExceededStop` → **整个任务被 Stop** |
+| `OutpostTradingPrioritySession` 只实现 `configure_strategy`，其余 7 个 operation **静默 `else -> {}` 返回 1** | 用户的「优先售卖规则 / 仅售优先项」配置**无声失效**。**而且它连 noop-success 日志都不打**——比 noop 更隐蔽 |
+| `OutpostTradingPriorityItem` 选品不读 黑名单/缺货/已满足 | 优先物品不生效；NeverSell 不被排除 |
+| `outpostTried` 任务开始时没人清 | 同进程内二次跑任务可能把上次残留当"已尝试" → 提前 exhausted |
+
+已全部补齐（`c03c7cb`）。**规则（写进项目约定）：任何未实现的 operation 必须打日志。**
+"静默 return 成功"比"明确失败"危险得多——前者会让排查方向完全跑偏。
+
+### 四、需要更正的历史记录
+
+本文件早先写过「**`OutpostTradingPrioritySession` 已真实实现覆盖主路径**」——**这句不准确**。
+当时的实现只有 `configure_strategy`，其余 7 个 operation 是静默 `return 1`，
+既不生效也不报错；它不阻塞主链，但也远谈不上"覆盖主路径"。
+已在 `c03c7cb` 补齐，并在此更正——**凡写"已实现"都要能指到具体行号，
+否则就是在制造下一个静默 stub**。
+
+### 五、仍未解决 / 待验证
+
+- **武陵乱码的最终确认**：`image` 修复（`ccb35e0`）需要真机再跑一轮。
+  判定表：看日志有没有 `使用框架帧 attempt=0`；若仍 0 候选，取
+  `probe_dump/goods-Wuling-*.png` 与同轮 `on_error` 截图逐像素比对——
+  相同 ⇒ 帧源不是主因（转查 OCR 预处理）；尺寸不同 ⇒ `CachedImage` 缩放差异；
+  尺寸同内容不同 ⇒ 坐实异帧。
+- `adopt` 依赖 `OutpostTradingCurrentGoods` 命中（安卓侧是 54×54 图标槽的 OCR 近似，
+  上游用图标识别），不命中时仍可由 `commit` 路径绑定——已在代码注释标注。
+- 完整的上游仓库页扫描（模板定位 + 逐格数量 OCR + 图标识别）仍未移植。
+
+---
+
 ## 2026-09-28 · 测试版诊断报告 + autoEcoFarm + 会客室倒计时
 
 **提交**：`e009f66`、`2935fc6`（CI 全绿）。三条 lane 并行，都只做**不依赖真机**的部分。
