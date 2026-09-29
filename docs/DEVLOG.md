@@ -8,6 +8,65 @@
 
 ---
 
+## 2026-09-29 · 据点交易首次成功跑完：绕过框架崩溃（`dd4e756`）
+
+**这是本项工作第一个「两个核心功能都在真机跑通」的里程碑**：
+
+```
+Fatal signal: 0                                  ← 此前跑到收尾必崩
+Tasker.Task.Succeeded  OutpostTradingSchedule    ← 据点交易成功
+（另一条链路：Tasker.Task.Succeeded  AutoStockpileMain ← 囤货也成功）
+```
+
+### 怎么绕开的
+
+框架在 `MaaContextOverridePipeline` 上对 `{"<结果节点>":{"enabled":…}}` 这种调用
+**间歇性 SIGSEGV**（同一条调用前三次成功、第四次崩；上游尚未修复，报告已交维护者）。
+关键是我们**并不需要这条调用**——那两个结果节点的定义只是：
+
+```json
+{"enabled":false,"recognition":"DirectHit",
+ "action":"Custom","custom_action":"OutpostTradingReserveSession",
+ "custom_action_param":{"operation":"satisfy"},"next":["OutpostTradingSellLoop"]}
+```
+
+即"跑一次 `satisfy`，然后去 `OutpostTradingSellLoop`"。于是改成在**编排层手工完成**：
+
+- **越界分支**：不再 enable，改为 ① 复用同一份 satisfy 逻辑手工记账
+  ② 用 `overrideCheckQuantityBranch` 把调用方 next 指到 `OutpostTradingSellLoop`
+  → **行为等价**（原来就是"点亮节点让流水线自己跑一遍"）。
+- **可达分支**：**绝不**把调用方 next 直接指到 SellLoop——那个结果节点静态挂在
+  `OutpostTradingSellCheckThenLoop.next`（交易**之后**），改 next 会**跳过卖出**。
+  所以这里只是**不点亮**，交易照常由 `OutpostTradingSellThenLoop` 完成，
+  并打一条写明取舍的 WARN。
+
+`satisfy` 只有一份实现（`MaaRunner.satisfyOutpostReserve`），pipeline 回调与
+新增的 host 方法都调它，语义不会漂移。
+
+### 教训
+
+**当框架的某个 API 会崩、而你其实并不需要它时，"不用它"比"绕开它的坏路径"更彻底。**
+这次的关键不是给崩溃打补丁，而是先问「这条调用到底在完成什么语义」——
+问清之后发现它只是"跑一次 satisfy 再去 SellLoop"，于是整条调用都可以删掉。
+
+**另一个教训：改动前必须追清引用方式。** 两个结构几乎一样的节点，
+一个只由我们自己的代码动态引用（可安全替换），另一个静态挂在交易**之后**的节点链上
+（动它就会跳过卖出）——只看定义会以为两者可以同样处理。
+
+### 残留（已明确记录，非静默）
+
+可达分支下，交易后的记账节点不再点亮 → 该物品不会在交易后立即记入 `satisfiedItems`，
+流程会再走一轮 `[Anchor]OutpostTradingBetterSliding`（对同一物品重算保留滑条，
+真机上表现为多几次"微调第 N 次"）。**卖出行为未变**；该轮通常得到越界 → 走新的
+satisfy+路由，最终仍会标记 satisfied；选品侧另有 `attempted` 集合兜底。
+待上游修复后恢复原语义。
+
+另注：`NODE_GET_AVAILABLE_QUANTITY` / `NODE_FIND_SWIPE_FOR_RESET` 上仍有
+`enabled` 覆盖（BetterSliding 自己的内部节点、每会话一次），不在本次崩溃路径上，
+但**同一 API 的残余暴露仍在**——已记录。
+
+---
+
 ## 2026-09-29 · 真机联调第二/三轮：武陵根因 + PC 鼠标语义 + 框架崩溃
 
 **提交**：`a6ca528`、`4b66f49`、`5c9a1db`、`dd53759`
