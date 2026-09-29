@@ -90,6 +90,7 @@ object AutoDeliverySupport {
         val areaTextsById = mutableMapOf<String, MutableSet<String>>()
         val areaDepotById = mutableMapOf<String, String>()
         for (e in root["destinations"]!!.jsonArray.map { it.jsonObject }) {
+            val areaMap = localizedMap(e["area"]?.jsonObject)
             val dest = Destination(
                 id = e["id"]!!.jsonPrimitive.content,
                 kind = e["kind"]?.jsonPrimitive?.contentOrNull.orEmpty(),
@@ -103,10 +104,12 @@ object AutoDeliverySupport {
                 ziplineOnly = e["zipline_only"]?.jsonPrimitive?.contentOrNull == "true",
             )
             destinations += dest
-            if (dest.areaTexts.isNotEmpty()) {
-                // 区域分组键 = 规范化后的首个区域文本（同区域多语言文本进同一组）
-                val key = normalize(dest.areaTexts.first())
-                areaTextsById.getOrPut(key) { mutableSetOf() }.addAll(dest.areaTexts.map { normalize(it) })
+            // 区域分组键必须与上游 localizedAreaID 一致：en_us 名去掉非 ASCII 字母数字、保留大小写。
+            // 它会被 DeliveryJobsResolveOngoingDepotAction 直接拼成
+            // `DeliveryJobsOngoingDeliveryFor<ID>`；若用中文/小写归一化文本当键，节点名会对不上。
+            val key = localizedAreaID(areaMap)
+            if (key != null && dest.areaTexts.isNotEmpty()) {
+                areaTextsById.getOrPut(key) { mutableSetOf() }.addAll(dest.areaTexts)
                 areaDepotById[key] = dest.depotId
             }
         }
@@ -118,6 +121,28 @@ object AutoDeliverySupport {
     private fun localizedTexts(o: JsonObject?): List<String> =
         o?.mapNotNull { (_, v) -> (v as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
             .orEmpty().filter { it.isNotBlank() }
+
+    private fun localizedMap(o: JsonObject?): Map<String, String> =
+        o?.mapNotNull { (k, v) ->
+            (v as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull?.let { k to it }
+        }?.toMap().orEmpty()
+
+    /**
+     * 对齐上游 `localizedAreaID`：区域节点 ID = `en_us` 名去掉所有非 ASCII 字母/数字字符，
+     * **保留大小写**（`Originium Science Park` → `OriginiumSciencePark`）。
+     *
+     * 这是「仓储名 → next 目标」最容易写错的一步：它直接拼成
+     * `DeliveryJobsOngoingDeliveryFor<ID>`，任何小写化、空格替换或全角折叠都会让
+     * next 指向不存在的节点。`en_us` 缺失或过滤后为空则返回 null。
+     */
+    fun localizedAreaID(localized: Map<String, String>): String? {
+        val english = localized["en_us"]?.trim().orEmpty()
+        if (english.isEmpty()) return null
+        val id = buildString {
+            for (r in english) if (r in 'A'..'Z' || r in 'a'..'z' || r in '0'..'9') append(r)
+        }
+        return id.ifEmpty { null }
+    }
 
     // ── 归一化 + 匹配（对齐 matcher.go）──
 

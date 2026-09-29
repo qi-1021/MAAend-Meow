@@ -1334,6 +1334,125 @@ class MaaRunner(private val agentHost: AgentHost) {
     private data class MotionMove(val forward: Boolean, val left: Boolean, val backward: Boolean, val right: Boolean)
 
     /**
+     * CameraScanAction：转动相机并识别 wait_nodes，找到即成功。
+     *
+     * 对齐上游 `camerascan/action.go` + `path.go`：九宫格 8 步 → 复位 1 步（不识别）→
+     * 中/上/下三个俯仰环（每环 1 步俯仰 + N 步右转）；除复位步外每步**移动前后各识别一次**。
+     * 走完全部步数仍未命中返回失败（0），不是 noop-success。
+     *
+     * 参数解析 / 路径 / 超时判定都在 [CameraScanSupport]（已单测）；这里只接 MaaFramework：
+     * 截图识别走 [runRecognitionOnce]，相机转动走 [MotionSupport.rotateView]
+     * （像素量对齐上游默认移动节点 `Common/Private/CameraScan/Action.json`：上下 240、左右 160）。
+     */
+    private val cameraScanCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        try {
+            val param = CameraScanSupport.parseParam(customActionParam)
+            if (param == null) {
+                Ln.e(
+                    "MaaRunner: CameraScanAction [$nodeName] 参数不合法" +
+                        "（wait_nodes 必填；fallback_yaw_steps 4..72）: $customActionParam",
+                )
+                return@MaaCustomActionCallback 0
+            }
+            CameraScanSupport.customMoveWarn(param)?.let {
+                Ln.w("MaaRunner: CameraScanAction [$nodeName] $it")
+            }
+
+            val tasker = lib.MaaContextGetTasker(context)
+            val path = CameraScanSupport.buildPath(param.fallbackYawSteps)
+            val budget = CameraScanSupport.budget(param.fallbackYawSteps)
+            val startMs = System.currentTimeMillis()
+            val stopping = {
+                isStopRequested() || (tasker != null && lib.MaaTaskerStopping(tasker).toInt() != 0)
+            }
+
+            for ((index, step) in path.withIndex()) {
+                val reason = CameraScanSupport.stopReason(
+                    stepIndex = index,
+                    budget = budget,
+                    stopping = stopping(),
+                    elapsedMs = System.currentTimeMillis() - startMs,
+                )
+                if (reason != CameraScanSupport.StopReason.NONE) {
+                    Ln.w("MaaRunner: CameraScanAction [$nodeName] 第 ${index + 1}/${budget.totalSteps} 步前中止（$reason）")
+                    return@MaaCustomActionCallback 0
+                }
+
+                if (step.needsRecognition) {
+                    val hit = recognizeCameraScanTargets(lib, context, param.waitNodes, nodeName)
+                    if (hit != null) return@MaaCustomActionCallback finishCameraScanHit(hit, param, nodeName)
+                }
+
+                for (move in CameraScanSupport.movesFor(step)) {
+                    if (stopping()) return@MaaCustomActionCallback 0
+                    val (dx, dy) = CameraScanSupport.pixelDelta(move)
+                    MotionSupport.rotateView(dx, dy)
+                }
+
+                if (step.needsRecognition) {
+                    val hit = recognizeCameraScanTargets(lib, context, param.waitNodes, nodeName)
+                    if (hit != null) return@MaaCustomActionCallback finishCameraScanHit(hit, param, nodeName)
+                }
+            }
+
+            Ln.i("MaaRunner: CameraScanAction [$nodeName] ${budget.totalSteps} 步扫完未找到 wait_nodes=${param.waitNodes}")
+            0
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: CameraScanAction error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** 截图并依次识别 wait_nodes，返回首个命中详情（含框）；截图失败或无命中返回 null。 */
+    private fun recognizeCameraScanTargets(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        waitNodes: List<String>,
+        nodeName: String?,
+    ): RecoResult? {
+        val ctrl = MaaRunner.currentController ?: return null
+        if (!MotionSupport.screencapFresh()) return null
+        val imgBuf = lib.MaaImageBufferCreate() ?: return null
+        return try {
+            if (lib.MaaControllerCachedImage(ctrl, imgBuf).toInt() == 0) return null
+            if (lib.MaaImageBufferIsEmpty(imgBuf).toInt() != 0) return null
+            for (node in waitNodes) {
+                val res = runRecognitionOnce(lib, context, imgBuf, node)
+                if (res?.hit == true) {
+                    Ln.i("MaaRunner: CameraScanAction [$nodeName] 命中 '$node'")
+                    return res
+                }
+            }
+            null
+        } finally {
+            lib.MaaImageBufferDestroy(imgBuf)
+        }
+    }
+
+    /** 上游 `finishHit`：未开 aim_target 直接成功；开了则按命中框中心做对准滑动，空框判失败。 */
+    private fun finishCameraScanHit(
+        hit: RecoResult,
+        param: CameraScanSupport.Param,
+        nodeName: String?,
+    ): Byte {
+        if (!param.aimTarget) return 1
+        val b = hit.box
+        val rect = if (b != null && b.size >= 4) {
+            CameraScanSupport.Rect(b[0], b[1], b[2], b[3])
+        } else {
+            CameraScanSupport.Rect(0, 0, 0, 0)
+        }
+        val (dx, dy) = CameraScanSupport.aimDelta(rect) ?: run {
+            Ln.e("MaaRunner: CameraScanAction [$nodeName] aim_target 命中框为空，判失败")
+            return 0
+        }
+        if (dx != 0 || dy != 0) MotionSupport.rotateView(dx, dy)
+        return 1
+    }
+
+    /**
      * MapNavigateAction（Android 降级实现）。
      * 上游语义（navi_domain_types.h）：
      * - ZONE   无坐标区域声明，等定位稳定（本实现：截图确认画面可读）
@@ -1685,6 +1804,39 @@ class MaaRunner(private val agentHost: AgentHost) {
             1
         } catch (t: Throwable) {
             Ln.e("MaaRunner: AutoDeliveryResolveDestination error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * DeliveryJobsResolveOngoingDepotAction：从送货任务详情的区域 OCR 文本解析残留任务所属仓储，
+     * 并把当前节点 next 覆盖到该仓储的分派节点 `DeliveryJobsOngoingDeliveryFor<AreaID>`
+     * （对齐上游 deliveryjobs/ongoing_delivery.go；解析逻辑在 [OngoingDeliverySupport]）。
+     *
+     * 上游语义是「解析不出来就直接失败」，不是走默认分支：残留送货若静默走默认分支，
+     * 整条流程会走偏到结束且节点报成功。所以这里任何一步失败都返回 0 并打日志。
+     */
+    private val resolveOngoingDepotCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, _, recoId, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        try {
+            val detail = BetterSlidingOcr.fromRecognizedDetail(
+                MaaJsonTree.parse(recognitionDetailJson(lib, context, recoId)),
+                nodeName.orEmpty(),
+            )
+            val areaText = OngoingDeliverySupport.extractAreaText(detail)
+            val res = OngoingDeliverySupport.resolve(areaText)
+            if (lib.MaaContextOverridePipeline(context, OngoingDeliverySupport.nextOverrideJson(res.nextNode)).toInt() == 0) {
+                Ln.e("MaaRunner: DeliveryJobsResolveOngoingDepot override 失败 next='${res.nextNode}'")
+                return@MaaCustomActionCallback 0
+            }
+            Ln.i(
+                "MaaRunner: DeliveryJobsResolveOngoingDepot [$nodeName] area='${res.areaId}' " +
+                    "depot='${res.depotId}' next='${res.nextNode}' sim=%.3f".format(res.similarity),
+            )
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: DeliveryJobsResolveOngoingDepot 解析失败，节点按上游语义失败 (node=$nodeName)", t)
             0
         }
     }
@@ -4566,6 +4718,10 @@ class MaaRunner(private val agentHost: AgentHost) {
         regAction("AutoStockStapleQuantityControlAction", autoStockStapleQuantityControlCallback)
         regAction("AutoDeliveryResolveDepotAction", resolveDepotCallback)
         regAction("AutoDeliveryResolveDestinationAction", resolveDestinationCallback)
+        // DeliveryJobsResolveOngoingDepotAction 原先在 noop 名单里：残留送货分支的 next 从不被设置，
+        // 节点空转还报成功 = 静默死路。这里换成真实实现，并已从下面的 otherActions 名单删除。
+        // 必须在 noop 循环之前注册，否则会被 noop-success 覆盖。
+        regAction(OngoingDeliverySupport.ACTION_NAME, resolveOngoingDepotCallback)
         regAction("CharacterControllerYawDeltaAction", yawDeltaCallback)
         regAction("CharacterControllerPitchDeltaAction", pitchDeltaCallback)
         regAction("CharacterControllerForwardAxisAction", forwardAxisCallback)
@@ -4573,6 +4729,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         regAction("CharacterMoveToTargetAction", moveToTargetCallback)
         regAction("CharacterMoveToTargetNotFoundAction", moveToTargetNotFoundCallback)
         regAction("CharacterSearchAction", characterSearchCallback)
+        // CameraScanAction：环境监测「扫描拍照视角」的真实实现，缺它整任务硬失败；
+        // 不在下面任何 noop 名单里，注册必须在 noop 循环之前。
+        regAction("CameraScanAction", cameraScanCallback)
         regAction("MapNavigateAction", mapNavigateCallback)
         regAction("ClearHitCount", clearHitCountCallback)
         regAction("FalseAction", falseActionCallback)
@@ -4624,7 +4783,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             "AddItemData",
             "SyncItemData",
             "UpdateItemQuantity",
-            "DeliveryJobsResolveOngoingDepotAction",
+            // DeliveryJobsResolveOngoingDepotAction 不在此列：已注册为真实实现
             // AutoDeliveryResolveDepot/Destination 不在此列：已注册为真实实现
             "CaptureUid",
             "CloseGameAction",

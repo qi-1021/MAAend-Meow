@@ -94,6 +94,9 @@ MAIN_FILES=(
   "$SRC/AutoEcoFarmNearest.kt"
   "$SRC/AutoEcoFarmOverride.kt"
   "$SRC/AutoEcoFarmSleep.kt"
+  "$SRC/AutoDeliverySupport.kt"
+  "$SRC/OngoingDeliverySupport.kt"
+  "$SRC/CameraScanSupport.kt"
   "$SUP/SupplementPack.kt"
   "$SUP/SupplementPackLocal.kt"
   "$DIAG/RunDiagnosticsPolicy.kt"
@@ -133,6 +136,8 @@ TEST_FILES=(
   "$TST/AutoEcoFarmNearestTest.kt"
   "$TST/AutoEcoFarmOverrideTest.kt"
   "$TST/AutoEcoFarmSleepTest.kt"
+  "$TST/OngoingDeliverySupportTest.kt"
+  "$TST/CameraScanSupportTest.kt"
   "$TSUP/SupplementPackTest.kt"
   "$TSUP/SupplementPackLocalTest.kt"
   "$TDIAG/RunDiagnosticsPolicyTest.kt"
@@ -172,6 +177,8 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.AutoEcoFarmNearestTest
   com.aliothmoon.maafw.remote.AutoEcoFarmOverrideTest
   com.aliothmoon.maafw.remote.AutoEcoFarmSleepTest
+  com.aliothmoon.maafw.remote.OngoingDeliverySupportTest
+  com.aliothmoon.maafw.remote.CameraScanSupportTest
   com.aliothmoon.maafw.supplement.SupplementPackTest
   com.aliothmoon.maafw.supplement.SupplementPackLocalTest
   com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest
@@ -310,6 +317,8 @@ fun main() {
         "com.aliothmoon.maafw.remote.AutoEcoFarmNearestTest",
         "com.aliothmoon.maafw.remote.AutoEcoFarmOverrideTest",
         "com.aliothmoon.maafw.remote.AutoEcoFarmSleepTest",
+        "com.aliothmoon.maafw.remote.OngoingDeliverySupportTest",
+        "com.aliothmoon.maafw.remote.CameraScanSupportTest",
         "com.aliothmoon.maafw.supplement.SupplementPackTest",
         "com.aliothmoon.maafw.supplement.SupplementPackLocalTest",
         "com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest",
