@@ -8,6 +8,84 @@
 
 ---
 
+## 2026-09-29 · 真机联调第二/三轮：武陵根因 + PC 鼠标语义 + 框架崩溃
+
+**提交**：`a6ca528`、`4b66f49`、`5c9a1db`、`dd53759`
+
+### 一、武陵乱码的真正根因：`only_rec` 跨调用泄漏（`a6ca528`）
+
+上一次真机把武陵从"稳定乱码 `2そ22`"变成了"读空"——**这个变化本身就是线索**：
+说明乱码来自我们自抓的帧；改用框架帧后，暴露出更深的问题。这轮拿到了完整证据链：
+
+1. **探针帧与框架帧逐像素完全相同**（0 / 921600 差异，`probe_dump` 与 `on_error` 对比）
+   → 帧源没问题，问题在 OCR 参数
+2. 框架日志给出真凶：
+   ```
+   __GoodsOcrProbe [all_results_=[{"box":[63,162,1177,553],...text:""}]] [param_.only_rec=true]
+   ```
+   框 = 整个 ROI、text 空 —— 正是 `only_rec=true` 的特征；而**我们发的 override 里根本没写它**：
+   `{"recognition":"OCR","roi":[63,162,1177,553],"color_filter":"AutoStockpileGoodsFilter"}`
+3. **根因**：`__GoodsOcrProbe` 是**所有 OCR 探针共用的同一个节点名**，而
+   `MaaContextOverridePipeline` 会**保留上次写入的节点定义**——**本次没写的键会继承上一次的值**。
+   本轮时序：谷地货卡探针（`only_rec` 尚为默认 false）→ 读对 6 个候选 →
+   买货读单价走 `onlyRec=true` → **把共享节点写成 `only_rec=true`** →
+   武陵货卡的 override 没写 → 继承 true → 整个 ROI 退化成一行 → 读空。
+
+**修法**：三个可变字段（`roi` / `only_rec` / `color_filter`）**一律显式写出**，
+不给继承留余地（roi 无效时写全屏 `[0,0,0,0]`；过滤为空写 `""`）。
+
+**教训**：**共享节点 + 持久化覆盖 = 跨调用状态泄漏**。凡是"逐次可变的参数"，
+都要显式写出来，别依赖"没写就是默认值"。这个 bug 只会在真机上以
+"换了张图就突然读不到"的形式暴露——单测与编译都发现不了。
+
+### 二、TouchMove：PC 鼠标语义在 Android 上必然失败（`4b66f49`）
+
+`BetterSlidingMoveMouse` 失败，框架日志：
+```
+action="TouchMove", point=[1258,696], contact=0, pressure=0 → completed=false
+```
+该节点的 desc 是「**避免遮挡 Increase/Decrease Button**」——PC 上鼠标会停在 +/- 按钮上
+挡住点击，所以先把它移开；**Android 的点击不留下光标**，这个动作纯属 PC 语义。
+但它的失败会**打断整条链**（据点交易卡在"精确设置数量"）。
+
+修法：构建期把全上游 5 个文件 6 处 `TouchMove` 中和成 `DoNothing`（保留 `next` 与其它字段）。
+验证：改后 `BetterSlidingMoveMouse` 不再失败，流程推进到 `BetterSlidingDone` 之后。
+
+**教训**：**移植上游流水线时要专门审"平台动作"**——`TouchMove`（鼠标悬停）、
+`TouchDown/Up`、`ClickKey/KeyDown/KeyUp` 这类在 Android 上没有对应概念的动作，
+要么中和、要么换成平台等价的实现。
+
+### 三、框架侧间歇性 SIGSEGV（`5c9a1db`、`dd53759`）
+
+**现象**：据点交易收尾时特权进程 SIGSEGV，tombstone 的 pc 落在
+`libMaaFramework.so (MaaContextOverridePipeline+592)`，崩溃前最后一条日志是我们发的
+`{"OutpostTradingReserveAlreadySatisfied":{"enabled":false}}`。
+
+**决定性证据**：**同一条 override 前三次成功、第四次崩溃**
+（14:41:47 / 14:42:01 / 15:44:57 正常，15:45:11 崩）→ 与内容无关，是框架侧的状态/竞态。
+寄存器里残留的是日志行与节点名字符串的碎片（故障地址 `0x505b5d…` 解码为 `…[DBG][P`）。
+
+**已做的缓解（`5c9a1db` → `dd53759`）**：
+- 第一版想用 `MaaContextGetNodeData` 先读节点当前 `enabled` 再决定跳过——
+  **结果那一步自己就崩**（真机日志：崩溃前最后一条正是
+  `MaaContextGetNodeData(node_name=OutpostTradingReserveAlreadySatisfied) | enter`）。
+- 第二版**完全不查询框架**：只在会话内记住"被我们开启过"的节点，
+  只有它们才需要下发关闭覆盖；没开过就保持默认（这两个节点在上游 `SellCore.json` 里
+  **默认就是 `enabled:false`**），那条 `{"节点":{"enabled":false}}` 本来就是空操作。
+- **真机验证**：跳过日志出现（`…未由本会话开启过，保持默认关闭`），
+  流程比以往跑得都深（微调迭代到第 3 次）。
+
+**残留**：`{"<结果节点>":{"enabled":true}}` 这条路**仍会崩**（16:55:27 实测）。
+属框架侧竞态，我们的选择：①改用已验证可用的 `next` 覆盖来路由（绕开 `enabled`）；
+②把 tombstone + 调用栈 + 触发 JSON 整理给 MaaFramework 上游。
+
+### 四、仍未做
+
+- 据点交易收尾的 `enabled` 覆盖绕开（改用 `next`）。
+- 框架崩溃的上报材料整理。
+
+---
+
 ## 2026-09-29 · MapLocator 可行性调研（为下次真机做准备）
 
 MapLocator 是「采集 / 转交委托 / 删除共享滑索」的共同前置（约 4859 行 C++）。
