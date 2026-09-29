@@ -8,6 +8,51 @@
 
 ---
 
+## 2026-09-29 · MapLocator 可行性调研（为下次真机做准备）
+
+MapLocator 是「采集 / 转交委托 / 删除共享滑索」的共同前置（约 4859 行 C++）。
+在动手之前先回答**三个会决定工作量的前提问题**——结论比预期好。
+
+### 1. 资产已经就位（无需改动补充包链路）
+
+MapLocator 要的就是这几个文件，而 `map-locate` 补充包里**正好都有**：
+
+| MapLocator 需要 | 补充包内容 |
+|---|---|
+| `map/cls.onnx`（分区分类） | ✓ |
+| `map/cameraorientation/{preprocess,polar_with_ref}.onnx` | ✓ |
+| `map/tile_mapping.json`、`map/cls.json` | ✓ |
+
+即：之前做的「大资产按需下载」已经把 MapLocator 的资产侧铺好了，**不需要再动下载逻辑**。
+
+### 2. 不需要单独塞 ONNX Runtime
+
+MaaFramework **内置** `NeuralNetworkClassify` / `NeuralNetworkDetect`（目前仅支持 ONNX 模型），
+上游自己的 `AutoFight` 流水线就在用 `NeuralNetworkDetect`
+（`assets/resource/pipeline/AutoFight/Recognition.json:289`）。
+
+所以分区分类（`cls.onnx`）可以直接走**框架原生能力**，不必为了跑推理而在 APK 里再塞一个
+推理运行时——这本来就是这项移植最大的不确定性之一。
+
+### 3. 但有两块仍然难
+
+- **摄像朝向预测**是**两级网络**：`preprocess.onnx` 承载前处理的唯一实现
+  （极坐标几何、参考采样、条带域合成），`polar_with_ref.onnx` 消费 7 通道。
+  这不是"一个分类/检测节点"能表达的形状，要么真移植，要么另设计。
+- **多尺度模板匹配 + 追踪状态机 + tile 映射**是自研算法，没有现成框架能力可替代。
+
+### 结论与下次真机的第一步
+
+规模从「4859 行 + 推理运行时 + 资产」降为「算法移植 + 复用框架推理」——
+**前提风险已经消掉两条，剩下的纯粹是算法工作量**。
+
+**建议下次真机会话的第一件事**：把 `map-locate` 补充包装上，先用一个最小的
+`NeuralNetworkClassify` 节点试跑 `map/cls.onnx`。
+这一步能**一次性验证「资产可用 + 框架能跑这个模型」两条前提**，
+再决定投不投那几千行算法移植——而不是先写几千行再发现模型跑不起来。
+
+---
+
 ## 2026-09-29 · 全量流水线审计：129 个自定义组件 → 60 真实 / 64 noop / 5 未注册
 
 **提交**：`4bb1200`、`4031283`、`eeda0a1`
