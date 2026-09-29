@@ -481,6 +481,57 @@ def apply_mobile_resilience_patches():
             log(f"Warning: failed to patch ProtocolSpace index-tab retry: {e}")
 
 
+def neutralize_touch_move_nodes():
+    """
+    把 `TouchMove`（鼠标移动）节点中和成 `DoNothing`——Android 没有「悬停光标」。
+
+    真机实测（2026-09-29）：据点交易走到 `BetterSlidingMoveMouse` 时失败，
+    框架日志给出的是
+        action="TouchMove", point=[1258,696], contact=0, pressure=0 → completed=false
+    而该节点的 desc 是「避免遮挡 Increase/Decrease Button」：
+    **PC 上鼠标会停在 +/- 按钮上挡住点击，所以先把光标移开**。
+    Android 的点击不留下光标，这个动作纯属 PC 语义——但它的失败会**打断整条链**
+    （据点交易因此卡在"精确设置数量"这一步）。
+
+    做法：`action: TouchMove` → `DoNothing`，去掉 `target`（对 DoNothing 无意义），
+    `next` 与其它字段原样保留。全上游共 5~6 处（BetterSliding / Interface /
+    IMS / AutoDelivery / AutoEcoFarm），一次全中和。
+    """
+    pipeline_root = ASSETS_ROOT / "resource" / "pipeline"
+    if not pipeline_root.is_dir():
+        return
+    patched_files = 0
+    for p in pipeline_root.rglob("*.json"):
+        try:
+            content = p.read_text(encoding="utf-8")
+            if "TouchMove" not in content:
+                continue
+            data = json.loads(strip_json_comments(content))
+            if not isinstance(data, dict):
+                continue
+            changed = False
+            for name, node in data.items():
+                if not isinstance(node, dict):
+                    continue
+                act = node.get("action")
+                is_touch_move = act == "TouchMove" or (
+                    isinstance(act, dict) and act.get("type") == "TouchMove"
+                )
+                if not is_touch_move:
+                    continue
+                node["action"] = "DoNothing"
+                node.pop("target", None)
+                node["desc"] = (node.get("desc") or "") + "｜移动端中和：Android 无悬停光标，TouchMove 必然失败且会打断流水线"
+                changed = True
+                log(f"Neutralized TouchMove node '{name}' in {p.name}")
+            if changed:
+                p.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+                patched_files += 1
+        except Exception as e:
+            log(f"Warning: failed to neutralize TouchMove in {p.name}: {e}")
+    log(f"Neutralized TouchMove nodes in {patched_files} pipeline files.")
+
+
 def apply_outpost_trading_arbitrage():
     """
     低买高卖（自动套利）：给据点交易加 Arbitrage 选品策略档。
@@ -605,6 +656,7 @@ def main():
     patch_missing_upstream_i18n_keys()
     override_rigid_template_nodes()
     apply_mobile_resilience_patches()
+    neutralize_touch_move_nodes()
     apply_outpost_trading_arbitrage()
     log("Preparation complete!")
 
