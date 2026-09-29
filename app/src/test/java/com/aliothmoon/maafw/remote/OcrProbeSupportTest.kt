@@ -19,39 +19,51 @@ class OcrProbeSupportTest {
         GoodsSupport.OcrItem(text, intArrayOf(x, y, w, h))
 
     // ───────────────── buildOverride ─────────────────
+    //
+    // 契约：三个可变字段（roi / only_rec / color_filter）**一律显式写出，绝不省略**。
+    // 理由：探针节点是所有 OCR 共用的同一个名字，而 OverridePipeline 会保留上次写入的
+    // 定义——本次没写的键会**继承上一次的值**。
+    // 真机实测（2026-09-29）：山谷货卡读完后、买货环节用 onlyRec=true 读了一次单价，
+    // 共享节点被写成 only_rec=true；随后武陵货卡的 override 没写 only_rec，继承了 true
+    // → 整个 ROI 退化成一行文字 → 读空（更早一次表现为一个大框乱码 `2そ22`）。
 
     @Test
-    fun `多条目探针不带 only_rec`() {
+    fun `多条目探针显式关闭 only_rec 并清空过滤`() {
         assertEquals(
-            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"roi\":[10,20,30,40]}}",
+            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"roi\":[10,20,30,40]," +
+                "\"only_rec\":false,\"color_filter\":\"\"}}",
             OcrProbeSupport.buildOverride(intArrayOf(10, 20, 30, 40), onlyRec = false),
         )
     }
 
     @Test
-    fun `单数值探针显式带 only_rec`() {
+    fun `单数值探针显式打开 only_rec`() {
         assertEquals(
-            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"roi\":[10,20,30,40],\"only_rec\":true}}",
+            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"roi\":[10,20,30,40]," +
+                "\"only_rec\":true,\"color_filter\":\"\"}}",
             OcrProbeSupport.buildOverride(intArrayOf(10, 20, 30, 40), onlyRec = true),
         )
     }
 
     @Test
-    fun `无 ROI 时省略 roi 字段`() {
+    fun `无 ROI 时显式写全屏而不是省略`() {
         assertEquals(
-            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\"}}",
+            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"roi\":[0,0,0,0]," +
+                "\"only_rec\":false,\"color_filter\":\"\"}}",
             OcrProbeSupport.buildOverride(null, onlyRec = false),
         )
         assertEquals(
-            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"only_rec\":true}}",
+            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"roi\":[0,0,0,0]," +
+                "\"only_rec\":true,\"color_filter\":\"\"}}",
             OcrProbeSupport.buildOverride(null, onlyRec = true),
         )
     }
 
     @Test
-    fun `ROI 宽高非正时省略 roi`() {
+    fun `ROI 宽高非正时退化为全屏`() {
         assertEquals(
-            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\"}}",
+            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"roi\":[0,0,0,0]," +
+                "\"only_rec\":false,\"color_filter\":\"\"}}",
             OcrProbeSupport.buildOverride(intArrayOf(10, 20, 0, 40), onlyRec = false),
         )
     }
@@ -60,13 +72,32 @@ class OcrProbeSupportTest {
     fun `颜色过滤与 only_rec 同时出现`() {
         assertEquals(
             "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"roi\":[1,2,3,4]," +
-                "\"color_filter\":\"GoodsFilter\",\"only_rec\":true}}",
+                "\"only_rec\":true,\"color_filter\":\"GoodsFilter\"}}",
             OcrProbeSupport.buildOverride(intArrayOf(1, 2, 3, 4), onlyRec = true, colorFilter = "GoodsFilter"),
         )
         assertEquals(
-            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"color_filter\":\"GoodsFilter\"}}",
+            "{\"__GoodsOcrProbe\":{\"recognition\":\"OCR\",\"roi\":[0,0,0,0]," +
+                "\"only_rec\":false,\"color_filter\":\"GoodsFilter\"}}",
             OcrProbeSupport.buildOverride(null, onlyRec = false, colorFilter = "GoodsFilter"),
         )
+    }
+
+    @Test
+    fun `三个可变字段永不被省略——任何组合都不给继承留余地`() {
+        val cases: List<Triple<IntArray?, Boolean, String?>> = listOf(
+            Triple(intArrayOf(10, 20, 30, 40), true, "GoodsFilter"),
+            Triple(intArrayOf(10, 20, 30, 40), false, null),
+            Triple(null, true, null),
+            Triple(null, false, ""),
+            Triple(intArrayOf(0, 0, 0, 0), false, null),
+            Triple(intArrayOf(1, 2, -3, 4), true, "F"),
+        )
+        for ((roi, onlyRec, filter) in cases) {
+            val json = OcrProbeSupport.buildOverride(roi, onlyRec, filter)
+            assertTrue("缺 roi: $json", "\"roi\":[" in json)
+            assertTrue("缺 only_rec: $json", "\"only_rec\":" in json)
+            assertTrue("缺 color_filter: $json", "\"color_filter\":\"" in json)
+        }
     }
 
     // ───────────────── isSuspicious ─────────────────

@@ -19,20 +19,31 @@ object OcrProbeSupport {
 
     /**
      * 构造 `{"__GoodsOcrProbe":{"recognition":"OCR",...}}`。
-     * ROI 宽或高非正时省略（与旧实现一致，避免写出无效 roi）。
+     *
+     * **三个可变参数一律显式写出**——这是所有 OCR 探针**共用的同一个节点名**，
+     * 而 `MaaContextOverridePipeline` 会保留上次写入的定义：**本次没写的键会继承上一次的值**。
+     *
+     * 真机实测（2026-09-29）：山谷货卡读完之后、买货环节用 `onlyRec=true` 读了一次单价，
+     * 于是共享节点被写成 `only_rec=true`；随后武陵货卡的 override **没写** `only_rec`，
+     * 直接继承了 true → 整个 ROI 退化成一行文字 → 读空（更早一次表现为一个大框乱码）。
+     * 这是跨调用的状态泄漏，只在真机上以"换了张图就突然读不到"的形式暴露。
+     *
+     * 所以：roi 无效时显式写 `[0,0,0,0]`（全屏，与框架默认一致）；
+     * color_filter 为空时显式写 `""`（清掉上一次的颜色过滤）。
      */
     fun buildOverride(roi: IntArray?, onlyRec: Boolean, colorFilter: String? = null): String {
-        val sb = StringBuilder(64)
+        val r = if (roi != null && roi.size >= 4 && roi[2] > 0 && roi[3] > 0) {
+            roi
+        } else {
+            intArrayOf(0, 0, 0, 0)
+        }
+        val sb = StringBuilder(96)
         sb.append("{\"").append(NODE).append("\":{\"recognition\":\"OCR\"")
-        if (roi != null && roi.size >= 4 && roi[2] > 0 && roi[3] > 0) {
-            sb.append(",\"roi\":[")
-                .append(roi[0]).append(',').append(roi[1]).append(',')
-                .append(roi[2]).append(',').append(roi[3]).append(']')
-        }
-        if (!colorFilter.isNullOrBlank()) {
-            sb.append(",\"color_filter\":\"").append(colorFilter).append('"')
-        }
-        if (onlyRec) sb.append(",\"only_rec\":true")
+            .append(",\"roi\":[")
+            .append(r[0]).append(',').append(r[1]).append(',')
+            .append(r[2]).append(',').append(r[3]).append(']')
+            .append(",\"only_rec\":").append(onlyRec)
+            .append(",\"color_filter\":\"").append(colorFilter.orEmpty()).append('"')
         sb.append("}}")
         return sb.toString()
     }
