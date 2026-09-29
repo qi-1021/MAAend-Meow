@@ -68,10 +68,6 @@ object BetterSlidingOverrides {
             buildResetSwipeEnd(direction)
         }
 
-    /** 上游 overrides.go:224 `buildNodeEnableOverride`。 */
-    fun buildNodeEnableOverride(nodeName: String, enabled: Boolean): Map<String, Any?> =
-        mapOf(nodeName to mapOf("enabled" to enabled))
-
     /** 上游 overrides.go:232 `buildTemplateMatchButtonHelperOverride`。 */
     fun buildTemplateMatchButtonHelperOverride(template: String): Map<String, Any?> =
         recognitionParam("template" to listOf(template), "green_mask" to BetterSlidingSupport.DEFAULT_GREEN_MASK)

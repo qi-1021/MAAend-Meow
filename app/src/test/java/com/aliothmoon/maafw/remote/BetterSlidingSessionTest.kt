@@ -19,7 +19,14 @@ class BetterSlidingSessionTest {
         val details = mutableMapOf<Long, String>()
         var pipelineOk = true
         var subTaskOk = true
+        var satisfyOk = true
         val logs = mutableListOf<String>()
+
+        /** 记录手工 satisfy 的调用（真机应复用与结果节点同一份逻辑）。 */
+        val satisfiedLabels = mutableListOf<String>()
+
+        /** 模拟内部子流水线：真机 runSubTask 会重入 session 逐节点推进，测试里用钩子替代。 */
+        var onRunSubTask: ((String, String) -> Unit)? = null
 
         override fun overridePipeline(overrideJson: String): Boolean {
             if (!pipelineOk) return false
@@ -29,6 +36,7 @@ class BetterSlidingSessionTest {
 
         override fun runSubTask(nodeName: String, overrideJson: String): Boolean {
             subTasks += nodeName to overrideJson
+            onRunSubTask?.invoke(nodeName, overrideJson)
             return subTaskOk
         }
 
@@ -37,6 +45,11 @@ class BetterSlidingSessionTest {
         override fun recognitionDetailJson(recoId: Long): String? = details[recoId]
 
         override fun parseJson(text: String): Any? = MaaJsonTree.parse(text)
+
+        override fun satisfyReserveOutcome(): Boolean {
+            satisfiedLabels += "BetterSliding outcome override"
+            return satisfyOk
+        }
 
         override fun info(message: String) {
             logs += "I:$message"
@@ -255,13 +268,92 @@ class BetterSlidingSessionTest {
     }
 
     @Test
-    fun `内部子流水线结束后按判定结果开关调用方节点`() {
+    fun `只滑动模式没有结果节点时不产生任何 enable 覆盖`() {
         val host = FakeHost()
         val ok = session(host).run("SomeCaller", """{"Direction":"right"}""", 0)
 
         assertTrue(ok)
-        // 只滑动模式：目标必然可达（滑到最大就够），但没配 TargetReachableOverrideEnable -> 不产生 enable 覆盖
         assertEquals(1, host.subTasks.size)
+        // 只滑动模式没配 OutOfRange/TargetReachable -> NONE，不发 enabled
+        assertEquals(false, host.joined().contains("\"enabled\""))
+    }
+
+    /**
+     * 真机回归：框架在 `MaaContextOverridePipeline` 上对结果节点做 enable 覆盖会偶发 SIGSEGV。
+     * out-of-range 改为「手工 satisfy + 把调用方 next 指到 SellLoop」，且**不得**再引用
+     * 那两个结果节点的 enabled。
+     */
+    @Test
+    fun `外部调用越界时手工 satisfy 并路由到 SellLoop 且不下发 enabled`() {
+        val host = FakeHost()
+        host.details[5L] = textDetail("10")
+        val s = session(host)
+        val caller = "OutpostTradingInfraStationBetterSliding"
+        val param =
+            """{"TargetQuantity":50,"Direction":"right","SliderQuantity":{"Box":[300,500,100,40]},""" +
+                """"OutOfRangeOverrideEnable":"OutpostTradingReserveAlreadySatisfied",""" +
+                """"TargetReachableOverrideEnable":"OutpostTradingReserveQuantityReached"}"""
+        host.onRunSubTask = { _, _ -> s.run(BetterSlidingSupport.NODE_GET_SLIDER_MAX_QUANTITY, param, 5) }
+
+        assertTrue(s.run(caller, param, 0))
+
+        // ① 等价于结果节点的 action：手工 satisfy
+        assertEquals(listOf("BetterSliding outcome override"), host.satisfiedLabels)
+        // ② 等价于结果节点的 next：调用方直接路由到 SellLoop
+        assertTrue(
+            "调用方应被路由到 SellLoop，实际：\n${host.joined()}",
+            host.joined().contains("""{"$caller":{"next":["OutpostTradingSellLoop"]}}"""),
+        )
+        // ③ 两个结果节点上不得出现任何 enabled 覆盖（节点名仅可能作为参数值出现）
+        assertEquals(false, host.joined().contains("\"OutpostTradingReserveAlreadySatisfied\":{\"enabled\""))
+        assertEquals(false, host.joined().contains("\"OutpostTradingReserveQuantityReached\":{\"enabled\""))
+    }
+
+    /**
+     * targetReachable：放弃交易后记账，**不动调用方 next**（改了会跳过卖出），仅打取舍日志。
+     */
+    @Test
+    fun `外部调用目标可达时跳过结果节点且不改调用方 next`() {
+        val host = FakeHost()
+        host.details[6L] = textDetail("10")
+        val s = session(host)
+        val caller = "OutpostTradingInfraStationBetterSliding"
+        val param =
+            """{"TargetQuantity":5,"Direction":"right","SliderQuantity":{"Box":[300,500,100,40]},""" +
+                """"OutOfRangeOverrideEnable":"OutpostTradingReserveAlreadySatisfied",""" +
+                """"TargetReachableOverrideEnable":"OutpostTradingReserveQuantityReached"}"""
+        host.onRunSubTask = { _, _ -> s.run(BetterSlidingSupport.NODE_GET_SLIDER_MAX_QUANTITY, param, 6) }
+
+        assertTrue(s.run(caller, param, 0))
+
+        // 不 satisfy、不动调用方 next、不发 enabled
+        assertEquals(emptyList<String>(), host.satisfiedLabels)
+        assertEquals(false, host.joined().contains("""{"$caller":{"next":"""))
+        assertEquals(false, host.joined().contains("\"OutpostTradingReserveAlreadySatisfied\":{\"enabled\""))
+        assertEquals(false, host.joined().contains("\"OutpostTradingReserveQuantityReached\":{\"enabled\""))
+        // 必须打一条说明取舍与后果的日志
+        assertTrue(
+            "缺少 targetReachable 取舍日志，实际日志：\n${host.logs.joinToString("\n")}",
+            host.logs.any {
+                it.startsWith("W:") &&
+                    it.contains("OutpostTradingReserveQuantityReached") &&
+                    it.contains("跳过")
+            },
+        )
+    }
+
+    @Test
+    fun `外部调用越界但 satisfy 前置状态不齐备时判失败`() {
+        val host = FakeHost()
+        host.details[5L] = textDetail("10")
+        host.satisfyOk = false
+        val s = session(host)
+        val param =
+            """{"TargetQuantity":50,"Direction":"right","SliderQuantity":{"Box":[300,500,100,40]},""" +
+                """"OutOfRangeOverrideEnable":"OutpostTradingReserveAlreadySatisfied"}"""
+        host.onRunSubTask = { _, _ -> s.run(BetterSlidingSupport.NODE_GET_SLIDER_MAX_QUANTITY, param, 5) }
+
+        assertEquals(false, s.run("SomeCaller", param, 0))
     }
 
     @Test

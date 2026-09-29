@@ -189,6 +189,30 @@ class BetterSlidingDecisionTest {
     }
 
     @Test
+    fun `resolveOutcomeAction 越界优先 其次可达 否则不动`() {
+        // 越界 -> 手工 satisfy + 路由
+        assertEquals(
+            BetterSlidingDecision.OutcomeAction.SATISFY_AND_ROUTE,
+            BetterSlidingDecision.resolveOutcomeAction(outOfRange = true, targetReachable = false),
+        )
+        // 可达 -> 跳过结果节点记账
+        assertEquals(
+            BetterSlidingDecision.OutcomeAction.SKIP_TARGET_REACHABLE,
+            BetterSlidingDecision.resolveOutcomeAction(outOfRange = false, targetReachable = true),
+        )
+        // 都没有 -> 不动
+        assertEquals(
+            BetterSlidingDecision.OutcomeAction.NONE,
+            BetterSlidingDecision.resolveOutcomeAction(outOfRange = false, targetReachable = false),
+        )
+        // 防御：两者同时为真（实际互斥）时越界优先
+        assertEquals(
+            BetterSlidingDecision.OutcomeAction.SATISFY_AND_ROUTE,
+            BetterSlidingDecision.resolveOutcomeAction(outOfRange = true, targetReachable = true),
+        )
+    }
+
+    @Test
     fun `shouldResetBeforePreciseClick 是严格大于 80 percent 且严格小于上限`() {
         assertEquals(true, BetterSlidingDecision.shouldResetBeforePreciseClick(81, 100))
         assertEquals(false, BetterSlidingDecision.shouldResetBeforePreciseClick(80, 100))

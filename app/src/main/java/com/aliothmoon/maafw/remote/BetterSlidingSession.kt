@@ -23,6 +23,18 @@ interface BetterSlidingHost {
     /** 解析 JSON 文本成通用树（Map/List/String/Number/Boolean/null）。 */
     fun parseJson(text: String): Any?
 
+    /**
+     * 手工执行一次 `OutpostTradingReserveSession` 的 `satisfy`（当前选中物品标记为已满足）。
+     *
+     * 结果节点 `OutpostTradingReserveAlreadySatisfied` / `OutpostTradingReserveQuantityReached`
+     * 的 action 就是这个 satisfy；框架在点亮它们时用的 `enabled` 覆盖会偶发 SIGSEGV，
+     * 所以 out-of-range 分支改为直接调这里，等价于「跑一次结果节点」。
+     *
+     * 返回是否成功；失败时必须已打日志（由 host 侧复用与真实节点同一份 satisfy 逻辑保证），
+     * 调用方不再静默跳过。
+     */
+    fun satisfyReserveOutcome(): Boolean
+
     fun info(message: String)
 
     fun warn(message: String)
@@ -41,15 +53,6 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
 
     private val state = BetterSlidingDecision.ActionState()
     private var params: BetterSlidingParams.ParsedParams? = null
-
-    /**
-     * [applyOutcomeOverrides] 里**被我们开启过**的结果节点。
-     *
-     * 这些节点默认就是 `enabled: false`，只有"我们开过、现在要关"才需要真正下发——
-     * 否则那条 `{"节点":{"enabled":false}}` 是空操作，而框架在它上面会偶发 SIGSEGV
-     * （详见 [applyOutcomeOverrides] 的注释）。
-     */
-    private val outcomeNodesEnabledByUs = mutableSetOf<String>()
 
     /**
      * 上游 handlers.go:12 `Run`。
@@ -162,46 +165,58 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
     }
 
     /**
-     * 该不该把 `{"<node>":{"enabled":<enabled>}}` 真的下发出去？
+     * 上游 handlers.go:977 `applyOutcomeOverrides`。
      *
-     * 判据：**只有会真正改变状态才发**——因为这些节点在上游 `SellCore.json` 里
-     * 默认就是 `enabled:false`，而框架在 `MaaContextOverridePipeline` 上对这类调用
-     * 偶发 SIGSEGV（真机实测：同一条调用前三次成功、第四次崩；
-     * 连 `MaaContextGetNodeData` 纯查询在同一节点名上都会崩）。
+     * **本实现不再下发任何 `enabled` 覆盖**：真机上框架在 `MaaContextOverridePipeline`
+     * 上点亮结果节点时会间歇性 SIGSEGV（tombstone pc = `MaaContextOverridePipeline+592`；
+     * 同一条调用前三次成功、第四次崩，与内容无关；连 `MaaContextGetNodeData` 纯查询在
+     * 同一节点名上都会崩）。于是把结果节点要做的事搬到编排层手工完成：
      *
-     * 副作用：本函数同时维护 [outcomeNodesEnabledByUs] 簿记，所以**必须先调用它再下发**。
+     *  - `outOfRange`：结果节点 `OutpostTradingReserveAlreadySatisfied` 的 action 是
+     *    `satisfy`、next 是 `OutpostTradingSellLoop`。这里改为直接调 [BetterSlidingHost.satisfyReserveOutcome]
+     *    并把调用方 next 覆盖成 `OutpostTradingSellLoop`——与「点亮结果节点后走它的 next」
+     *    完全等价（fix-1 已确认），且不再引用结果节点。
+     *  - `targetReachable`：结果节点 `OutpostTradingReserveQuantityReached` 静态挂在
+     *    `OutpostTradingSellCheckThenLoop.next`，在交易之后做记账。这里**不动调用方 next**
+     *    （改了会跳过卖出），只是不再点亮它，并打日志说明取舍。
      */
-    private fun shouldSendOutcomeEnable(node: String, enabled: Boolean, caller: String): Boolean {
-        if (enabled) {
-            // 已经是开着的就不必重复下发（多轮微调时会反复走到这里）
-            return outcomeNodesEnabledByUs.add(node)
-        }
-        if (outcomeNodesEnabledByUs.remove(node)) return true
-        host.info("BetterSliding 结果覆盖跳过（caller=$caller, node=$node 未由本会话开启过，保持默认关闭）")
-        return false
-    }
-
-    /** 上游 handlers.go:977 `applyOutcomeOverrides`。 */
     private fun applyOutcomeOverrides(caller: String): Boolean {
         val p = params ?: return true
-        val outcomes = listOf(
-            p.outOfRangeOverrideEnable to state.outOfRange,
-            p.targetReachableOverrideEnable to state.targetReachable,
-        )
-        // 先算清楚"哪些节点真的需要改"，再**合并成一次** OverridePipeline 下发：
-        // 这个调用是已知的崩溃暴露面，次数越少越好。
-        val merged = LinkedHashMap<String, Any?>()
-        for ((node, enabled) in outcomes) {
-            if (node.isEmpty()) continue
-            if (!shouldSendOutcomeEnable(node, enabled, caller)) continue
-            merged[node] = mapOf("enabled" to enabled)
+        return when (
+            BetterSlidingDecision.resolveOutcomeAction(
+                // 只有调用方**显式配置**了对应结果节点才处理：参数为空表示上游本来就不会点亮，
+                // 此时保持"什么都不做"，绝不能误 satisfy 掉一个未声明结果处理的物品。
+                outOfRange = state.outOfRange && p.outOfRangeOverrideEnable.isNotEmpty(),
+                targetReachable = state.targetReachable && p.targetReachableOverrideEnable.isNotEmpty(),
+            )
+        ) {
+            BetterSlidingDecision.OutcomeAction.NONE -> true
+
+            BetterSlidingDecision.OutcomeAction.SATISFY_AND_ROUTE -> {
+                if (!host.satisfyReserveOutcome()) {
+                    host.warn("BetterSliding 目标越界但 satisfy 失败，无法等价点亮结果节点（caller=$caller）")
+                    return false
+                }
+                if (!overrideCheckQuantityBranch(caller, OutpostReserveSupport.NODE_SELL_LOOP, null, 0)) {
+                    return false
+                }
+                host.info(
+                    "BetterSliding 目标越界：已 satisfy 并把调用方路由到 " +
+                        "${OutpostReserveSupport.NODE_SELL_LOOP}（caller=$caller，未下发 enabled 覆盖）",
+                )
+                true
+            }
+
+            BetterSlidingDecision.OutcomeAction.SKIP_TARGET_REACHABLE -> {
+                // 能到这里说明 p.targetReachableOverrideEnable 非空（已在上面 gate 过）
+                host.warn(
+                    "为确保据点交易不因框架崩溃中断，已跳过 ${p.targetReachableOverrideEnable} 的点亮" +
+                        "（该节点只在交易后做记账）；该物品不会被记入 satisfiedItems，" +
+                        "但选品侧已有 attempted 集合兜底。待上游修复后恢复。",
+                )
+                true
+            }
         }
-        if (merged.isEmpty()) return true
-        if (!applyPipeline(merged)) {
-            host.warn("BetterSliding 结果覆盖失败（caller=$caller, nodes=${merged.keys}）")
-            return false
-        }
-        return true
     }
 
     // ────────────────────────── 各驱动节点 ──────────────────────────
@@ -209,7 +224,6 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
     /** 上游 handlers.go:56 `handleMain`。 */
     private fun handleMain(nodeName: String): Boolean {
         state.reset()
-        outcomeNodesEnabledByUs.clear()
         val p = params ?: return false
 
         state.minimumTargetShortCircuit = !p.swipeOnlyMode && BetterSlidingSupport.isMinimumTargetShortCircuit(
@@ -320,21 +334,13 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
 
         if (state.outOfRange) {
             if (p.outOfRangeOverrideEnable.isEmpty()) {
-                host.warn("BetterSliding 目标越界但没有配置结果节点（target=${state.targetQuantity}, max=${state.sliderMaxQuantity}）")
+                host.warn("BetterSliding 目标越界但没有配置越界处理（OutOfRangeOverrideEnable，target=${state.targetQuantity}, max=${state.sliderMaxQuantity}）")
                 return false
             }
             if (!overrideCheckQuantityBranch(nodeName, BetterSlidingSupport.NODE_DONE, null, 0)) return false
-            host.warn("BetterSliding 目标越界，跳过调整并交给调用方（node=${p.outOfRangeOverrideEnable}）")
+            host.warn("BetterSliding 目标越界，跳过调整并交给调用方处理（result=${p.outOfRangeOverrideEnable}）")
             return true
         }
-
-            if (p.outOfRangeOverrideEnable.isNotEmpty() &&
-                shouldSendOutcomeEnable(p.outOfRangeOverrideEnable, false, "handleGetSliderMaxQuantity")
-            ) {
-                if (!applyPipeline(BetterSlidingOverrides.buildNodeEnableOverride(p.outOfRangeOverrideEnable, false))) {
-                    return false
-                }
-            }
 
         val next = try {
             BetterSlidingDecision.resolveSliderMaxQuantityNext(state.sliderMaxQuantity, state.targetQuantity)

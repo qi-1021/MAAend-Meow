@@ -167,6 +167,14 @@ class MaaRunner(private val agentHost: AgentHost) {
 
         override fun parseJson(text: String): Any? = MaaJsonTree.parse(text)
 
+        /**
+         * BetterSliding 越界分支手工触发的结果节点 satisfy。
+         *
+         * 复用 [satisfyOutpostReserve]——与 pipeline 里 `OutpostTradingReserveSession`
+         * 的 `satisfy` 是同一份语义，绕过框架会间歇性 SIGSEGV 的 `enabled` 覆盖。
+         */
+        override fun satisfyReserveOutcome(): Boolean = satisfyOutpostReserve("BetterSliding outcome override")
+
         override fun info(message: String) {
             Ln.i("MaaRunner: $message")
             // 调货滑条最容易出问题的就是「哪一步算了什么、路由到哪」，Session 已经在
@@ -2971,18 +2979,9 @@ class MaaRunner(private val agentHost: AgentHost) {
                 }
 
                 OutpostReserveSupport.OPERATION_SATISFY -> {
-                    val outcome = outpostReserveSession.markSatisfied()
-                    if (!outcome.ok) {
-                        Ln.e(
-                            "MaaRunner: OutpostTradingReserveSession [$nodeName] satisfy 无有效保留规则 " +
-                                "item='${outcome.name}' quantity=${outcome.quantity}",
-                        )
+                    if (!satisfyOutpostReserve(nodeName.orEmpty())) {
                         return@MaaCustomActionCallback 0
                     }
-                    Ln.i(
-                        "MaaRunner: OutpostTradingReserveSession [$nodeName] satisfy item='${outcome.name}' " +
-                            "quantity=${outcome.quantity} marked=${outcome.marked}",
-                    )
                 }
             }
             1
@@ -2990,6 +2989,32 @@ class MaaRunner(private val agentHost: AgentHost) {
             Ln.w("MaaRunner: OutpostTradingReserveSession error on node=$nodeName", t)
             0
         }
+    }
+
+    /**
+     * `OutpostTradingReserveSession` 的 `satisfy`：把当前选中物品标记为本次任务已满足。
+     *
+     * 真实调用点有两个，必须复用同一份逻辑，否则「手工 satisfy」与「节点 satisfy」会漂移：
+     *  - pipeline 动作 `OutpostTradingReserveSession`（[outpostReserveSessionCallback]）；
+     *  - BetterSliding 越界时由 [MaaBetterSlidingHost.satisfyReserveOutcome] 手工触发，
+     *    等价于点亮结果节点 `OutpostTradingReserveAlreadySatisfied`（绕过框架会崩的 enabled 覆盖）。
+     *
+     * 当前物品未选中 / 没有有效保留规则时返回 false 并打错误日志（不静默跳过）。
+     */
+    private fun satisfyOutpostReserve(label: String): Boolean {
+        val outcome = outpostReserveSession.markSatisfied()
+        if (!outcome.ok) {
+            Ln.e(
+                "MaaRunner: OutpostTradingReserveSession [$label] satisfy 无有效保留规则 " +
+                    "item='${outcome.name}' quantity=${outcome.quantity}",
+            )
+            return false
+        }
+        Ln.i(
+            "MaaRunner: OutpostTradingReserveSession [$label] satisfy item='${outcome.name}' " +
+                "quantity=${outcome.quantity} marked=${outcome.marked}",
+        )
+        return true
     }
 
     /**

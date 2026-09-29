@@ -202,6 +202,36 @@ object BetterSlidingDecision {
     }
 
     /**
+     * 上游 handlers.go:977 `applyOutcomeOverrides` 的**处置判据**。
+     *
+     * 本实现不再像上游那样下发 `{"<结果节点>":{"enabled":<bool>}}`：框架在
+     * `MaaContextOverridePipeline` 上对结果节点做 enable 覆盖会间歇性 SIGSEGV
+     * （tombstone pc = `MaaContextOverridePipeline+592`；同一条调用前三次成功、第四次崩，
+     * 与内容无关）。于是把结果节点该做的事搬到编排层手工完成。
+     */
+    enum class OutcomeAction {
+        /** 没有结果需要处理。 */
+        NONE,
+
+        /** 目标越界：手工 satisfy + 把调用方路由到 `OutpostTradingSellLoop`。 */
+        SATISFY_AND_ROUTE,
+
+        /** 目标可达：跳过结果节点（放弃交易后记账），不动调用方 next，仅打日志。 */
+        SKIP_TARGET_REACHABLE,
+    }
+
+    /**
+     * 上游 handlers.go:977 `applyOutcomeOverrides` 的处置判据（见 [OutcomeAction]）。
+     *
+     * `outOfRange` 优先；两者由同一个 [resolveSliderQuantityOutcome] 结果赋值，实际互斥。
+     */
+    fun resolveOutcomeAction(outOfRange: Boolean, targetReachable: Boolean): OutcomeAction = when {
+        outOfRange -> OutcomeAction.SATISFY_AND_ROUTE
+        targetReachable -> OutcomeAction.SKIP_TARGET_REACHABLE
+        else -> OutcomeAction.NONE
+    }
+
+    /**
      * 上游 handlers.go:1081 `resolveSliderMaxQuantityNext`。
      *
      * 上限与目标相等时可以收尾；上限低于目标是配置矛盾，直接失败；

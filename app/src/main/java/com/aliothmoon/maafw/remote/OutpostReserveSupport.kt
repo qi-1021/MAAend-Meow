@@ -32,6 +32,7 @@ object OutpostReserveSupport {
 
     const val NODE_SELL = "OutpostTradingSell"
     const val NODE_SELL_THEN_LOOP = "OutpostTradingSellThenLoop"
+    const val NODE_SELL_LOOP = "OutpostTradingSellLoop"
     const val NODE_RESERVE_ALREADY_SATISFIED = "OutpostTradingReserveAlreadySatisfied"
     const val NODE_SELL_LOOP_END = "OutpostTradingSellLoopEnd"
 
