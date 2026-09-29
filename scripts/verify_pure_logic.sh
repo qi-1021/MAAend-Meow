@@ -87,6 +87,9 @@ MAIN_FILES=(
   "$SRC/ReceptionRoomSupport.kt"
   "$SRC/ItemTransferSupport.kt"
   "$SRC/IntelArchiveSupport.kt"
+  "$SRC/FailureCollectorSupport.kt"
+  "$SRC/AutoSellSupport.kt"
+  "$SRC/ItemQuantitySupport.kt"
   "$SRC/AutoEcoFarmSwipe.kt"
   "$SRC/AutoEcoFarmNearest.kt"
   "$SRC/AutoEcoFarmOverride.kt"
@@ -123,6 +126,9 @@ TEST_FILES=(
   "$TST/ReceptionRoomSupportTest.kt"
   "$TST/ItemTransferSupportTest.kt"
   "$TST/IntelArchiveSupportTest.kt"
+  "$TST/FailureCollectorSupportTest.kt"
+  "$TST/BoolExprTest.kt"
+  "$TST/ItemQuantitySupportTest.kt"
   "$TST/AutoEcoFarmSwipeTest.kt"
   "$TST/AutoEcoFarmNearestTest.kt"
   "$TST/AutoEcoFarmOverrideTest.kt"
@@ -159,6 +165,9 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.ReceptionRoomSupportTest
   com.aliothmoon.maafw.remote.ItemTransferSupportTest
   com.aliothmoon.maafw.remote.IntelArchiveSupportTest
+  com.aliothmoon.maafw.remote.FailureCollectorSupportTest
+  com.aliothmoon.maafw.remote.BoolExprTest
+  com.aliothmoon.maafw.remote.ItemQuantitySupportTest
   com.aliothmoon.maafw.remote.AutoEcoFarmSwipeTest
   com.aliothmoon.maafw.remote.AutoEcoFarmNearestTest
   com.aliothmoon.maafw.remote.AutoEcoFarmOverrideTest
@@ -294,6 +303,9 @@ fun main() {
         "com.aliothmoon.maafw.remote.ReceptionRoomSupportTest",
         "com.aliothmoon.maafw.remote.ItemTransferSupportTest",
         "com.aliothmoon.maafw.remote.IntelArchiveSupportTest",
+        "com.aliothmoon.maafw.remote.FailureCollectorSupportTest",
+        "com.aliothmoon.maafw.remote.BoolExprTest",
+        "com.aliothmoon.maafw.remote.ItemQuantitySupportTest",
         "com.aliothmoon.maafw.remote.AutoEcoFarmSwipeTest",
         "com.aliothmoon.maafw.remote.AutoEcoFarmNearestTest",
         "com.aliothmoon.maafw.remote.AutoEcoFarmOverrideTest",

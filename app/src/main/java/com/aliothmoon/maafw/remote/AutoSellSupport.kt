@@ -122,106 +122,321 @@ object OcrNum {
 }
 
 /**
- * 对齐上游 `pkg/boolexpr` 的子集：`{节点}` 占位 + 四则 + 比较 + 逻辑。
- * 上游用 Go AST 解析；这里用等价的递归下降，保证 `{A}-{B}>=300`、`{X} >= 5000`、
- * `30000000 < {Y}` 这类资产里的写法行为一致。
+ * 对齐上游 `pkg/boolexpr` 的**完整移植**。
+ *
+ * 上游用 Go 的 `go/parser.ParseExpr` 解析、再对 AST 求值；这里用等价的递归下降，
+ * 覆盖上游实际支持的语法，并对「上游会解析但求值阶段拒绝」或「本移植未实现」的
+ * 语法**明确抛错**，绝不静默返回 false。
+ *
+ *  ✅ 已支持：十进制整数字面量；括号；一元 `+ - !`；二元 `+ - * / %`、
+ *     `== != < <= > >=`、`&& ||`；占位符 `{name}` 替换（值域 Long，与 64 位设备上
+ *     Go 的平台 int 对齐）。运算符优先级与 Go 一致（见下方各 parse* 层级）。
+ *  ❌ 明确不支持（抛 [BoolExpr.BoolExprException]）：位运算 `& | ^ << >> &^`；
+ *     非十进制字面量（`0x`/`0o`/`0b`/下划线/小数）与字符串字面量；标识符、函数调用、
+ *     索引、选择器、切片等一切非上述结构。上游对位运算同样是解析成功、求值报
+ *     `unsupported binary operator`；十六进制等在 `strconv.Atoi` 阶段失败。
+ *
+ * 类型规则与上游一致：算术与大小比较要求两侧都是 int；`== !=` 要求两侧同型
+ * （int 或 bool）；`&& ||` 与一元 `!` 要求 bool。
+ * `ExpressionRecognition` / `ItemQuantitySatisfied` 都要求最终结果必须是 bool。
  */
 object BoolExpr {
-    private val placeholderPattern = Regex("""\{([^{}]+)\}""")
+    /** 上游 `PlaceholderPattern`：`\{([^{}]+)\}`。 */
+    val PLACEHOLDER_PATTERN = Regex("""\{([^{}]+)\}""")
 
-    fun evaluate(expression: String, resolve: (String) -> Int): Boolean {
-        val resolved = StringBuilder()
-        val values = mutableMapOf<String, Int>()
+    /** 表达式非法时抛出；调用方按「不命中」处理，而不是当成 false 静默成功。 */
+    class BoolExprException(message: String) : IllegalArgumentException(message)
+
+    /** [resolvePlaceholders] 的结果：替换后的数字表达式 + 占位符→值。 */
+    data class Resolved(val expression: String, val values: Map<String, Long>)
+
+    /**
+     * 上游 `ResolvePlaceholders`：把表达式里每个 `{name}` 用 [resolve] 的值替换，
+     * 返回替换后的表达式与 name→value 映射。任一占位符解析失败即整体失败。
+     */
+    fun resolvePlaceholders(expression: String, resolve: (String) -> Long): Resolved {
+        val values = LinkedHashMap<String, Long>()
+        val out = StringBuilder()
         var last = 0
-        for (m in placeholderPattern.findAll(expression)) {
-            resolved.append(expression, last, m.range.first)
+        for (m in PLACEHOLDER_PATTERN.findAll(expression)) {
+            out.append(expression, last, m.range.first)
             val name = m.groupValues[1].trim()
-            require(name.isNotEmpty()) { "placeholder must not be empty" }
-            val value = resolve(name)
+            if (name.isEmpty()) throw BoolExprException("placeholder must not be empty")
+            val value = try {
+                resolve(name)
+            } catch (e: BoolExprException) {
+                throw e
+            } catch (e: Exception) {
+                throw BoolExprException("$name: ${e.message ?: e.toString()}")
+            }
             values[name] = value
-            resolved.append(value)
+            out.append(value)
             last = m.range.last + 1
         }
-        resolved.append(expression, last, expression.length)
-        val parser = Parser(resolved.toString())
-        val result = parser.parseOr()
-        parser.expectEnd()
-        return result != 0L
+        out.append(expression, last, expression.length)
+        return Resolved(out.toString(), values)
     }
 
-    private class Parser(private val s: String) {
-        private var pos = 0
-        private fun skipWs() { while (pos < s.length && s[pos].isWhitespace()) pos++ }
-        private fun peek(): Char? { skipWs(); return if (pos < s.length) s[pos] else null }
-        private fun eat(c: Char): Boolean { if (peek() == c) { pos++; return true }; return false }
-        private fun eatOp(op: String): Boolean { skipWs(); if (s.startsWith(op, pos)) { pos += op.length; return true }; return false }
+    /**
+     * 上游 `Evaluate`：解析并求值，结果是任意值（Long / Boolean）。调用方若需要
+     * 识别命中，必须自行断言结果是 Boolean。非法表达式抛 [BoolExprException]。
+     */
+    fun evaluateRaw(expression: String): Any {
+        val parser = Parser(tokenize(expression), expression)
+        return parser.parse()
+    }
 
-        fun parseOr(): Long {
-            var v = parseAnd()
+    /**
+     * `ExpressionRecognition` / `ItemQuantitySatisfied` 的用法：先替换占位符，
+     * 再把结果断言成 bool。
+     */
+    fun evaluate(expression: String, resolve: (String) -> Long): Boolean {
+        val resolved = resolvePlaceholders(expression, resolve)
+        val result = evaluateRaw(resolved.expression)
+        return result as? Boolean
+            ?: throw BoolExprException("expression result must be boolean, got ${boolExprTypeName(result)}")
+    }
+
+    /**
+     * 上游 `ParseIntLiteral`：十进制整数字面量；超出 Long 范围时钳到 Long.MAX_VALUE
+     * （上游是钳到平台 int 的 IntMax）。非十进制/非法字面量明确失败。
+     */
+    fun parseIntLiteral(raw: String): Long {
+        if (raw.isEmpty() || raw.any { it !in '0'..'9' }) {
+            throw BoolExprException("unsupported integer literal \"$raw\"")
+        }
+        return raw.toLongOrNull() ?: Long.MAX_VALUE
+    }
+
+    private enum class Tok {
+        INT, PLUS, MINUS, STAR, SLASH, PERCENT,
+        LT, LE, GT, GE, EQ, NEQ,
+        AND, OR, NOT, LPAREN, RPAREN,
+        SHL, SHR, AMP, PIPE, CARET, ANDNOT, EOF,
+    }
+
+    private class Token(val type: Tok, val text: String, val intValue: Long = 0L)
+
+    /**
+     * 先词法分析再递归下降，避免 `|` 吃掉 `||`、`&` 吃掉 `&&` 这类前缀歧义。
+     * 未知字符（标识符、字符串、非法运算符）一律明确报错。
+     */
+    private fun tokenize(src: String): List<Token> {
+        val out = ArrayList<Token>()
+        var i = 0
+        while (i < src.length) {
+            val c = src[i]
+            when {
+                c.isWhitespace() -> i++
+                c.isDigit() -> {
+                    val start = i
+                    i++
+                    while (i < src.length && (src[i].isLetterOrDigit() || src[i] == '_' || src[i] == '.')) i++
+                    val raw = src.substring(start, i)
+                    out += Token(Tok.INT, raw, BoolExpr.parseIntLiteral(raw))
+                }
+                c == '+' -> { out += Token(Tok.PLUS, "+"); i++ }
+                c == '-' -> { out += Token(Tok.MINUS, "-"); i++ }
+                c == '*' -> { out += Token(Tok.STAR, "*"); i++ }
+                c == '/' -> { out += Token(Tok.SLASH, "/"); i++ }
+                c == '%' -> { out += Token(Tok.PERCENT, "%"); i++ }
+                c == '(' -> { out += Token(Tok.LPAREN, "("); i++ }
+                c == ')' -> { out += Token(Tok.RPAREN, ")"); i++ }
+                c == '^' -> { out += Token(Tok.CARET, "^"); i++ }
+                c == '&' -> when {
+                    src.startsWith("&&", i) -> { out += Token(Tok.AND, "&&"); i += 2 }
+                    src.startsWith("&^", i) -> { out += Token(Tok.ANDNOT, "&^"); i += 2 }
+                    else -> { out += Token(Tok.AMP, "&"); i++ }
+                }
+                c == '|' -> when {
+                    src.startsWith("||", i) -> { out += Token(Tok.OR, "||"); i += 2 }
+                    else -> { out += Token(Tok.PIPE, "|"); i++ }
+                }
+                c == '<' -> when {
+                    src.startsWith("<<", i) -> { out += Token(Tok.SHL, "<<"); i += 2 }
+                    src.startsWith("<=", i) -> { out += Token(Tok.LE, "<="); i += 2 }
+                    else -> { out += Token(Tok.LT, "<"); i++ }
+                }
+                c == '>' -> when {
+                    src.startsWith(">>", i) -> { out += Token(Tok.SHR, ">>"); i += 2 }
+                    src.startsWith(">=", i) -> { out += Token(Tok.GE, ">="); i += 2 }
+                    else -> { out += Token(Tok.GT, ">"); i++ }
+                }
+                c == '=' -> when {
+                    src.startsWith("==", i) -> { out += Token(Tok.EQ, "=="); i += 2 }
+                    else -> throw BoolExprException("unexpected '=' in \"$src\"")
+                }
+                c == '!' -> when {
+                    src.startsWith("!=", i) -> { out += Token(Tok.NEQ, "!="); i += 2 }
+                    else -> { out += Token(Tok.NOT, "!"); i++ }
+                }
+                else -> throw BoolExprException("unexpected '$c' in \"$src\"")
+            }
+        }
+        out += Token(Tok.EOF, "")
+        return out
+    }
+
+    /**
+     * 递归下降求值。优先级自低到高（与 Go 的二元运算符优先级一致）：
+     *   `||` < `&&` < `== != < <= > >=` < `+ - | ^` < `* / % << >> & &^` < 一元。
+     * 位运算层级能解析出来，但在求值阶段抛「unsupported binary operator」，与上游一致。
+     */
+    private class Parser(private val tokens: List<Token>, private val src: String) {
+        private var i = 0
+
+        fun parse(): Any {
+            val value = parseOr()
+            if (peek().type != Tok.EOF) {
+                throw BoolExprException("unexpected trailing input '${peek().text}' in \"$src\"")
+            }
+            return value
+        }
+
+        private fun peek(): Token = tokens[i]
+        private fun advance(): Token = tokens[i++]
+        private fun match(type: Tok): Boolean {
+            if (peek().type == type) { i++; return true }
+            return false
+        }
+
+        private fun parseOr(): Any {
+            var left = parseAnd()
+            while (match(Tok.OR)) left = evalBinary(left, parseAnd(), "||")
+            return left
+        }
+
+        private fun parseAnd(): Any {
+            var left = parseComparison()
+            while (match(Tok.AND)) left = evalBinary(left, parseComparison(), "&&")
+            return left
+        }
+
+        private fun parseComparison(): Any {
+            var left = parseAdditive()
             while (true) {
-                if (eatOp("||")) { val r = parseAnd(); v = if (v != 0L || r != 0L) 1 else 0 }
-                else return v
+                left = when {
+                    match(Tok.EQ) -> evalBinary(left, parseAdditive(), "==")
+                    match(Tok.NEQ) -> evalBinary(left, parseAdditive(), "!=")
+                    match(Tok.LE) -> evalBinary(left, parseAdditive(), "<=")
+                    match(Tok.GE) -> evalBinary(left, parseAdditive(), ">=")
+                    match(Tok.LT) -> evalBinary(left, parseAdditive(), "<")
+                    match(Tok.GT) -> evalBinary(left, parseAdditive(), ">")
+                    else -> return left
+                }
             }
         }
-        private fun parseAnd(): Long {
-            var v = parseComparison()
+
+        private fun parseAdditive(): Any {
+            var left = parseMultiplicative()
             while (true) {
-                if (eatOp("&&")) { val r = parseComparison(); v = if (v != 0L && r != 0L) 1 else 0 }
-                else return v
+                left = when {
+                    match(Tok.PLUS) -> evalBinary(left, parseMultiplicative(), "+")
+                    match(Tok.MINUS) -> evalBinary(left, parseMultiplicative(), "-")
+                    match(Tok.PIPE) -> evalBinary(left, parseMultiplicative(), "|")
+                    match(Tok.CARET) -> evalBinary(left, parseMultiplicative(), "^")
+                    else -> return left
+                }
             }
         }
-        private fun parseComparison(): Long {
-            val l = parseAdd()
-            val c = peek() ?: return l
-            if (c != '>' && c != '<' && c != '=' && c != '!') return l
-            val op = when {
-                eatOp(">=") -> ">="; eatOp("<=") -> "<="
-                eatOp("==") -> "=="; eatOp("!=") -> "!="
-                eat('>') -> ">"; eat('<') -> "<"
-                eat('=') -> "=="; eat('!') -> throw IllegalArgumentException("unexpected '!' in \"$s\"")
-                else -> return l
-            }
-            val r = parseAdd()
-            return if (when (op) {
-                    ">" -> l > r; ">=" -> l >= r; "<" -> l < r
-                    "<=" -> l <= r; "==" -> l == r; else -> l != r
-                }) 1 else 0
-        }
-        private fun parseAdd(): Long {
-            var v = parseMul()
+
+        private fun parseMultiplicative(): Any {
+            var left = parseUnary()
             while (true) {
-                if (eat('+')) v += parseMul()
-                else if (eat('-')) v -= parseMul()
-                else return v
+                left = when {
+                    match(Tok.STAR) -> evalBinary(left, parseUnary(), "*")
+                    match(Tok.SLASH) -> evalBinary(left, parseUnary(), "/")
+                    match(Tok.PERCENT) -> evalBinary(left, parseUnary(), "%")
+                    match(Tok.SHL) -> evalBinary(left, parseUnary(), "<<")
+                    match(Tok.SHR) -> evalBinary(left, parseUnary(), ">>")
+                    match(Tok.AMP) -> evalBinary(left, parseUnary(), "&")
+                    match(Tok.ANDNOT) -> evalBinary(left, parseUnary(), "&^")
+                    else -> return left
+                }
             }
         }
-        private fun parseMul(): Long {
-            var v = parseUnary()
-            while (true) {
-                if (eat('*')) v *= parseUnary()
-                else if (eat('/')) { val r = parseUnary(); require(r != 0L) { "division by zero in \"$s\"" }; v /= r }
-                else if (eat('%')) { val r = parseUnary(); require(r != 0L) { "modulo by zero in \"$s\"" }; v %= r }
-                else return v
-            }
-        }
-        private fun parseUnary(): Long {
-            if (eat('!')) return if (parseUnary() == 0L) 1 else 0
-            if (eat('-')) return -parseUnary()
-            if (eat('+')) return parseUnary()
+
+        private fun parseUnary(): Any {
+            if (match(Tok.NOT)) return !requireBool(parseUnary(), "!")
+            if (match(Tok.PLUS)) return requireInt(parseUnary(), "+")
+            if (match(Tok.MINUS)) return -requireInt(parseUnary(), "-")
             return parsePrimary()
         }
-        private fun parsePrimary(): Long {
-            val c = peek() ?: throw IllegalArgumentException("unexpected end of \"$s\"")
-            if (c == '(') { pos++; val v = parseOr(); require(eat(')')) { "missing ')' in \"$s\"" }; return v }
-            if (c.isDigit()) {
-                val start = pos
-                while (pos < s.length && s[pos].isDigit()) pos++
-                return s.substring(start, pos).toLong()
+
+        private fun parsePrimary(): Any {
+            val token = peek()
+            return when (token.type) {
+                Tok.INT -> { advance(); token.intValue }
+                Tok.LPAREN -> {
+                    advance()
+                    val value = parseOr()
+                    if (!match(Tok.RPAREN)) throw BoolExprException("missing ')' in \"$src\"")
+                    value
+                }
+                Tok.EOF -> throw BoolExprException("unexpected end of expression \"$src\"")
+                else -> throw BoolExprException("unexpected '${token.text}' in \"$src\"")
             }
-            throw IllegalArgumentException("unexpected '$c' in \"$s\"")
         }
-        fun expectEnd() { require(peek() == null) { "unexpected trailing input in \"$s\"" } }
+
+        private fun requireInt(value: Any, op: String): Long =
+            value as? Long
+                ?: throw BoolExprException("operator $op expects int operands, got ${boolExprTypeName(value)}")
+
+        private fun requireBool(value: Any, op: String): Boolean =
+            value as? Boolean
+                ?: throw BoolExprException("operator $op expects bool operands, got ${boolExprTypeName(value)}")
+
+        private fun evalBinary(left: Any, right: Any, op: String): Any = when (op) {
+            "+" -> requireInt(left, op) + requireInt(right, op)
+            "-" -> requireInt(left, op) - requireInt(right, op)
+            "*" -> requireInt(left, op) * requireInt(right, op)
+            "/" -> {
+                val divisor = requireInt(right, op)
+                if (divisor == 0L) throw BoolExprException("division by zero")
+                requireInt(left, op) / divisor
+            }
+            "%" -> {
+                val divisor = requireInt(right, op)
+                if (divisor == 0L) throw BoolExprException("division by zero")
+                requireInt(left, op) % divisor
+            }
+            "<" -> requireInt(left, op) < requireInt(right, op)
+            "<=" -> requireInt(left, op) <= requireInt(right, op)
+            ">" -> requireInt(left, op) > requireInt(right, op)
+            ">=" -> requireInt(left, op) >= requireInt(right, op)
+            "==" -> valuesEqual(left, right, op)
+            "!=" -> !valuesEqual(left, right, op)
+            "&&" -> requireBool(left, op) && requireBool(right, op)
+            "||" -> requireBool(left, op) || requireBool(right, op)
+            else -> throw BoolExprException("unsupported binary operator $op")
+        }
+
+        private fun valuesEqual(left: Any, right: Any, op: String): Boolean = when (left) {
+            is Long -> {
+                if (right !is Long) {
+                    throw BoolExprException(
+                        "operator $op expects same-type operands, got int and ${boolExprTypeName(right)}",
+                    )
+                }
+                left == right
+            }
+            is Boolean -> {
+                if (right !is Boolean) {
+                    throw BoolExprException(
+                        "operator $op expects same-type operands, got bool and ${boolExprTypeName(right)}",
+                    )
+                }
+                left == right
+            }
+            else -> throw BoolExprException("unsupported equality operand type ${boolExprTypeName(left)}")
+        }
     }
+}
+
+private fun boolExprTypeName(value: Any): String = when (value) {
+    is Long -> "int"
+    is Boolean -> "bool"
+    else -> value::class.simpleName ?: "unknown"
 }
 
 /**

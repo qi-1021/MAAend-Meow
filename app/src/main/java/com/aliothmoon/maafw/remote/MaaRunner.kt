@@ -42,6 +42,7 @@ import kotlinx.serialization.json.put
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -1962,7 +1963,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             if (expression.isEmpty()) return@MaaCustomRecognitionCallback 0
             val matched: Boolean = try {
                 BoolExpr.evaluate(expression) { name ->
-                    recognitionNumber(lib, context, image, name)
+                    recognitionNumber(lib, context, image, name).toLong()
                 }
             } catch (_: Exception) {
                 // 上游同样语义：画面/节点结果不稳定时本次不匹配，等下一次重试
@@ -1982,6 +1983,62 @@ class MaaRunner(private val agentHost: AgentHost) {
             1
         } catch (t: Throwable) {
             Ln.w("MaaRunner: ExpressionRecognition error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /**
+     * 库存为空/未初始化时只提醒一次：IMS 记账（AddItemData/SyncItemData）仍是 noop，
+     * 所有 `{item}` 按 0 参与求值，门控只会放行采集、不会跳过——别误以为门控生效。
+     */
+    private val itemQuantityEmptyInventoryLogged = AtomicBoolean(false)
+
+    /**
+     * 对齐上游 `ims.ItemQuantitySatisfied`：对当前 IMS 库存求值布尔表达式（R1）。
+     *
+     * 本项目的库存容器 [Ims] 因记账动作未移植而恒为空：缺失物品 = 0 = 未达标，于是
+     * `{item} < {limit}` / `{limit} == 0` 这类门控命中 → 放行去采集，`SubSkipped` 的
+     * `!({limit}==0 || {item}<{limit})` 不命中 → **不会跳过**。这与「把未知当已达标」
+     * 的旧恒真行为正好相反。
+     *
+     * `notify_ui` / `report_only` 上游走 maafocus 浮层；本项目没有该通道，降级为日志。
+     */
+    private val itemQuantitySatisfiedCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { _, _, nodeName, _, customRecognitionParam, _, roi, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        try {
+            val param = ItemQuantitySupport.parseParams(customRecognitionParam)
+            val snapshot = Ims.cache.snapshot()
+            if ((!snapshot.hasData || snapshot.items.isEmpty()) &&
+                itemQuantityEmptyInventoryLogged.compareAndSet(false, true)
+            ) {
+                Ln.w(
+                    "MaaRunner: ItemQuantitySatisfied 库存为空/未初始化" +
+                        "（IMS 记账 AddItemData/SyncItemData 仍为 noop，hasData=${snapshot.hasData}）——" +
+                        "所有 {item} 按 0=未达标 参与求值，门控只会放行采集、不会跳过；此日志只打一次",
+                )
+            }
+            val evaluation = ItemQuantitySupport.evaluate(param) { name -> Ims.cache.quantity(name) }
+            Ln.i(
+                "MaaRunner: ItemQuantitySatisfied [$nodeName] expr='${param.expression}' " +
+                    "resolved='${evaluation.resolvedExpression}' values=${evaluation.values} " +
+                    "matched=${evaluation.matched}",
+            )
+            if (param.reportOnly) {
+                Ln.i(
+                    "MaaRunner: ItemQuantitySatisfied [$nodeName] report_only " +
+                        "item='${evaluation.reportItemId}' quantity=${evaluation.reportQuantity}",
+                )
+            } else if (param.notifyUi) {
+                Ln.i("MaaRunner: ItemQuantitySatisfied [$nodeName] notify_ui resolved='${evaluation.resolvedExpression}'")
+            }
+            if (!evaluation.matched) return@MaaCustomRecognitionCallback 0
+            if (outBox != null) {
+                val r = getBoxRect(lib, roi)
+                lib.MaaRectSet(outBox, r.x, r.y, r.w, r.h)
+            }
+            1
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: ItemQuantitySatisfied error on node=$nodeName", t)
             0
         }
     }
@@ -2113,6 +2170,13 @@ class MaaRunner(private val agentHost: AgentHost) {
 
     /** 据点交易的独立保留规则会话（对齐上游 `OutpostTradingReserveSession`）。 */
     private val outpostReserveSession = OutpostReserveSupport.Session()
+
+    /**
+     * 失败收集表（对齐上游 `failurecollector`）。采集/环境监测每个子路线由
+     * `FailureCollectorRunTask` 执行，失败记录进这里，最后由 `FailureCollectorFinish`
+     * 汇总并据此判定任务失败。表按 key 隔离，Finish 时删除对应 key。
+     */
+    private val failureCollectorSession = FailureCollectorSupport.Session()
 
     /**
      * `OutpostTradingCurrentGoods` 识别到的当前货品名，按 location 暂存，
@@ -3813,6 +3877,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                 }
                 // 任务级瞬态：据点交易的「已尝试/缺货/保留」不能跨任务残留
                 resetOutpostTransientState()
+                // 失败收集表也是任务级：上一次若在 Finish 前中断，残留会污染本次汇总
+                failureCollectorSession.resetAll()
                 notify { onTaskStarted(task.taskName, index, payload.tasks.size) }
 
                 val overrides = JsonArray(task.pipelineOverrides).toString()
@@ -3850,6 +3916,7 @@ class MaaRunner(private val agentHost: AgentHost) {
                         return@forEachIndexed
                     }
                     resetOutpostTransientState()
+                    failureCollectorSession.resetAll()
                     notify { onTaskStarted("[重试] ${task.taskName}", retryStart + retryIndex, retryStart + failedTasks.size) }
 
                     val overrides = JsonArray(task.pipelineOverrides).toString()
@@ -4369,6 +4436,102 @@ class MaaRunner(private val agentHost: AgentHost) {
         1
     }
 
+    // ───────────────────────── failurecollector（采集/环境监测路线执行器）─────────────────────────
+    // 此前三个名字都在 noop 名单里。`FailureCollectorRunTask` 是采集（AutoCollect，82 处）
+    // 与环境监测全部 Job 节点的**路线执行器**：noop 之后子任务根本没跑、失败也不记录，
+    // 而外层看到的是成功——采集「跑通了实际没动」的根因。三个动作全部对齐上游
+    // `failurecollector/action.go` 的真实语义。
+
+    /**
+     * `MaaContextRunTask` 是同步执行，用 tasker 查任务状态即可判定子任务成败。
+     * 上游要求 `err == nil && detail != nil && detail.Status.Success()`：拿不到 tasker
+     * 就无从确认成功，一律按未成功处理（宁可不静默成功）。
+     */
+    private fun subTaskSucceeded(lib: MaaFrameworkLibrary, context: Pointer, taskId: Long): Boolean {
+        if (taskId <= 0L) return false
+        val tasker = lib.MaaContextGetTasker(context) ?: return false
+        return lib.MaaTaskerStatus(tasker, taskId) == MaaStatus.SUCCEEDED
+    }
+
+    /** `FailureCollectorReset`：清空该 key 的失败表（上游 ResetAction）。 */
+    private val failureCollectorResetCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, _, _ ->
+        val param = FailureCollectorSupport.parseParam(MaaJsonTree.parse(customActionParam)) ?: run {
+            Ln.w("MaaRunner: FailureCollectorReset [$nodeName] 参数不合法: $customActionParam")
+            return@MaaCustomActionCallback 0
+        }
+        failureCollectorSession.reset(param.key)
+        Ln.i("MaaRunner: FailureCollectorReset [$nodeName] key='${param.key}' cleared")
+        1
+    }
+
+    /**
+     * `FailureCollectorRunTask`：跑目标子任务；失败则记录 `failure_task`，可选跑
+     * `recovery_task`。**动作本身始终返回成功**——失败留给 Finish 汇总，外层流水线
+     * 必须能继续走完（上游 RunTaskAction 语义）。
+     */
+    private val failureCollectorRunTaskCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        val param = FailureCollectorSupport.parseParam(MaaJsonTree.parse(customActionParam)) ?: run {
+            Ln.w("MaaRunner: FailureCollectorRunTask [$nodeName] 参数不合法: $customActionParam")
+            return@MaaCustomActionCallback 0
+        }
+        if (param.task.isEmpty() || param.failureTask.isEmpty()) {
+            Ln.w("MaaRunner: FailureCollectorRunTask [$nodeName] 缺 task/failure_task: $customActionParam")
+            return@MaaCustomActionCallback 0
+        }
+        // 目标节点显式 enabled=false 时跳过（上游 GetNode 的禁用判定）
+        if (FailureCollectorSupport.isNodeDisabled(nodeDefinitionJson(lib, context, param.task))) {
+            Ln.i("MaaRunner: FailureCollectorRunTask [$nodeName] 目标节点已被禁用，跳过 task='${param.task}'")
+            return@MaaCustomActionCallback 1
+        }
+        val taskId = lib.MaaContextRunTask(context, param.task, "{}")
+        if (subTaskSucceeded(lib, context, taskId)) {
+            Ln.i("MaaRunner: FailureCollectorRunTask [$nodeName] task='${param.task}' 成功")
+            return@MaaCustomActionCallback 1
+        }
+        failureCollectorSession.record(param.key, param.failureTask)
+        Ln.e(
+            "MaaRunner: FailureCollectorRunTask [$nodeName] task='${param.task}' 失败，" +
+                "已记录 failure_task='${param.failureTask}' (key='${param.key}')",
+        )
+        if (param.recoveryTask.isNotEmpty()) {
+            val recoveryId = lib.MaaContextRunTask(context, param.recoveryTask, "{}")
+            if (!subTaskSucceeded(lib, context, recoveryId)) {
+                Ln.e("MaaRunner: FailureCollectorRunTask [$nodeName] recovery_task='${param.recoveryTask}' 未成功")
+            }
+        }
+        1
+    }
+
+    /**
+     * `FailureCollectorFinish`：取出并删除失败表，逐个跑失败播报任务（播报自身失败只告警），
+     * 返回「是否有失败」——**有失败即失败**，不能恒成功。
+     */
+    private val failureCollectorFinishCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
+        val param = FailureCollectorSupport.parseParam(MaaJsonTree.parse(customActionParam)) ?: run {
+            Ln.w("MaaRunner: FailureCollectorFinish [$nodeName] 参数不合法: $customActionParam")
+            return@MaaCustomActionCallback 0
+        }
+        val failures = failureCollectorSession.finish(param.key)
+        val lib = MaaFrameworkLoader.library
+        if (lib != null && context != null) {
+            for (failureTask in failures) {
+                val taskId = lib.MaaContextRunTask(context, failureTask, "{}")
+                if (!subTaskSucceeded(lib, context, taskId)) {
+                    Ln.e("MaaRunner: FailureCollectorFinish [$nodeName] 失败播报任务 '$failureTask' 未成功")
+                }
+            }
+        } else if (failures.isNotEmpty()) {
+            Ln.w("MaaRunner: FailureCollectorFinish [$nodeName] 无法执行失败播报（lib/context 为空）")
+        }
+        Ln.i(
+            "MaaRunner: FailureCollectorFinish [$nodeName] key='${param.key}' " +
+                "failures=${failures.size} failures=$failures",
+        )
+        if (FailureCollectorSupport.finishSucceeds(failures)) 1 else 0
+    }
+
     private fun registerCustomActions(lib: MaaFrameworkLibrary, res: Pointer) {
         registeredCustomActions.clear()
         registeredCustomRecognitions.clear()
@@ -4450,6 +4613,12 @@ class MaaRunner(private val agentHost: AgentHost) {
         regAction("IntelArchiveResetSessionAction", intelArchiveResetSessionCallback)
         regAction("IntelArchiveShowInventoryAction", intelArchiveShowInventoryCallback)
 
+        // failurecollector：采集与环境监测的路线执行器，必须在 noop 循环之前注册，
+        // 且不能再出现在 otherActions 名单里（否则会被 noop-success 覆盖）。
+        regAction("FailureCollectorReset", failureCollectorResetCallback)
+        regAction("FailureCollectorRunTask", failureCollectorRunTaskCallback)
+        regAction("FailureCollectorFinish", failureCollectorFinishCallback)
+
         val otherActions = listOf(
             "CreditShoppingScanItemAction",
             "AddItemData",
@@ -4477,9 +4646,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             "BatchAddFriendsUIDOnEmptyAction",
             // CharacterController*/MapNavigateAction 不在此列：已注册为真实实现
             "FocusOCRAction",
-            "FailureCollectorFinish",
-            "FailureCollectorReset",
-            "FailureCollectorRunTask",
+            // FailureCollector* 不在此列：已注册为真实实现
             "ImportBluePrintsEnterCodeAction",
             "ImportBluePrintsFinishAction",
             "ImportBluePrintsInitTextAction",
@@ -4520,7 +4687,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         // debug CLI 的 OCR 探针：外部没有 task context，只能借一个临时节点回调拿到 context，
         // 再在回调里跑目标节点识别（见 debugOcrOnce）
         regReco(DEBUG_OCR_RECO, debugCliOcrCallback)
-        regReco("ItemQuantitySatisfied", noopTrueRecognitionCallback)
+        // ItemQuantitySatisfied 不再是恒真：恒真会让采集「目标库存模式」的所有 SubSkipped
+        // 直接命中，任务成功结束却什么都没采（见 ItemQuantitySupport 注释）。
+        regReco("ItemQuantitySatisfied", itemQuantitySatisfiedCallback)
         regReco("ItemDataReady", noopTrueRecognitionCallback)
         regReco("AutoSellScanItemRecognition", autoSellScanItemRecognitionCallback)
         regReco("ExpressionRecognition", expressionRecognitionCallback)
