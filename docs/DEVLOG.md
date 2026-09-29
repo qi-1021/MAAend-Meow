@@ -8,6 +8,74 @@
 
 ---
 
+## 2026-09-30 · 三个真机 bug 的根因修复 + 本地构建链路打通（准备最后一次真机验证）
+
+### 做了什么
+
+**① 探针「任务运行中」可用**（`0fa9aa1`）
+之前 `ocr`/`run`/`overrideprobe`/`yoloprobe`/`coarselocate` 都被 `isRunning()` 硬门控挡住。
+读框架源码确认：tasker 是单线程串行队列（`Tasker.cpp:32` + `AsyncRunner.hpp:82/116/166/193`），
+运行中再 post 只会排队、`Wait` 要等几分钟；`MaaTaskerPostRecognition` 与 task 共用同一队列。
+最终方案：四个**只读**探针走「只绑 resource、不绑 controller 的第二 tasker + PostRecognition」，
+队列独立 → 真并行且不碰输入状态（绑 controller 的第二 tasker 会在 task 结束时
+`auto_release_pressed`，把正在跑的任务按着的手指提前放掉——这是不能接受的）。
+`run` 会驱动点击，改为排队到任务结束后执行；新增 `probe-result` 读回结果，socket 不阻塞。
+
+**② 情报「超过一定量后多余情报不送出」**（`4d0f2a4`）
+根因不是情报代码，而是共用识别 `ListCompleteRecognition` / `ScrollbarCompleteRecognition`
+被移植成了**调用计数**（第 5 / 第 4 次恒真）。上游是**画面比对判底**
+（`listcomplete/recognition.go:24-184`：截 ROI → OverrideImage → 每轮 TemplateMatch 比，
+threshold 默认 0.9、IntelArchive 传 0.98）。计数版导致每个页签只滑约 4 屏就"到底"，
+后面条目永远扫不到（paper 实测 238 条）。新增 `ListCompleteSupport.kt`（305 行 + 40 测试）承接
+状态机/参数解析，计数器只留作防死循环的硬上限（`max_attempts=200`）。**影响面 10 个管线文件**。
+
+**③ 培养舱两处**（`dda613b`）
+- 「所有材料都试一遍」：ADB 端持有量判定的 `roi_offset` 漂了，0 数量被读成"有"。
+  按上游 `d4ea8745`（#6100）改为种子 `[40,52,0,0]`、本体 `[-85,57,29,0]`，
+  并加**构建期断言**防止将来同步上游时被静默覆盖回去。
+- 「种下却报失败」：默认 `AutoExtractSeed=Yes` 让提取基核成为必经分支，三条出路覆盖窄，
+  断链后整任务报红。给两个提取节点加 `on_error` 兜底（回 `GrowthChamberGrowBack`）+ 扩 expected 文案。
+
+**④ D8 崩溃（阻断 debug 包，必须修）**
+`MapLocatorRefinePure.refineSubpixel` 的字节码让 D8（debug 变体的 dexer，R8 9.2.14）内部崩溃：
+`ArrayIndexOutOfBoundsException: Index -1 out of bounds for length 32`（release 的 R8 能过，debug 的 D8 不能）。
+用 build-tools 的 `d8` 单独复现出**秒级迭代回路**，把两个可疑字节码形状一起消掉：
+局部函数（捕获一圈变量）抽成成员类 `SurfaceEvaluator`；实现体拆成不带默认参数的
+`refineSubpixelImpl`（默认参数放转发入口）。行为逐位不变（1018 条测试全过）。
+
+**⑤ 本地构建链路（工具链全在移动硬盘）**
+`~/Library/Android/sdk` 原本是**断链符号链接**（指向 `/Volumes/mac第三磁盘/AndroidStudio/SDK`，
+但那个目录是空的）——这就是"只能靠 CI"的原因。现已在移动硬盘装齐：
+SDK（platform 37.0/37.2 + build-tools 36/37 + NDK r27c + CMake 3.22.1，3.4G）、JDK 17（501M）、
+Gradle 依赖（`~/.gradle` 软链到 `/Volumes/mac第三磁盘/codes/.gradle-home`）。
+新增 `scripts/build_local.sh`：**先跑 `prepare_maaend.py` 再 gradle**——CI 是显式跑这步的
+（`build-apk.yml:91`），本地直接 gradle 会拿到**没打补丁的管线**（能装能跑但行为不一致，结论会假）。
+
+### 怎么验的
+
+- `scripts/verify_pure_logic.sh all`：1018/1018（978 → 1018）。
+- `d8` 单测该类：修复前崩、修复后出 `classes.dex`。
+- `scripts/build_local.sh debug` 端到端出包（`app/build/outputs/apk/debug/app-debug.apk`，
+  versionName `0.1.8-alpha.13`，debug 签名）。
+- 管线补丁验证：产物 `pi/resource_adb/.../Status.json` 里两个 `roi_offset` 已是修复值。
+
+### 教训
+
+- **移植一个识别时，"它怎么判"比"它被调用几次"重要得多**。计数器版能跑、能在短列表上"看起来对"，
+  但在长列表上静默丢数据——这类 bug 不会报错，只会少干活。
+- **D8 与 R8 的接受面不同**：release 过不代表 debug 过。遇到 dexer 崩溃，去 build-tools 里
+  直接跑 `d8` 建立秒级回路，比反复跑 gradle 快一个数量级。
+- **构建产物的行为 = 源码 + 构建期补丁**。本地构建必须复刻 CI 的补丁步骤，否则本地调试的结论
+  不能代表发布包。
+
+### 未做 / 待验
+
+- 真机复测（明天最后一次）：见 `docs/reports/final-device-session-plan.md`（装包要**先卸载**——
+  CI 各次运行的 debug 签名不同，覆盖安装必失败；卸载后配置需重建、补充包应用内重下）。
+- MapLocator 剩余分片：追踪状态机接线、朝向近似；`coarselocate` 的世界帧验证。
+
+---
+
 ## 2026-09-29 · MapLocator 第 4 片：端到端粗定位串联（`coarselocate`）
 
 把两块**已真机验证**的能力串成第一次端到端粗定位：

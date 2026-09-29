@@ -218,7 +218,62 @@ object MapLocatorRefinePure {
     }
 
     /**
-     * 局部亚像素精修主干。
+     * 相关面求值器：把「灰度地图 + 有效模板采样点」打包成一个可复用对象。
+     *
+     * 求值语义：模板左上角在 `(fx, fy)` 时，对「模板 ∩ 地图 ∩ 掩膜」做带掩膜 ZNCC，与上游
+     * `RefinePeakContinuous::evaluate`（`MatchStrategy.cpp:157-163`）同式：
+     * `w=1`（掩膜内），`T' = w*(T - mean_T)`，`I' = w*(I - mean_I)`，
+     * `score = dot(T', I') / (‖T'‖·‖I'‖ + 1e-12)`。
+     *
+     * ## 为什么抽成独立类型（不是主干里的局部函数）
+     *
+     * 局部函数（捕获一圈局部变量）生成的字节码会让 **D8**（debug 变体的 dexer，R8 9.2.14）
+     * 在 `refineSubpixel` 上内部崩溃：
+     * `ArrayIndexOutOfBoundsException: Index -1 out of bounds for length 32`，
+     * 导致 debug 变体无法出包（release 的 R8 两个形状都能过）。抽成成员类型后 D8 正常，
+     * 行为逐位不变。
+     */
+    private class SurfaceEvaluator(
+        private val gray: ByteArray,
+        private val mapWidth: Int,
+        private val mapHeight: Int,
+        private val tdx: IntArray,
+        private val tdy: IntArray,
+        private val tval: DoubleArray,
+    ) {
+        private val n = tval.size
+
+        fun evaluate(fx: Double, fy: Double): Double {
+            var sumW = 0.0
+            var sumWT = 0.0
+            var sumWI = 0.0
+            var sumWTT = 0.0
+            var sumWII = 0.0
+            var sumWTI = 0.0
+            for (i in 0 until n) {
+                val v = sampleBilinear(gray, mapWidth, mapHeight, fx + tdx[i], fy + tdy[i])
+                if (v.isNaN()) continue
+                val t = tval[i]
+                sumW += 1.0
+                sumWT += t
+                sumWI += v
+                sumWTT += t * t
+                sumWII += v * v
+                sumWTI += t * v
+            }
+            if (sumW < MIN_VALID_PIXELS) return NO_SCORE
+            val mT = sumWT / sumW
+            val mI = sumWI / sumW
+            val varT = sumWTT - sumW * mT * mT
+            val varI = sumWII - sumW * mI * mI
+            if (varT <= FEATURE_EPS || varI <= FEATURE_EPS) return NO_SCORE
+            val cov = sumWTI - sumW * mT * mI
+            return cov / (sqrt(varT) * sqrt(varI) + FEATURE_EPS)
+        }
+    }
+
+    /**
+     * 局部亚像素精修主干（带默认参数的转发入口；实现体见 [refineSubpixelImpl]）。
      *
      * @param mapBgr 地图底图 BGR 交错裸像素，长度须 `mapWidth*mapHeight*3`。
      * @param templateBgr 小地图裁剪 BGR 交错裸像素，长度须 `templateWidth*templateHeight*3`。
@@ -249,6 +304,45 @@ object MapLocatorRefinePure {
         refineMode: PeakRefineMode = PeakRefineMode.CONTINUOUS,
         densify: Int = DEFAULT_DENSIFY,
         passThreshold: Double = MatchConfig().passThreshold,
+    ): RefineResult? = refineSubpixelImpl(
+        mapBgr,
+        mapWidth,
+        mapHeight,
+        templateBgr,
+        templateWidth,
+        templateHeight,
+        coarseX,
+        coarseY,
+        searchRadius,
+        maskKind,
+        borderMargin,
+        refineMode,
+        densify,
+        passThreshold,
+    )
+
+    /**
+     * [refineSubpixel] 的实现体：**不带任何默认参数**。
+     *
+     * 为什么这样拆：默认参数会生成 `refineSubpixel$default` 合成方法，与实现体放在一起时 D8
+     * 会在实现体上内部崩溃（见 [SurfaceEvaluator] 的说明）。拆开后实现体既没有默认参数、
+     * 也没有局部函数，D8 正常。行为与拆分前完全一致（转发是纯直传）。
+     */
+    private fun refineSubpixelImpl(
+        mapBgr: ByteArray,
+        mapWidth: Int,
+        mapHeight: Int,
+        templateBgr: ByteArray,
+        templateWidth: Int,
+        templateHeight: Int,
+        coarseX: Int,
+        coarseY: Int,
+        searchRadius: Int,
+        maskKind: TemplateMaskKind,
+        borderMargin: Int,
+        refineMode: PeakRefineMode,
+        densify: Int,
+        passThreshold: Double,
     ): RefineResult? {
         if (mapWidth <= 0 || mapHeight <= 0 || templateWidth <= 0 || templateHeight <= 0) return null
         if (mapBgr.size != mapWidth * mapHeight * 3) return null
@@ -287,37 +381,9 @@ object MapLocatorRefinePure {
             }
         }
 
-        // 一次评估：模板左上角在 (fx, fy) 时，对「模板 ∩ 地图 ∩ 掩膜」做带掩膜 ZNCC。
-        // 与上游 RefinePeakContinuous 的 evaluate（MatchStrategy.cpp:157-163）同式：
-        //   w=1（掩膜内），T' = w*(T - mean_T)，I' = w*(I - mean_I)，
-        //   score = dot(T', I') / (||T'|| * ||I'|| + 1e-12)。
-        fun evaluate(fx: Double, fy: Double): Double {
-            var sumW = 0.0
-            var sumWT = 0.0
-            var sumWI = 0.0
-            var sumWTT = 0.0
-            var sumWII = 0.0
-            var sumWTI = 0.0
-            for (i in 0 until n) {
-                val v = sampleBilinear(gray, mapWidth, mapHeight, fx + tdx[i], fy + tdy[i])
-                if (v.isNaN()) continue
-                val t = tval[i]
-                sumW += 1.0
-                sumWT += t
-                sumWI += v
-                sumWTT += t * t
-                sumWII += v * v
-                sumWTI += t * v
-            }
-            if (sumW < MIN_VALID_PIXELS) return NO_SCORE
-            val mT = sumWT / sumW
-            val mI = sumWI / sumW
-            val varT = sumWTT - sumW * mT * mT
-            val varI = sumWII - sumW * mI * mI
-            if (varT <= FEATURE_EPS || varI <= FEATURE_EPS) return NO_SCORE
-            val cov = sumWTI - sumW * mT * mI
-            return cov / (sqrt(varT) * sqrt(varI) + FEATURE_EPS)
-        }
+        // 相关面求值器（见 [SurfaceEvaluator]）：语义与上游 RefinePeakContinuous 的 evaluate
+        // （MatchStrategy.cpp:157-163）同式。抽成成员类型是为了绕开 D8 的内部崩溃。
+        val surface = SurfaceEvaluator(gray, mapWidth, mapHeight, tdx, tdy, tval)
 
         val r = if (searchRadius < 0) 0 else searchRadius
         val side = 2 * r + 1
@@ -327,7 +393,7 @@ object MapLocatorRefinePure {
         var bj = 0
         for (j in 0 until side) {
             for (i in 0 until side) {
-                val s = evaluate((coarseX - r + i).toDouble(), (coarseY - r + j).toDouble())
+                val s = surface.evaluate((coarseX - r + i).toDouble(), (coarseY - r + j).toDouble())
                 scores[j * side + i] = s
                 if (s > best) {
                     best = s
@@ -403,7 +469,7 @@ object MapLocatorRefinePure {
                 var gy = 0
                 for (jj in -steps..steps) {
                     for (ii in -steps..steps) {
-                        val s = evaluate(peakX + ii * step, peakY + jj * step)
+                        val s = surface.evaluate(peakX + ii * step, peakY + jj * step)
                         if (s > gridBest) {
                             gridBest = s
                             gx = ii
@@ -420,24 +486,24 @@ object MapLocatorRefinePure {
                 val denseSide = 2 * steps + 1
                 val di = gx + steps
                 val dj = gy + steps
-                fun denseAt(i: Int, j: Int): Double =
-                    evaluate(peakX + (i - steps) * step, peakY + (j - steps) * step)
+                val denseX0 = peakX - steps * step
+                val denseY0 = peakY - steps * step
                 if (di in 1 until denseSide - 1) {
                     candX += refinePeakOffset(
-                        denseAt(di - 1, dj).toFloat(),
-                        denseAt(di, dj).toFloat(),
-                        denseAt(di + 1, dj).toFloat(),
+                        surface.evaluate(denseX0 + (di - 1) * step, denseY0 + dj * step).toFloat(),
+                        surface.evaluate(denseX0 + di * step, denseY0 + dj * step).toFloat(),
+                        surface.evaluate(denseX0 + (di + 1) * step, denseY0 + dj * step).toFloat(),
                     ) * step
                 }
                 if (dj in 1 until denseSide - 1) {
                     candY += refinePeakOffset(
-                        denseAt(di, dj - 1).toFloat(),
-                        denseAt(di, dj).toFloat(),
-                        denseAt(di, dj + 1).toFloat(),
+                        surface.evaluate(denseX0 + di * step, denseY0 + (dj - 1) * step).toFloat(),
+                        surface.evaluate(denseX0 + di * step, denseY0 + dj * step).toFloat(),
+                        surface.evaluate(denseX0 + di * step, denseY0 + (dj + 1) * step).toFloat(),
                     ) * step
                 }
                 // 抛物线候选点必须真的更高才采纳，保持 score 与 loc 一致。
-                val candEval = evaluate(candX, candY)
+                val candEval = surface.evaluate(candX, candY)
                 if (candEval > candScore) {
                     candScore = candEval
                 } else {
