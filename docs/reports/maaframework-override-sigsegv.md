@@ -100,3 +100,34 @@ x12 "lreadySa"   x13 "tisfied\0"   x14 "osTtradi"   x15 "ngReseRv"
 
 > 补充：我们已排查过 v5.14.1 / v5.14.2 的 release notes，未见到与该崩溃相关的修复；
 > 也搜索过 issues/discussions，未见相同签名的报告，因此在这里报一条。
+
+---
+
+## 补充（同日更新）：影响面与我们已验证的绕开方式
+
+**影响**：这个崩溃会让宿主**特权进程整个被杀**，正在跑的任务被强制中断——
+所以在它被修好之前，我们的「据点交易」功能**每次都在收尾阶段失败**。
+这不是理论问题，是线上可用性问题。
+
+**我们已经找到并验证了绕开方式**（供参考，也说明这个 API 并非不可替代）：
+触发崩溃的那条调用是 `{"<结果节点>":{"enabled":true}}`，用于"点亮"一个结果节点；
+但读上游定义后发现该节点的**全部作用**只是
+「跑一次 `Custom(OutpostTradingReserveSession, operation=satisfy)`，然后 `next` 到
+`OutpostTradingSellLoop`」——于是我们**不再下发这条 `enabled` 覆盖**，
+改在编排层手工完成等价动作（手工 `satisfy` + 把调用方 `next` 指到同一目的地）。
+
+**真机验证结果**：绕开后同一功能
+`Fatal signal: 0`、`Tasker.Task.Succeeded`。
+
+也就是说：**这条 `enabled`-only 覆盖路径对我们并非不可替代**，
+如果上游一时难以定位根因，至少可以确认"绕开它"是可行解。
+
+**我们仍希望上游能修**，因为：
+1. `Context::pipeline_override_`（裸 `unordered_map`、`Context` 无 mutex）在
+   `MaaContextOverridePipeline` 与 `MaaContextGetNodeData` 上都会崩，
+   任何下游都可能踩到；
+2. 我们为了绕开它，**偏离了上游的原始语义**（放弃了一次交易后的记账），
+   这属于技术债，修好后我们会恢复。
+
+**可提供的进一步材料**：完整 tombstone（含内存映射与更多寄存器）、
+最小复现工程、以及我们侧的全部调用日志（`maa.log` 片段）。
