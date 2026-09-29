@@ -161,12 +161,27 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
         )
         for ((node, enabled) in outcomes) {
             if (node.isEmpty()) continue
+            // 当前状态已等于目标值时**省掉这次调用**：行为完全不变，但能绕开框架在
+            // `MaaContextOverridePipeline` 里对这条 override 的偶发 SIGSEGV。
+            // 真机实测（2026-09-29）：同一条 {"<节点>":{"enabled":false}} 前三次成功、
+            // 第四次崩溃（tombstone pc 落在该函数 +592），而那两个节点默认就是
+            // enabled:false —— 这些调用本来就是空操作。
+            if (currentNodeEnabled(node) == enabled) {
+                host.info("BetterSliding 结果覆盖跳过（caller=$caller, node=$node 已是 enabled=$enabled）")
+                continue
+            }
             if (!applyPipeline(BetterSlidingOverrides.buildNodeEnableOverride(node, enabled))) {
                 host.warn("BetterSliding 结果覆盖失败（caller=$caller, node=$node, enabled=$enabled）")
                 return false
             }
         }
         return true
+    }
+
+    /** 读节点当前的 `enabled`；读不到（或不是对象）返回 null＝未知，此时按原样下发覆盖。 */
+    private fun currentNodeEnabled(node: String): Boolean? {
+        val json = host.callerNodeJson(node) ?: return null
+        return BetterSlidingOverrides.readNodeEnabled(host.parseJson(json))
     }
 
     // ────────────────────────── 各驱动节点 ──────────────────────────
