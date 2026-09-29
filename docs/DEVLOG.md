@@ -75,9 +75,26 @@ action="TouchMove", point=[1258,696], contact=0, pressure=0 → completed=false
 - **真机验证**：跳过日志出现（`…未由本会话开启过，保持默认关闭`），
   流程比以往跑得都深（微调迭代到第 3 次）。
 
-**残留**：`{"<结果节点>":{"enabled":true}}` 这条路**仍会崩**（16:55:27 实测）。
-属框架侧竞态，我们的选择：①改用已验证可用的 `next` 覆盖来路由（绕开 `enabled`）；
-②把 tombstone + 调用栈 + 触发 JSON 整理给 MaaFramework 上游。
+**残留**：`{"<结果节点>":{"enabled":true}}` 这条路**仍会崩**（16:55:27、17:41:24 两次实测）。
+属框架侧竞态。
+
+**已识别出干净的绕开路径（待实现）**：这两个"结果节点"的定义就是
+```json
+{"desc":"本次交易已达到保留数量…","enabled":false,"recognition":"DirectHit",
+ "action":"Custom","custom_action":"OutpostTradingReserveSession",
+ "custom_action_param":{"operation":"satisfy"},"next":["OutpostTradingSellLoop"]}
+```
+即它们的**全部作用**是「跑一次 satisfy，然后去 `OutpostTradingSellLoop`」。
+所以完全不需要用 `enabled` 覆盖把它们"点亮"，只要：
+1. **直接执行一次 satisfy**（复用 `OutpostReserveSupport` 的状态机），
+2. 用 `overrideCheckQuantityBranch`（本项目已多次验证可用的 `next` 覆盖）把调用方 next 指到 `OutpostTradingSellLoop`。
+
+`next` 覆盖这条路径我们在主线里一直在用、从未出过问题；而 `enabled` 覆盖是唯一会崩的调用。
+另一条可选动作是把 tombstone + 调用栈 + 触发 JSON 整理给 MaaFramework 上游。
+
+**本轮缓解的实测效果**：同一条 BetterSliding 流程里，`结果覆盖跳过` 触发 2 次
+（`handleGetSliderMaxQuantity` 与收尾各一次），即两次空操作调用被省掉；
+崩溃次数随之下降（同轮只剩"真实开启"那 1 次）。
 
 ### 四、仍未做
 
