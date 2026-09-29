@@ -1,5 +1,6 @@
 package com.aliothmoon.maafw.remote
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.aliothmoon.maafw.BuildConfig
 import com.aliothmoon.maafw.IMaaRunnerCallback
@@ -2010,32 +2011,213 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
-    private val listCompleteInvocations = ConcurrentHashMap<String, Int>()
+    /**
+     * ListComplete / ScrollbarComplete 共用的运行时状态。
+     *
+     * 判定主逻辑是**画面比对**（见 [handleListCompleteRecognition] 与 [ListCompleteSupport]），
+     * 本对象只保存「比过但未到底」的连续次数，作为防死循环的硬上限安全阀。
+     * 旧实现把两个识别都写成「第 N 次调用恒真」，导致 IntelArchive 每个页签只滑约 4 屏
+     * 就判到底、后面的条目（paper 实测 238 条）永远扫不到。
+     */
+    private val listCompleteSession = ListCompleteSupport.Session()
+    private val listCompleteLock = Any()
 
-    private val listCompleteRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { _, _, nodeName, _, _, _, _, _, _, _ ->
-        val key = nodeName ?: "unknown"
-        val count = (listCompleteInvocations[key] ?: 0) + 1
-        listCompleteInvocations[key] = count
-        Ln.i("MaaRunner: ListCompleteRecognition on node=$key (count=$count)")
-        if (count >= 5) {
-            listCompleteInvocations.remove(key)
-            1
-        } else {
-            0
+    /** 临时 TemplateMatch 节点名（ListComplete/ScrollbarComplete 共用；override 每次写全可变键）。 */
+    private val listCompleteTemplateMatchNode = "__ListCompleteTemplateMatch"
+
+    private val listCompleteRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, roi, _, outBox, _ ->
+        handleListCompleteRecognition(
+            context, nodeName, customRecognitionParam, image, roi, outBox, "ListCompleteRecognition",
+        )
+    }
+
+    private val scrollbarCompleteRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, image, roi, _, outBox, _ ->
+        handleListCompleteRecognition(
+            context, nodeName, customRecognitionParam, image, roi, outBox, "ScrollbarCompleteRecognition",
+        )
+    }
+
+    /**
+     * 「列表/滚动条是否到底」的共享实现，对齐上游 `listcomplete/recognition.go:53-184`：
+     *
+     *  1. 读调用节点 `attach.ready`；
+     *  2. 未就绪 → 从当前帧按节点 roi 裁出模板，`OverrideImage` 写进运行时模板、
+     *     把 `attach.ready` 置真，**返回未命中**（首轮只建模板）；
+     *  3. 已就绪 → 对同一 roi 跑 `TemplateMatch`，相似度 `>= threshold` 判到底返回命中；
+     *     否则重截模板返回未命中（画面还在变，继续滑）。
+     *
+     * 与上游的差异：`ScrollbarCompleteRecognition` 上游比滑块 top/bottom 位置，这里同样用
+     * 「roi 画面是否变化」判定（滚动条不动 == 列表到底），共用同一套模板比对逻辑；
+     * 另加 [ListCompleteSupport.DEFAULT_MAX_ATTEMPTS] 硬上限兜底，防 roi 内有动画时死循环。
+     */
+    private fun handleListCompleteRecognition(
+        context: Pointer?,
+        nodeName: String?,
+        customRecognitionParam: String?,
+        image: Pointer?,
+        roiPtr: Pointer?,
+        outBox: Pointer?,
+        logTag: String,
+    ): Byte {
+        val lib = MaaFrameworkLoader.library ?: return 0.toByte()
+        if (context == null || image == null || nodeName.isNullOrBlank()) {
+            Ln.w("MaaRunner: $logTag 缺少 context/image/nodeName")
+            return 0.toByte()
+        }
+        return try {
+            val node = nodeName.trim()
+            val params = ListCompleteSupport.parseParams(customRecognitionParam)
+            if (params.thresholdRejected || params.maxAttemptsRejected) {
+                Ln.w(
+                    "MaaRunner: $logTag 参数非法已回落 " +
+                        "(node=$node threshold=${params.threshold} maxAttempts=${params.maxAttempts} raw=$customRecognitionParam)",
+                )
+            }
+
+            // 读节点定义取 attach.ready；读不到按未就绪处理（与上游 loadReady 失败即 false 一致）
+            val nodeJson = nodeDefinitionJson(lib, context, node)
+            val ready = ListCompleteSupport.isReady(nodeJson)
+
+            val callbackRoi = getBoxRect(lib, roiPtr)
+            val matchRoi = if (callbackRoi.w > 0 && callbackRoi.h > 0) {
+                intArrayOf(callbackRoi.x, callbackRoi.y, callbackRoi.w, callbackRoi.h)
+            } else {
+                null
+            }
+
+            // 只有 ready（模板已存在）才比模板；否则直接进入建模板分支
+            val score = if (ready) {
+                runListCompleteTemplateMatch(lib, context, image, node, params.threshold, matchRoi)
+            } else {
+                null
+            }
+
+            val action = synchronized(listCompleteLock) {
+                listCompleteSession.decide(node, ready, score, params.threshold, params.maxAttempts)
+            }
+
+            when (action) {
+                ListCompleteSupport.Action.COMPLETE -> {
+                    Ln.i(
+                        "MaaRunner: $logTag 判定到底 node=$node score=$score " +
+                            "threshold=${params.threshold}",
+                    )
+                    if (outBox != null && matchRoi != null) {
+                        lib.MaaRectSet(outBox, matchRoi[0], matchRoi[1], matchRoi[2], matchRoi[3])
+                    }
+                    1.toByte()
+                }
+
+                ListCompleteSupport.Action.CAPTURE_TEMPLATE,
+                ListCompleteSupport.Action.RECAPTURE_TEMPLATE -> {
+                    val firstCapture = action == ListCompleteSupport.Action.CAPTURE_TEMPLATE
+                    val ok = captureListCompleteTemplate(
+                        lib, context, image, node,
+                        intArrayOf(callbackRoi.x, callbackRoi.y, callbackRoi.w, callbackRoi.h),
+                    )
+                    if (ok && firstCapture) {
+                        saveListCompleteReady(lib, context, node, nodeJson, true)
+                    }
+                    Ln.i(
+                        "MaaRunner: $logTag ${if (firstCapture) "首轮建模板" else "重截模板"} " +
+                            "node=$node ok=$ok score=$score threshold=${params.threshold}",
+                    )
+                    0.toByte()
+                }
+            }
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: $logTag 异常 node=$nodeName", t)
+            0.toByte()
         }
     }
 
-    private val scrollbarCompleteRecognitionCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { _, _, nodeName, _, _, _, _, _, _, _ ->
-        val key = nodeName ?: "unknown"
-        val count = (listCompleteInvocations[key] ?: 0) + 1
-        listCompleteInvocations[key] = count
-        Ln.i("MaaRunner: ScrollbarCompleteRecognition on node=$key (count=$count)")
-        if (count >= 4) {
-            listCompleteInvocations.remove(key)
-            1
-        } else {
-            0
+    /** 对运行时模板跑一次 `TemplateMatch`，返回 `best.score`；识别失败/无模板返回 null。 */
+    private fun runListCompleteTemplateMatch(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        image: Pointer,
+        node: String,
+        threshold: Double,
+        roi: IntArray?,
+    ): Double? {
+        val templateName = ListCompleteSupport.templateName(node)
+        val nodeOverride = ListCompleteSupport.buildTemplateMatchOverride(
+            nodeName = listCompleteTemplateMatchNode,
+            templateName = templateName,
+            threshold = threshold,
+            roi = roi,
+        )
+        val res = runRecognitionOnce(lib, context, image, listCompleteTemplateMatchNode, nodeOverride)
+            ?: return null
+        return ListCompleteSupport.bestTemplateScore(res.detailJson)
+    }
+
+    /**
+     * 按 ROI 从当前帧裁一块、写进运行时模板（`MaaContextOverrideImage`）。
+     *
+     * 链路与 [debugOverrideProbe] 同源：编码 PNG 读帧 → Bitmap 裁剪 → ARGB→BGR →
+     * `MaaImageBufferSetRawData(CV_8UC3)` → `MaaContextOverrideImage`。不落盘。
+     */
+    private fun captureListCompleteTemplate(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        image: Pointer,
+        node: String,
+        roi: IntArray,
+    ): Boolean {
+        val bytes = readEncodedImage(lib, image) ?: run {
+            Ln.w("MaaRunner: ListComplete 读帧失败 node=$node")
+            return false
         }
+        val bitmap: Bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: run {
+            Ln.w("MaaRunner: ListComplete 解码帧失败 node=$node")
+            return false
+        }
+        val buf = lib.MaaImageBufferCreate() ?: run {
+            bitmap.recycle()
+            return false
+        }
+        try {
+            val norm = ListCompleteSupport.normalizeRoi(roi, bitmap.width, bitmap.height) ?: run {
+                Ln.w("MaaRunner: ListComplete roi 非法 node=$node roi=${roi.toList()}")
+                return false
+            }
+            val (x, y, w, h) = norm
+            val argb = IntArray(w * h)
+            bitmap.getPixels(argb, 0, w, x, y, w, h)
+            val bgr = YoloPreprocess.argbToBgr(argb)
+            val mem = Memory(bgr.size.toLong())
+            mem.write(0, bgr, 0, bgr.size)
+            if (lib.MaaImageBufferSetRawData(buf, mem, w, h, MaaImageType.CV_8UC3).toInt() == 0) {
+                Ln.w("MaaRunner: ListComplete SetRawData 失败 node=$node ${w}x$h")
+                return false
+            }
+            val templateName = ListCompleteSupport.templateName(node)
+            val ok = lib.MaaContextOverrideImage(context, templateName, buf).toInt() != 0
+            if (!ok) {
+                Ln.w("MaaRunner: ListComplete OverrideImage 失败 node=$node template=$templateName")
+            }
+            return ok
+        } finally {
+            lib.MaaImageBufferDestroy(buf)
+            bitmap.recycle()
+        }
+    }
+
+    /** 把 `attach.ready` 写回调用节点（合并保留其它 attach 键）。 */
+    private fun saveListCompleteReady(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        node: String,
+        existingNodeJson: String?,
+        ready: Boolean,
+    ): Boolean {
+        val overrideJson = ListCompleteSupport.buildReadyOverride(node, existingNodeJson, ready)
+        val ok = lib.MaaContextOverridePipeline(context, overrideJson).toInt() != 0
+        if (!ok) {
+            Ln.w("MaaRunner: ListComplete 写 attach.ready 失败 node=$node ready=$ready")
+        }
+        return ok
     }
 
     private val noopSuccessActionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, customActionName, _, _, _, _ ->
@@ -5626,7 +5808,7 @@ class MaaRunner(private val agentHost: AgentHost) {
     private fun registerCustomActions(lib: MaaFrameworkLibrary, res: Pointer) {
         registeredCustomActions.clear()
         registeredCustomRecognitions.clear()
-        listCompleteInvocations.clear()
+        listCompleteSession.reset()
         callbackKeepAlive.clear()
 
         fun regAction(name: String, cb: MaaFrameworkLibrary.MaaCustomActionCallback) {
@@ -5866,7 +6048,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             }
             registeredCustomActions.clear()
             registeredCustomRecognitions.clear()
-            listCompleteInvocations.clear()
+            listCompleteSession.reset()
             callbackKeepAlive.clear()
             lib.MaaResourceDestroy(res)
         }

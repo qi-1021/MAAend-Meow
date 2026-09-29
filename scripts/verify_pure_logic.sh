@@ -88,6 +88,7 @@ MAIN_FILES=(
   "$SRC/ReceptionRoomSupport.kt"
   "$SRC/ItemTransferSupport.kt"
   "$SRC/IntelArchiveSupport.kt"
+  "$SRC/ListCompleteSupport.kt"
   "$SRC/FailureCollectorSupport.kt"
   "$SRC/AutoSellSupport.kt"
   "$SRC/ItemQuantitySupport.kt"
@@ -143,6 +144,7 @@ TEST_FILES=(
   "$TST/ReceptionRoomSupportTest.kt"
   "$TST/ItemTransferSupportTest.kt"
   "$TST/IntelArchiveSupportTest.kt"
+  "$TST/ListCompleteSupportTest.kt"
   "$TST/FailureCollectorSupportTest.kt"
   "$TST/BoolExprTest.kt"
   "$TST/ItemQuantitySupportTest.kt"
@@ -197,6 +199,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.ReceptionRoomSupportTest
   com.aliothmoon.maafw.remote.ItemTransferSupportTest
   com.aliothmoon.maafw.remote.IntelArchiveSupportTest
+  com.aliothmoon.maafw.remote.ListCompleteSupportTest
   com.aliothmoon.maafw.remote.FailureCollectorSupportTest
   com.aliothmoon.maafw.remote.BoolExprTest
   com.aliothmoon.maafw.remote.ItemQuantitySupportTest
@@ -350,6 +353,7 @@ fun main() {
         "com.aliothmoon.maafw.remote.ReceptionRoomSupportTest",
         "com.aliothmoon.maafw.remote.ItemTransferSupportTest",
         "com.aliothmoon.maafw.remote.IntelArchiveSupportTest",
+        "com.aliothmoon.maafw.remote.ListCompleteSupportTest",
         "com.aliothmoon.maafw.remote.FailureCollectorSupportTest",
         "com.aliothmoon.maafw.remote.BoolExprTest",
         "com.aliothmoon.maafw.remote.ItemQuantitySupportTest",
