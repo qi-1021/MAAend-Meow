@@ -41,6 +41,16 @@ os.environ["TMP"] = str(TMP_DIR)
 OCR_BASE_URL = "https://raw.githubusercontent.com/MaaXYZ/MaaCommonAssets/main/OCR/ppocr_v6/small"
 OCR_FILES = ["det.onnx", "rec.onnx", "keys.txt"]
 
+# ADB 端培养舱「持有量判定」ROI 覆盖的修复值（上游 #6100 / d4ea8745，2026-09-29）。
+# 见 patch_adb_growth_chamber_status_rois()：只覆盖 ADB 覆盖层，base resource 不动。
+ADB_GROWTH_CHAMBER_ROI_FIX = {
+    "GrowthChamberCheckSeedNotEmpty": [40, 52, 0, 0],
+    "GrowthChamberCheckPlantNotEmpty": [-85, 57, 29, 0],
+}
+ADB_GROWTH_CHAMBER_STATUS_FILE = (
+    ASSETS_ROOT / "resource_adb" / "pipeline" / "DijiangRewards" / "Template" / "Status.json"
+)
+
 
 def log(msg: str):
     print(f"[MAAend-Prep] {msg}", flush=True)
@@ -642,6 +652,147 @@ def patch_missing_upstream_i18n_keys():
         log(f"Patched {patched} locale file(s) with upstream-missing i18n keys.")
 
 
+def patch_adb_growth_chamber_status_rois():
+    """
+    修复 ①：ADB 端培养舱「持有量判定」的 ROI 覆盖写错。
+
+    上游 #6100（d4ea8745，2026-09-29）修正了
+    `resource_adb/.../DijiangRewards/Template/Status.json` 里两个检查节点的 roi_offset：
+        种子 GrowthChamberCheckSeedNotEmpty : [43, 54, 9, 1]    -> [40, 52, 0, 0]
+        本体 GrowthChamberCheckPlantNotEmpty: [-84, 57, 31, 0]  -> [-85, 57, 29, 0]
+    框偏了会把「0 数量」判成「有」，于是挨个点遍候选、还把列表滚 30 次扫全表——
+    真机表现就是「培养稀有植物把所有材料试一遍」。本项目 submodule 停在修复前，
+    构建期按上游修复值覆盖（**只覆盖 ADB 覆盖层，base resource 的 Status.json 不动**）。
+
+    节点缺失（上游改名/移除）时直接抛错，而不是静默跳过：否则补丁会失效而无人发现。
+    """
+    if not ADB_GROWTH_CHAMBER_STATUS_FILE.is_file():
+        raise RuntimeError(
+            f"ADB Status.json 缺失：{ADB_GROWTH_CHAMBER_STATUS_FILE}；无法应用培养舱 ROI 修复"
+        )
+    data = json.loads(strip_json_comments(ADB_GROWTH_CHAMBER_STATUS_FILE.read_text(encoding="utf-8")))
+    for node_name, roi in ADB_GROWTH_CHAMBER_ROI_FIX.items():
+        node = data.get(node_name)
+        if not isinstance(node, dict):
+            raise RuntimeError(
+                f"ADB Status.json 缺少节点 {node_name}（上游可能已改名/移除）；"
+                f"培养舱 ROI 修复无法应用，请同步更新 scripts/prepare_maaend.py"
+            )
+        node["roi_offset"] = list(roi)
+    ADB_GROWTH_CHAMBER_STATUS_FILE.write_text(
+        json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    log("Patched ADB GrowthChamber check ROIs with upstream #6100 values.")
+
+
+def verify_adb_growth_chamber_status_rois():
+    """
+    构建期断言：产物里 ADB 培养舱持有量 ROI 必须等于 #6100 修复值。
+
+    为什么单独断言：补丁按节点名写入，若将来同步上游时节点被改名/移除，
+    或后续步骤把文件覆盖回旧值，补丁会「静默失效」——照样编得过、照样出包，
+    只是行为悄悄变回去。这里读回**最终产物**核对，不一致就让构建失败。
+    """
+    if not ADB_GROWTH_CHAMBER_STATUS_FILE.is_file():
+        raise RuntimeError(f"构建期断言失败：产物缺少 {ADB_GROWTH_CHAMBER_STATUS_FILE}")
+    data = json.loads(strip_json_comments(ADB_GROWTH_CHAMBER_STATUS_FILE.read_text(encoding="utf-8")))
+    problems = []
+    for node_name, expected in ADB_GROWTH_CHAMBER_ROI_FIX.items():
+        actual = (data.get(node_name) or {}).get("roi_offset")
+        if actual != expected:
+            problems.append(f"{node_name}: 期望 {expected}，实际 {actual}")
+    if problems:
+        raise RuntimeError(
+            "构建期断言失败：ADB 培养舱持有量 ROI 不等于上游 #6100 修复值；"
+            "上游同步可能覆盖/改名，请检查 scripts/prepare_maaend.py：\n  "
+            + "\n  ".join(problems)
+        )
+    for node_name, expected in ADB_GROWTH_CHAMBER_ROI_FIX.items():
+        log(f"Asserted ADB {node_name} roi_offset == {expected} (upstream #6100).")
+
+
+def _extend_ocr_expected(node: dict, extra: list) -> bool:
+    """向节点的 OCR expected 追加不重复的候选文案；返回是否改动。"""
+    param = (node.get("recognition") or {}).get("param") or {}
+    expected = param.get("expected")
+    if not isinstance(expected, list):
+        return False
+    changed = False
+    for item in extra:
+        if item not in expected:
+            expected.append(item)
+            changed = True
+    return changed
+
+
+def patch_growth_chamber_extract_resilience():
+    """
+    修复 ②：培养舱「提取基核」链任一分支断掉，整任务就报红。
+
+    默认 AutoExtractSeed=Yes 时，「点培养确认 -> 前往提取基核 -> 确认提取 -> 关闭提取页」
+    是必经分支，而提取页三条出路覆盖不全；文案/时序一变就断链，断链后外层一路失败
+    -> 整任务红，即使种子其实已经种下去了。
+
+    保守做法（不砍功能），全部收敛到既有的安全节点 GrowthChamberGrowBack
+    （识别返回键并反复点，直到回到培养选择界面）：
+      1. GrowthChamberSeedExtractConfirm 加 on_error：确认已点、但结果页/关闭按钮没出现时兜底。
+      2. GrowthChamberSeedExtract 加 on_error：确认提取/原料不足/返回三条出路都没命中时兜底。
+      3. ExtractSeedCloseText.expected 扩通用「获得」类文案（参考 CloseRewardsButtonText）：
+         提取结算标题与普通奖励结算共用同一标题区，文案微调也能认出关闭按钮。
+      4. GrowthChamberNoMaterials.expected 扩原料不足类文案。
+    """
+    growth_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "GrowthChamber.json"
+    tmpl_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "Template" / "TextTemplate.json"
+    for path in (growth_file, tmpl_file):
+        if not path.is_file():
+            raise RuntimeError(f"培养舱提取链修复失败：缺少 {path}")
+
+    safe_node = "GrowthChamberGrowBack"
+
+    # 1/2) on_error 兜底
+    growth = json.loads(strip_json_comments(growth_file.read_text(encoding="utf-8")))
+    for node_name in ("GrowthChamberSeedExtractConfirm", "GrowthChamberSeedExtract"):
+        node = growth.get(node_name)
+        if not isinstance(node, dict):
+            raise RuntimeError(
+                f"GrowthChamber.json 缺少节点 {node_name}（上游可能已改名/移除）；"
+                f"提取链兜底无法应用，请同步更新 scripts/prepare_maaend.py"
+            )
+        node["on_error"] = [safe_node]
+
+    # 4) NoMaterials 文案扩展
+    no_materials = growth.get("GrowthChamberNoMaterials")
+    if not isinstance(no_materials, dict):
+        raise RuntimeError("GrowthChamber.json 缺少节点 GrowthChamberNoMaterials")
+    _extend_ocr_expected(no_materials, [
+        "原料不足",
+        "材料不足",
+        "素材不足",
+        "缺少材料",
+        "無法獲取",
+        "无法提取",
+        "無法取得",
+        "(?i)Not\\s*enough",
+        "(?i)Insufficient",
+    ])
+    growth_file.write_text(json.dumps(growth, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    # 3) 提取结算关闭文案扩展
+    tmpl = json.loads(strip_json_comments(tmpl_file.read_text(encoding="utf-8")))
+    close_text = tmpl.get("ExtractSeedCloseText")
+    if not isinstance(close_text, dict):
+        raise RuntimeError("TextTemplate.json 缺少节点 ExtractSeedCloseText")
+    _extend_ocr_expected(close_text, [
+        "获得",
+        "獲得",
+        "(?i)Rewards?\\s*Acquired",
+        "報酬一覧",
+    ])
+    tmpl_file.write_text(json.dumps(tmpl, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    log("Patched GrowthChamber extraction chain with on_error fallbacks and wider OCR text.")
+
+
 def main():
     log("Starting MAAend Android preparation...")
     ensure_maaend_submodule()
@@ -658,6 +809,10 @@ def main():
     apply_mobile_resilience_patches()
     neutralize_touch_move_nodes()
     apply_outpost_trading_arbitrage()
+    patch_adb_growth_chamber_status_rois()
+    patch_growth_chamber_extract_resilience()
+    # 断言放最后：读回最终产物，确认没有后续步骤把 ROI 覆盖回去
+    verify_adb_growth_chamber_status_rois()
     log("Preparation complete!")
 
 
