@@ -71,8 +71,43 @@
 亚像素精修（上游用抛物线/`remap` 连续精修）在 Kotlin 里对
 Maa 返回位置附近的小邻域做局部 ZNCC 即可（代价极低）✓。
 
-> 该路线的前提是"**能用任意图像跑 TemplateMatch 且模板可动态写入**"——
-> 这正是第 1 步真机验证要确认的东西。
+#### (b+) 的决定性依据：框架本来就支持「运行时换模板图」
+
+源码核对（`ResourceMgr.h` / `ResourceMgr.cpp`）给出了比预期更好的答案：
+
+```cpp
+virtual bool override_image(const std::string& image_name, const cv::Mat& image) override;
+// → ResourceMgr.cpp:271  template_res_.set_image(image_name, image);
+```
+
+即**运行时模板图可以被直接覆盖、不落盘**；而且**上游自己的文档就在用这个模式**
+（`docs/zh_cn/developers/custom.md:338,341,385`：「按节点原生 roi 截取区域，经
+`OverrideImage` 写入运行时模板…**不落盘**」）。
+
+所以 (b+) 里"把小地图写成 PNG 再让框架读"这一步**根本不需要**——
+框架本来就支持在内存里换模板。这同时消除了两个风险：
+
+1. 往资源目录写文件的权限/时机问题；
+2. **模板缓存**导致的"改了文件但框架不重读"——`TemplateResMgr` 确实是被缓存的
+   （`ResourceMgr.cpp:691,743` 的 `lazy_load`），而 `override_image` 正是
+   **绕过缓存的官方入口**。
+
+**需要补的 JNA 绑定**：`MaaResourceOverrideImage` 与 `MaaTaskerGetResource`
+（我们目前只有 `MaaContextOverridePipeline`）——小改动，且有上游文档背书。
+
+**于是 (b+) 的形状确定下来**：
+1. 从当前帧裁出小地图（Kotlin 裁剪 ✓ 纯数组操作）；
+2. 用 `override_image` 把它设成某个模板名；
+3. 把**地图资产图**作为 image 传给 `MaaContextRunRecognition`
+   （现有 OCR 探针已验证这条路径可用 ✓），节点用 `TemplateMatch`
+   （`method=5` TM_CCOEFF_NORMED、`green_mask=true` 处理圆形遮罩、
+   `roi` = YOLO 给出的 tile ROI 外扩 `infer_margin`）；
+4. 在返回位置附近用 Kotlin 做局部 ZNCC 亚像素精修（代价极低）；
+5. 追踪/仲裁/守护用已移植的纯逻辑层（第 2 片 ✓ 已完成）。
+
+**唯一还需真机确认的**：`override_image` 设的模板能否被随后的
+`MaaContextRunRecognition` 立即读到（时序），以及 `TemplateMatch` 在
+1600×1600 级图像 + 118×120 模板下的耗时。
 
 ### 四、分片与里程碑（每步都能真机验证）
 
