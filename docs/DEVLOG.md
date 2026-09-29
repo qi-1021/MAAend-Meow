@@ -8,6 +8,50 @@
 
 ---
 
+## 2026-09-29 · MapLocator 前提验证通过（真机，`3d69ff5`）
+
+分片计划的**第 1 步（前提验证）已在真机上跑通**：
+
+```
+override: ok                 ← MaaContextOverrideImage 生效（运行时模板，不落盘）
+hit: true                    ← 框架 TemplateMatch 确实用了这个运行时模板
+expected: [137,88,48,40]
+actual:   [137,88,48,40]     ← 匹配位置与裁剪位置逐像素一致
+result: PASS
+```
+
+**这一次性确认了路线 (b+) 的全部关键前提**：
+
+1. `MaaContextOverrideImage` 在我们的框架版本上**存在且可用** ✓
+2. `MaaImageBufferSetRawData`（此前只能由 Go 绑定佐证、随包头文件里没有的那个符号）
+   **存在且可用** ✓ —— 真机自证了这条保留项
+3. 框架 `TemplateMatch` **会使用运行时覆盖的模板** ✓ ——
+   这解决了最担心的一点：**模板缓存**（`TemplateResMgr` 是缓存的）会不会导致
+   "换了模板但框架仍用旧的"。答案是不会，`override_image` 正是绕过缓存的官方入口。
+4. 匹配位置**精确**（与裁剪位置完全一致，无偏移）。
+
+**怎么验的**：debug CLI 的 `overrideprobe`（`3d69ff5` 引入）——
+合成一张确定性 BGR 噪声图 → 从已知位置 `(137,88,48,40)` 裁 patch →
+`MaaImageBufferSetRawData` 写入 → `MaaContextOverrideImage` 设为运行时模板 →
+`MaaContextRunRecognition` 拿**整张图**跑 `TemplateMatch`（method=5）→ 比对框。
+**自洽闭环：不需要游戏、不需要补充包**（图像全是合成的）。
+
+**过程中的一个坑（值得记）**：CLI 死活不起来。排查路径是——
+logcat 里**一条 `MaaRunner:` 都没有** → 说明 `setup()` 根本没被调用 →
+而 `setup()` 只在**首次启动任务**时走（`MaaFrameworkRunnerPort` 的准备路径），
+**`启动终末地` 不会触发它**。加一个任务并启动后，立刻出现
+`DebugCli: listening on 127.0.0.1:7777` ✓。
+教训：**"服务就绪"不等于"runner 已 setup"**，两者的触发时机不同。
+
+**下一步（按分片计划继续）**：
+3. **粗搜**：YOLO 分类（`cls.onnx`）给出 zone + tile → 定 ROI →
+   把**地图资产图**作为 image 传给 `TemplateMatch`（本步已验证可行）→ 得到粗位置；
+4. **追踪状态机**：用已移植的纯逻辑层（第 2 片）驱动；
+5. **亚像素精修**：Kotlin 局部 ZNCC；
+6. **朝向**：先 Kotlin 近似（角速度/预测），两级 ONNX 放最后。
+
+---
+
 ## 2026-09-29 · MapLocator 移植：结构测绘 + 分片方案（含一个必须说清的阻碍）
 
 ### 一、测绘结论（关键事实，均带行号）
