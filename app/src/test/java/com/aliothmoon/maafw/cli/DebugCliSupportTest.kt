@@ -221,6 +221,36 @@ class DebugCliSupportTest {
         assertTrue(failure("overrideprobe", ctx(controllerReady = false)).contains("controller 未就绪"))
     }
 
+    // ───────────────────── yoloprobe ─────────────────────
+
+    @Test
+    fun `yoloprobe 正常返回图片路径`() {
+        assertEquals(
+            DebugCliIntent.YoloProbe("/sdcard/minimap.png"),
+            ok("yoloprobe /sdcard/minimap.png"),
+        )
+    }
+
+    @Test
+    fun `yoloprobe 命令名大小写不敏感`() {
+        assertEquals(DebugCliIntent.YoloProbe("/a.png"), ok("YoloProbe /a.png"))
+    }
+
+    @Test
+    fun `yoloprobe 缺少路径报错`() {
+        assertTrue(failure("yoloprobe").contains("需要一个"))
+    }
+
+    @Test
+    fun `yoloprobe 多余参数报错`() {
+        assertTrue(failure("yoloprobe a.png b.png").contains("只接受一个"))
+    }
+
+    @Test
+    fun `yoloprobe controller 未就绪被拒绝`() {
+        assertTrue(failure("yoloprobe /a.png", ctx(controllerReady = false)).contains("controller 未就绪"))
+    }
+
     // ───────────────────── 渲染与常量 ─────────────────────
 
     @Test
@@ -242,7 +272,7 @@ class DebugCliSupportTest {
     @Test
     fun `helpText 列出全部命令`() {
         val text = DebugCliSupport.helpText()
-        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "overrideprobe")) {
+        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "overrideprobe", "yoloprobe")) {
             assertTrue("helpText 缺少 $command", text.contains(command))
         }
     }

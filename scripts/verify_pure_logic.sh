@@ -106,6 +106,8 @@ MAIN_FILES=(
   "$SRC/CameraOrientationDecode.kt"
   "$SRC/MapLocateActionPure.kt"
   "$SRC/MapLocatorProbeSupport.kt"
+  "$SRC/YoloPreprocess.kt"
+  "$SRC/YoloClassifySupport.kt"
   "$SUP/SupplementPack.kt"
   "$SUP/SupplementPackLocal.kt"
   "$DIAG/RunDiagnosticsPolicy.kt"
@@ -156,6 +158,8 @@ TEST_FILES=(
   "$TST/CameraOrientationDecodeTest.kt"
   "$TST/MapLocateActionPureTest.kt"
   "$TST/MapLocatorProbeSupportTest.kt"
+  "$TST/YoloPreprocessTest.kt"
+  "$TST/YoloClassifySupportTest.kt"
   "$TSUP/SupplementPackTest.kt"
   "$TSUP/SupplementPackLocalTest.kt"
   "$TDIAG/RunDiagnosticsPolicyTest.kt"
@@ -206,6 +210,8 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.CameraOrientationDecodeTest
   com.aliothmoon.maafw.remote.MapLocateActionPureTest
   com.aliothmoon.maafw.remote.MapLocatorProbeSupportTest
+  com.aliothmoon.maafw.remote.YoloPreprocessTest
+  com.aliothmoon.maafw.remote.YoloClassifySupportTest
   com.aliothmoon.maafw.supplement.SupplementPackTest
   com.aliothmoon.maafw.supplement.SupplementPackLocalTest
   com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest
@@ -355,6 +361,8 @@ fun main() {
         "com.aliothmoon.maafw.remote.CameraOrientationDecodeTest",
         "com.aliothmoon.maafw.remote.MapLocateActionPureTest",
         "com.aliothmoon.maafw.remote.MapLocatorProbeSupportTest",
+        "com.aliothmoon.maafw.remote.YoloPreprocessTest",
+        "com.aliothmoon.maafw.remote.YoloClassifySupportTest",
         "com.aliothmoon.maafw.supplement.SupplementPackTest",
         "com.aliothmoon.maafw.supplement.SupplementPackLocalTest",
         "com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest",

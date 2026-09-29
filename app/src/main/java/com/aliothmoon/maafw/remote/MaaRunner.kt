@@ -1,5 +1,6 @@
 package com.aliothmoon.maafw.remote
 
+import android.graphics.BitmapFactory
 import com.aliothmoon.maafw.BuildConfig
 import com.aliothmoon.maafw.IMaaRunnerCallback
 import com.aliothmoon.maafw.bridge.NativeBridgeLib
@@ -42,6 +43,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.io.File
+import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -4099,6 +4101,215 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    // ────────────────────── YOLO 分区分类探针（yoloprobe，仅 debug） ──────────────────────
+
+    private val debugYoloLock = Any()
+
+    @Volatile
+    private var debugYoloResult: List<String>? = null
+
+    /** 预处理后的 128×128 BGR 图；回调里写进 MaaImageBuffer 再喂给 NeuralNetworkClassify。 */
+    @Volatile
+    private var debugYoloPreprocessed: ByteArray? = null
+
+    /** sidecar `cls.json` 的解析结果（类名表 + region_mapping）。 */
+    @Volatile
+    private var debugYoloConfig: YoloConfig = YoloConfig()
+
+    /** sidecar `tile_mapping.json` 的解析结果。 */
+    @Volatile
+    private var debugYoloMapping: YoloMapping = YoloMapping()
+
+    /**
+     * YOLO 分区分类探针：读 [imagePath] 的小地图图 → [YoloPreprocess] 预处理 →
+     * `NeuralNetworkClassify(cls.onnx)` → 输出 cls_index / 类名 / zone_id / tile ROI。
+     *
+     * 与 [debugOverrideProbe] 同样的理由：外部拿不到 `MaaContext`，只能借一个临时 Custom
+     * 识别节点的回调拿到 context，再在回调里跑真正的 `NeuralNetworkClassify`
+     * （见 [debugCliYoloCallback]）。
+     */
+    fun debugYoloProbe(imagePath: String): List<String> {
+        if (!BuildConfig.DEBUG) return listOf("error: yoloprobe 仅在 debug 构建可用")
+        val lib = MaaFrameworkLoader.library ?: return listOf("error: MaaFramework 未加载")
+        if (isRunning()) return listOf("error: 任务运行中，无法执行调试探针")
+        val tasker = synchronized(lifecycleLock) { tasker }
+            ?: return listOf("error: tasker 未初始化（先跑一次任务）")
+        if (lib.MaaTaskerInited(tasker).toInt() == 0) {
+            return listOf("error: tasker 未就绪")
+        }
+        val res = synchronized(lifecycleLock) { resource }
+            ?: return listOf("error: resource 未初始化（先跑一次任务）")
+        val root = projectRoot?.let { File(it).parentFile }
+            ?: return listOf("error: PI 根未就绪")
+
+        val supplementDir = File(root, "supplements/map-locate/map")
+        val config = runCatching {
+            YoloConfigParser.parseConfig(File(supplementDir, "cls.json").takeIf { it.isFile }?.readText())
+        }.getOrDefault(YoloConfig())
+        val tileRegions = runCatching {
+            YoloConfigParser.parseTileMapping(File(supplementDir, "tile_mapping.json").takeIf { it.isFile }?.readText())
+        }.getOrDefault(emptyMap())
+        val mapping = YoloMapping(config.regionMapping, tileRegions)
+
+        val preprocessed = runCatching { preprocessYoloImageFile(imagePath) }.getOrElse {
+            return listOf("error: 预处理异常：${it.javaClass.simpleName}: ${it.message}")
+        } ?: return listOf("error: 图片解码失败或尺寸非法：$imagePath")
+
+        ensureYoloClassifyBundle(lib, res, root, supplementDir)?.let { return listOf("error: $it") }
+
+        synchronized(debugYoloLock) {
+            debugYoloResult = null
+            debugYoloPreprocessed = preprocessed
+            debugYoloConfig = config
+            debugYoloMapping = mapping
+
+            val probeNode = buildJsonObject {
+                put(
+                    DEBUG_YOLO_NODE,
+                    buildJsonObject {
+                        put(
+                            "recognition",
+                            buildJsonObject {
+                                put("type", "Custom")
+                                put("param", buildJsonObject { put("custom_recognition", DEBUG_YOLO_RECO) })
+                            },
+                        )
+                        put("action", buildJsonObject { put("type", "DoNothing") })
+                    },
+                )
+            }
+            val id = lib.MaaTaskerPostTask(tasker, DEBUG_YOLO_NODE, JsonArray(listOf(probeNode)).toString())
+            if (id == INVALID_ID) return listOf("error: PostTask 被拒绝")
+            lib.MaaTaskerWait(tasker, id)
+            return debugYoloResult ?: listOf("error: 探针未返回结果")
+        }
+    }
+
+    /** 读图（Android 解码）→ ARGB → 纯逻辑预处理成 128×128 BGR。 */
+    private fun preprocessYoloImageFile(path: String): ByteArray? {
+        val bitmap = BitmapFactory.decodeFile(path) ?: return null
+        return try {
+            val w = bitmap.width
+            val h = bitmap.height
+            if (w <= 0 || h <= 0) return null
+            val pixels = IntArray(w * h)
+            bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+            YoloPreprocess.preprocessArgb(pixels, w, h)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    /**
+     * 让框架能读到 `cls.onnx`。补充包把它放在 `<root>/supplements/map-locate/map/cls.onnx`，
+     * 而框架只从 bundle 的 `model/classify/` 下按名懒加载（`ONNXResMgr::classifier`）。
+     *
+     * 于是把模型硬链（同盘，省 23 MiB 拷贝；失败退回复制）到一个最小 bundle
+     * `<root>/debug/yolo-classify/model/classify/cls.onnx`，再 `MaaResourcePostBundle` 追加到
+     * **已加载的 resource**——`lazy_load_classifier` 只登记 root，真正加载在首次识别，
+     * 所以追加即可生效，无需重建 resource。
+     *
+     * @return null 表示就绪；否则返回给用户看的原因。
+     */
+    private fun ensureYoloClassifyBundle(
+        lib: MaaFrameworkLibrary,
+        res: Pointer,
+        root: File,
+        supplementDir: File,
+    ): String? {
+        val src = File(supplementDir, "cls.onnx")
+        if (!src.isFile) {
+            return "缺少分类模型：请先在设置里安装补充包 map-locate（${src.absolutePath} 不存在）"
+        }
+        val bundleDir = File(root, "debug/yolo-classify")
+        val modelDir = File(bundleDir, "model/classify")
+        modelDir.mkdirs()
+        val target = File(modelDir, "cls.onnx")
+        if (!target.isFile || target.length() != src.length()) {
+            val linked = runCatching {
+                target.delete()
+                Files.createLink(target.toPath(), src.toPath())
+            }.isSuccess
+            if (!linked) {
+                runCatching { src.copyTo(target, overwrite = true) }
+                    .getOrElse { return "准备 cls.onnx 失败：${it.message}" }
+            }
+        }
+        val id = lib.MaaResourcePostBundle(res, bundleDir.absolutePath)
+        if (id == INVALID_ID) return "MaaResourcePostBundle 被拒绝"
+        if (lib.MaaResourceWait(res, id) != MaaStatus.SUCCEEDED) return "分类模型 bundle 加载失败"
+        return null
+    }
+
+    private val debugCliYoloCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, _, _, _, _, _, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null) {
+            debugYoloResult = listOf("error: 探针回调缺少 context")
+            return@MaaCustomRecognitionCallback 0
+        }
+        val bgr = debugYoloPreprocessed
+        if (bgr == null) {
+            debugYoloResult = listOf("error: 探针缺少预处理图")
+            return@MaaCustomRecognitionCallback 0
+        }
+        var buf: Pointer? = null
+        try {
+            val mem = Memory(bgr.size.toLong())
+            mem.write(0, bgr, 0, bgr.size)
+            buf = lib.MaaImageBufferCreate()
+            if (buf == null ||
+                lib.MaaImageBufferSetRawData(
+                    buf, mem, YoloPreprocess.OUTPUT_SIZE, YoloPreprocess.OUTPUT_SIZE, MaaImageType.CV_8UC3,
+                ).toInt() == 0
+            ) {
+                debugYoloResult = listOf("error: MaaImageBufferSetRawData(128x128) 失败")
+                return@MaaCustomRecognitionCallback 0
+            }
+
+            val nodeOverride = YoloClassifySupport.buildClassifyOverride(
+                nodeName = YoloClassifySupport.DEFAULT_PROBE_NODE,
+                model = YoloClassifySupport.DEFAULT_MODEL,
+                labels = debugYoloConfig.classes,
+            )
+            val res = runRecognitionOnce(lib, context, buf, YoloClassifySupport.DEFAULT_PROBE_NODE, nodeOverride)
+            if (res == null) {
+                debugYoloResult = listOf("error: NeuralNetworkClassify 调用失败（cls.onnx 未加载？）")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val parsed = YoloClassifySupport.parseClassifyDetail(res.detailJson)
+            if (parsed == null) {
+                val detail = res.detailJson?.take(400) ?: "null"
+                debugYoloResult = listOf("error: 无法解析识别详情：$detail")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val outcome = YoloClassifySupport.resolveClassify(parsed, debugYoloConfig, debugYoloMapping)
+            debugYoloResult = listOf("hit: ${res.hit}") +
+                YoloClassifySupport.describeOutcome(parsed.clsIndex, parsed.label, outcome)
+
+            RunDiagnostics.note(
+                "maplocator",
+                "yoloprobe｜index=${parsed.clsIndex} class=${outcome.rawClass} zone=${outcome.zoneId} valid=${outcome.valid}",
+                mapOf(
+                    "stage" to "yolo_probe",
+                    "cls_index" to parsed.clsIndex,
+                    "class" to outcome.rawClass,
+                    "zone_id" to outcome.zoneId,
+                    "valid" to outcome.valid,
+                    "is_none" to outcome.isNone,
+                    "has_roi" to outcome.hasRoi,
+                ),
+            )
+            Ln.i("MaaRunner: yoloprobe index=${parsed.clsIndex} class=${outcome.rawClass} zone=${outcome.zoneId}")
+            if (res.hit) 1 else 0
+        } catch (t: Throwable) {
+            debugYoloResult = listOf("error: ${t.javaClass.simpleName}: ${t.message}")
+            Ln.e("MaaRunner: yoloprobe 异常", t)
+            0
+        } finally {
+            if (buf != null) lib.MaaImageBufferDestroy(buf)
+        }
+    }
+
     private val debugOcrLock = Any()
 
     @Volatile
@@ -5074,6 +5285,8 @@ class MaaRunner(private val agentHost: AgentHost) {
         // 仅 debug 注册，release 下不引入这个自定义识别（与 debug CLI 同样的硬门控）。
         if (BuildConfig.DEBUG) {
             regReco(DEBUG_OVERRIDE_RECO, debugCliOverrideCallback)
+            // YOLO 分区分类探针（yoloprobe）：预处理图 → NeuralNetworkClassify(cls.onnx)
+            regReco(DEBUG_YOLO_RECO, debugCliYoloCallback)
         }
         // ItemQuantitySatisfied 不再是恒真：恒真会让采集「目标库存模式」的所有 SubSkipped
         // 直接命中，任务成功结束却什么都没采（见 ItemQuantitySupport 注释）。
@@ -5198,6 +5411,10 @@ class MaaRunner(private val agentHost: AgentHost) {
         /** 路线 (b+) 前提验证探针：临时节点名与注册的识别名 */
         const val DEBUG_OVERRIDE_NODE = "__DebugCliOverride__"
         const val DEBUG_OVERRIDE_RECO = "DebugCliOverride"
+
+        /** YOLO 分区分类探针：临时 Custom 包装节点名与注册的识别名 */
+        const val DEBUG_YOLO_NODE = "__DebugCliYolo__"
+        const val DEBUG_YOLO_RECO = "DebugCliYolo"
 
 
         /** 解释器这类 child 冷启动要几秒，超时给宽一点；连不上会整批任务失败，宁可多等 */

@@ -159,6 +159,8 @@ object DebugCliServer {
         is DebugCliIntent.Run -> listOf("run: ${intent.nodeName} -> ${host.run(intent.nodeName)}")
 
         DebugCliIntent.OverrideProbe -> host.overrideProbe()
+
+        is DebugCliIntent.YoloProbe -> host.yoloProbe(intent.imagePath)
     }
 
     /**
@@ -221,6 +223,12 @@ interface DebugCliHost {
      * 返回多行结果（成功/失败与坐标），失败时给出原因。
      */
     fun overrideProbe(): List<String>
+
+    /**
+     * YOLO 分区分类探针：读 [imagePath] → 纯逻辑预处理 → `NeuralNetworkClassify(cls.onnx)`。
+     * 返回多行结果（cls_index / 类名 / zone_id / tile ROI），失败时给出原因。
+     */
+    fun yoloProbe(imagePath: String): List<String>
 }
 
 /** [DebugCliHost.ocr] 的结果；[text] 为 null 时看 [reason]。 */

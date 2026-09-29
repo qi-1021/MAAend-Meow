@@ -61,6 +61,15 @@ sealed interface DebugCliIntent {
      * `MaaContextRunRecognition(TemplateMatch)` → 校验返回框。不依赖游戏/补充包。
      */
     data object OverrideProbe : DebugCliIntent
+
+    /**
+     * YOLO 分区分类探针：读一张小地图图 → [com.aliothmoon.maafw.remote.YoloPreprocess] 预处理
+     * （居中裁/贴 128×128 + 直径 106 圆 mask，BGR）→ `NeuralNetworkClassify(cls.onnx)` →
+     * 输出 cls_index / 类名 / zone_id / tile ROI。
+     *
+     * [imagePath] 是设备上的图片路径（PNG/JPEG，Android `BitmapFactory` 可解）。
+     */
+    data class YoloProbe(val imagePath: String) : DebugCliIntent
 }
 
 /** 解析结果：要么是意图，要么是给用户看的错误。 */
@@ -109,6 +118,13 @@ object DebugCliSupport {
                 else -> DebugCliParse.Ok(DebugCliIntent.OverrideProbe)
             }
 
+            "yoloprobe" -> when {
+                args.isEmpty() -> DebugCliParse.Failure("yoloprobe 需要一个小地图图片路径")
+                args.size > 1 -> DebugCliParse.Failure("yoloprobe 只接受一个图片路径（路径不要带空格）")
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> DebugCliParse.Ok(DebugCliIntent.YoloProbe(args[0]))
+            }
+
             else -> DebugCliParse.Failure("未知命令：$command（输入 help 查看可用命令）")
         }
     }
@@ -124,6 +140,7 @@ object DebugCliSupport {
         appendLine("ocr <nodeName>      对当前帧跑该识别节点，返回 best 文本")
         appendLine("run <nodeName>      跑一次该节点")
         appendLine("overrideprobe       验证 OverrideImage+TemplateMatch 链（合成图，不依赖游戏/补充包）")
+        appendLine("yoloprobe <img>     小地图预处理 → NeuralNetworkClassify(cls.onnx)，输出 zone/ROI")
     }.trimEnd()
 
     /** `status` 的渲染文本，多行。 */
