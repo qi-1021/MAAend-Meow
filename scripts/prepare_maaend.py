@@ -329,6 +329,20 @@ def tag_unimplemented_tasks():
         # 但没有上游那套配额与阈值配置，选品规则退化为「本页可见货组里挑最便宜的」
         "AutoStockpile": "📦自动囤货【移动端基础版：OCR 认货选最低价，无配额阈值策略】",
         "AutoStockStaple": "🏪购买稳定物资【策略完善中】",
+        # 抢委托送货：上游目标扫描的 4 个自定义组件（seizedeliveryjobs/register.go）
+        # 全未移植，且依赖 `MapFind`（C++ WorldMap，未移植）→ 选中后跑不起来。
+        # 与其静默空转，不如在名字上直接说清楚。
+        "SeizeDeliveryJobs": "🏍️抢委托送货【暂不可用·移动端缺少目标扫描与地图搜索】",
+        # 选剑演武：上游 4 个识别（Recognize/RecognizeDeck/RecognizeAband/Decide）
+        # 全是求解器实现，移动端未移植 → 任务会空转。
+        "TrialOfSwordmancy": "🗡️选剑演武【暂不可用·移动端未实现求解】",
+        # 转交委托：送货目录/装箱/回收站链已在移动端跑通；缺的是
+        # `MapFind`（自动寻图，C++ WorldMap 未移植）与 `IconRecognition`
+        # （优先装箱货物，C++ 图标识别 9705 行未移植）→ 这两项配置暂不生效。
+        "DeliveryJobs": "🚚转交委托【移动端基础版：送货/装箱/回收站可用；自动寻图与优先装箱待实现】",
+        # 环境监测：相机扫描（CameraScanAction）与失败收集器已实现；路线里仍依赖
+        # `MapLocateAssertLocation`（C++ MapLocator 未移植）→ 路线定位是降级近似。
+        "EnvironmentMonitoring": "🌿环境监测【移动端基础版：相机扫描已实现；路线定位待 MapLocator 移植】",
     }
     tasks_dir = ASSETS_ROOT / "tasks"
     if not tasks_dir.exists():
