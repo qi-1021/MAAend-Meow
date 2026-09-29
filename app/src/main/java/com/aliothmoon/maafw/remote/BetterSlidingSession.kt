@@ -161,6 +161,26 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
         return paramMap
     }
 
+    /**
+     * 该不该把 `{"<node>":{"enabled":<enabled>}}` 真的下发出去？
+     *
+     * 判据：**只有会真正改变状态才发**——因为这些节点在上游 `SellCore.json` 里
+     * 默认就是 `enabled:false`，而框架在 `MaaContextOverridePipeline` 上对这类调用
+     * 偶发 SIGSEGV（真机实测：同一条调用前三次成功、第四次崩；
+     * 连 `MaaContextGetNodeData` 纯查询在同一节点名上都会崩）。
+     *
+     * 副作用：本函数同时维护 [outcomeNodesEnabledByUs] 簿记，所以**必须先调用它再下发**。
+     */
+    private fun shouldSendOutcomeEnable(node: String, enabled: Boolean, caller: String): Boolean {
+        if (enabled) {
+            // 已经是开着的就不必重复下发（多轮微调时会反复走到这里）
+            return outcomeNodesEnabledByUs.add(node)
+        }
+        if (outcomeNodesEnabledByUs.remove(node)) return true
+        host.info("BetterSliding 结果覆盖跳过（caller=$caller, node=$node 未由本会话开启过，保持默认关闭）")
+        return false
+    }
+
     /** 上游 handlers.go:977 `applyOutcomeOverrides`。 */
     private fun applyOutcomeOverrides(caller: String): Boolean {
         val p = params ?: return true
@@ -168,29 +188,18 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
             p.outOfRangeOverrideEnable to state.outOfRange,
             p.targetReachableOverrideEnable to state.targetReachable,
         )
+        // 先算清楚"哪些节点真的需要改"，再**合并成一次** OverridePipeline 下发：
+        // 这个调用是已知的崩溃暴露面，次数越少越好。
+        val merged = LinkedHashMap<String, Any?>()
         for ((node, enabled) in outcomes) {
             if (node.isEmpty()) continue
-            if (enabled) {
-                // 打开：记下"这个节点是我们开的"，将来才需要撤销
-                outcomeNodesEnabledByUs.add(node)
-            } else if (!outcomeNodesEnabledByUs.remove(node)) {
-                // 关闭：**只有我们此前真的开过它，才需要下发**。
-                //
-                // 真机实测（2026-09-29）两条决定性事实：
-                //  1. 同一条 {"<节点>":{"enabled":false}} 前三次成功、第四次让框架
-                //     SIGSEGV（tombstone pc 落在 MaaContextOverridePipeline+592）；
-                //  2. 为判断"是不是空操作"而加的 MaaContextGetNodeData 查询，
-                //     **在同一个节点名上同样崩**。
-                // 而这两个节点（…ReserveAlreadySatisfied / …ReserveQuantityReached）
-                // 在上游 SellCore.json 里**默认就是 enabled:false**，所以没开过就不必关，
-                // 这条调用本来就是空操作——省掉它，行为不变，且不再触碰会崩的框架查询。
-                host.info("BetterSliding 结果覆盖跳过（caller=$caller, node=$node 未由本会话开启过，保持默认关闭）")
-                continue
-            }
-            if (!applyPipeline(BetterSlidingOverrides.buildNodeEnableOverride(node, enabled))) {
-                host.warn("BetterSliding 结果覆盖失败（caller=$caller, node=$node, enabled=$enabled）")
-                return false
-            }
+            if (!shouldSendOutcomeEnable(node, enabled, caller)) continue
+            merged[node] = mapOf("enabled" to enabled)
+        }
+        if (merged.isEmpty()) return true
+        if (!applyPipeline(merged)) {
+            host.warn("BetterSliding 结果覆盖失败（caller=$caller, nodes=${merged.keys}）")
+            return false
         }
         return true
     }
@@ -319,11 +328,13 @@ class BetterSlidingSession(private val host: BetterSlidingHost) {
             return true
         }
 
-        if (p.outOfRangeOverrideEnable.isNotEmpty()) {
-            if (!applyPipeline(BetterSlidingOverrides.buildNodeEnableOverride(p.outOfRangeOverrideEnable, false))) {
-                return false
+            if (p.outOfRangeOverrideEnable.isNotEmpty() &&
+                shouldSendOutcomeEnable(p.outOfRangeOverrideEnable, false, "handleGetSliderMaxQuantity")
+            ) {
+                if (!applyPipeline(BetterSlidingOverrides.buildNodeEnableOverride(p.outOfRangeOverrideEnable, false))) {
+                    return false
+                }
             }
-        }
 
         val next = try {
             BetterSlidingDecision.resolveSliderMaxQuantityNext(state.sliderMaxQuantity, state.targetQuantity)
