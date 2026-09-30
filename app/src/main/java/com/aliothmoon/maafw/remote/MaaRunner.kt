@@ -1754,7 +1754,15 @@ class MaaRunner(private val agentHost: AgentHost) {
         val argb = MapLocatorCoarsePure.extractMinimapArgb(frame.pixels, frame.width, frame.height, useAdbRoi = false)
             ?: return null
         val bgr = YoloPreprocess.argbToBgr(argb)
-        return MapNavHeading.estimateFromBgr(bgr, plan.roi.width, plan.roi.height)
+        // 上游把小地图 ROI 中心当玩家箭头中心；本设备实测偏 (+25,+19)（MapLocatorCalibration），
+        // 不补这个偏移则采样窗完全落空、朝向恒为 null，闭环会一直判丢失。
+        return MapNavHeading.estimateFromBgr(
+            bgr,
+            plan.roi.width,
+            plan.roi.height,
+            sampleOffsetX = MapLocatorCalibration.PLAYER_MARKER_OFFSET_X,
+            sampleOffsetY = MapLocatorCalibration.PLAYER_MARKER_OFFSET_Y,
+        )
     }
 
     /** 归一化到 (-180, 180]，用于把绝对朝向换算成相对转向量。 */

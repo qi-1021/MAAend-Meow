@@ -4,6 +4,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
@@ -78,13 +79,25 @@ object MapNavHeading {
      * 从 BGR 交错像素里估玩家朝向：返回角度（度，0=正上/北，顺时针增长），失败返回 null。
      *
      * @param bgr 交错 BGR 字节（`b,g,r,b,g,r,...`），长度至少 `width*height*3`。
+     * @param sampleOffsetX 采样中心相对图中心的水平偏移（**裁剪图像素**，向右为正）。
+     *   上游 `InferYellowArrowRotation` 假定玩家箭头正好在图（小地图 ROI）中心；真机上
+     *   该假设不成立（见 [MapLocatorCalibration]：实测偏约 +25px），调用方须把标定偏移传进来。
+     *   默认 0 = 严格对齐上游合成/测试口径。
+     * @param sampleOffsetY 同上，垂直偏移（向下为正）。
      */
-    fun estimateFromBgr(bgr: ByteArray, width: Int, height: Int): Double? {
+    fun estimateFromBgr(
+        bgr: ByteArray,
+        width: Int,
+        height: Int,
+        sampleOffsetX: Double = 0.0,
+        sampleOffsetY: Double = 0.0,
+    ): Double? {
         if (width <= 0 || height <= 0) return null
         if (bgr.size < width * height * 3) return null
 
-        val cx = width / 2
-        val cy = height / 2
+        // MapAlgorithm.cpp:149-152 —— 采样中心。上游取图中心；本实现允许调用方按设备标定平移。
+        val cx = (width / 2.0 + sampleOffsetX).roundToInt()
+        val cy = (height / 2.0 + sampleOffsetY).roundToInt()
         val r = SAMPLE_RADIUS
         // MapAlgorithm.cpp:154-156 —— ROI 越界（图太小）直接失败。
         if (cx - r < 0 || cy - r < 0 || cx + r > width || cy + r > height) return null

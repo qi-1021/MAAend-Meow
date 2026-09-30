@@ -34,6 +34,21 @@ object MotionSupport {
     private const val TURN_UNITS_PER_DEGREE = 5.0
     private const val TURN_SWIPE_DURATION_MS = 70
 
+    /**
+     * 相机 swipe 的起点。**不能取屏幕正中**：上游 `AdbCameraSwipeDriverConfig`
+     * （`adb_camera_swipe_driver.h:18-22`）是 `origin_x = 1280/2 = 640`、
+     * `origin_y = 720/2 - 96 = 264`；真机实测从 (640,360) 起拖不动视角（下半屏被角色/UI 吞掉），
+     * 换成 (640,264) 后视角才响应。
+     */
+    private const val CAMERA_ORIGIN_X = FRAME_W / 2
+    private const val CAMERA_ORIGIN_Y = FRAME_H / 2 - 96
+
+    /** 上游 `AdbCameraSwipeDriverConfig` 的分步拖拽时序。 */
+    private const val CAMERA_MOVE_STEPS = 6
+    private const val CAMERA_TOUCH_DOWN_HOLD_MS = 8L
+    private const val CAMERA_MOVE_STEP_DELAY_MS = 10L
+    private const val CAMERA_END_HOLD_MS = 30L
+
     // ── 动作按钮（contact id 固定，互不干扰）──
     private const val SPRINT_BTN_X = 1166
     private const val SPRINT_BTN_Y = 620
@@ -110,31 +125,29 @@ object MotionSupport {
     // ── 视角转向 ──
 
     /**
-     * 触摸拖拽转视角。中心起点 + delta 拖动，等价上游 camera_swipe_driver。
+     * 触摸拖拽转视角。起点取上游 `AdbCameraSwipeDriver` 的 (640,264)（非屏幕正中）。
      * dy 正值 = 目标在下方（俯视），dx 正值 = 向右转。
      */
     fun rotateView(dx: Int, dy: Int) {
         if (dx == 0 && dy == 0) return
-        val cx = FRAME_W / 2
-        val cy = FRAME_H / 2
-        val sx = cx.coerceIn(0, FRAME_W - 1)
-        val sy = cy.coerceIn(0, FRAME_H - 1)
-        val ex = (cx + dx).coerceIn(0, FRAME_W - 1)
-        val ey = (cy + dy).coerceIn(0, FRAME_H - 1)
-        // 分段移动模拟连续拖拽，避免一次大位移被游戏判定为 fling
-        val steps = maxOf(1, maxOf(Math.abs(dx), Math.abs(dy)) / 40)
-        val fromX = sx
-        val fromY = sy
-        touchDown(CONTACT_CAMERA, fromX, fromY)
-        for (i in 1..steps) {
-            val t = i.toDouble() / steps
+        val sx = CAMERA_ORIGIN_X
+        val sy = CAMERA_ORIGIN_Y
+        val ex = (sx + dx).coerceIn(0, FRAME_W - 1)
+        val ey = (sy + dy).coerceIn(0, FRAME_H - 1)
+        // 分步移动模拟连续拖拽（上游 ExecuteStableDrag：down→hold→6 步 move→end hold→up），
+        // 避免一次大位移被游戏判定为 fling。
+        touchDown(CONTACT_CAMERA, sx, sy)
+        sleep(CAMERA_TOUCH_DOWN_HOLD_MS)
+        for (i in 1..CAMERA_MOVE_STEPS) {
+            val t = i.toDouble() / CAMERA_MOVE_STEPS
             touchMove(
                 CONTACT_CAMERA,
-                (fromX + (ex - fromX) * t).toInt(),
-                (fromY + (ey - fromY) * t).toInt(),
+                (sx + (ex - sx) * t).toInt(),
+                (sy + (ey - sy) * t).toInt(),
             )
-            sleep(16)
+            if (i < CAMERA_MOVE_STEPS) sleep(CAMERA_MOVE_STEP_DELAY_MS)
         }
+        sleep(CAMERA_END_HOLD_MS)
         touchUp(CONTACT_CAMERA)
         sleep(60) // action_quiet_period_ms：刚转完视角的移动会被吞
     }

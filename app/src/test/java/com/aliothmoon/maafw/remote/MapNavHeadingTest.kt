@@ -193,6 +193,50 @@ class MapNavHeadingTest {
     }
 
     @Test
+    fun `真机几何：玩家箭头偏离中心，须按标定偏移采样才能估出方向`() {
+        // 复现本设备实测（见 MapLocatorCalibration）：小地图 ROI 中心不是玩家箭头中心，
+        // 箭头稳定偏约 (+25,+19)。不传偏移时采样窗（中心 ±12）完全落空 → null；
+        // 传入标定偏移后采样窗落到箭头上 → 正常估出方向。
+        val bw = 118
+        val bh = 120
+        val img = ByteArray(bw * bh * 3)
+        for (i in img.indices step 3) {
+            img[i] = 18
+            img[i + 1] = 20
+            img[i + 2] = 22
+        }
+        // 在 (59+25, 60+19) 处画一个朝东（90°）的箭头。
+        val cx = bw / 2.0 + 25.0
+        val cy = bh / 2.0 + 19.0
+        val rad = 90.0 * Math.PI / 180.0
+        val c = cos(rad)
+        val s = sin(rad)
+        val rel = arrayOf(
+            doubleArrayOf(0.0, -9.0),
+            doubleArrayOf(-6.0, 4.5),
+            doubleArrayOf(6.0, 4.5),
+        )
+        val tri = Array(3) { i ->
+            doubleArrayOf(cx + rel[i][0] * c - rel[i][1] * s, cy + rel[i][0] * s + rel[i][1] * c)
+        }
+        for (y in 0 until bh) {
+            for (x in 0 until bw) {
+                if (pointInTriangle(x.toDouble(), y.toDouble(), tri[0], tri[1], tri[2])) {
+                    val idx = (y * bw + x) * 3
+                    img[idx] = arrowB.toByte()
+                    img[idx + 1] = arrowG.toByte()
+                    img[idx + 2] = arrowR.toByte()
+                }
+            }
+        }
+
+        assertNull("无偏移时上游口径应落空", estimateFromBgr(img, bw, bh))
+        val got = estimateFromBgr(img, bw, bh, sampleOffsetX = 25.0, sampleOffsetY = 19.0)
+        assertTrue("传偏移后仍 null", got != null)
+        assertTrue("got=$got", angularError(got!!, 90.0) < 10.0)
+    }
+
+    @Test
     fun `纯饱和黄不匹配上游白色掩膜`() {
         // 上游掩膜是每通道 ∈[220,255] 的白，而不是色相上的黄：
         // BGR(0,255,255) 的 B 通道为 0，过不了掩膜 → 返回 null。逐条对齐 `MapAlgorithm.cpp:170`。
