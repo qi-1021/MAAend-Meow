@@ -116,6 +116,10 @@ MAIN_FILES=(
   "$SRC/MapLocatorHeatmapPipeline.kt"
   "$SRC/MapLocatorTracking.kt"
   "$SRC/MapLocateAssertPure.kt"
+  "$SRC/WorldMapTypes.kt"
+  "$SRC/WorldMapFindPure.kt"
+  "$SRC/WorldMapSolverPure.kt"
+  "$SRC/WorldMapImagePure.kt"
   "$SUP/SupplementPack.kt"
   "$SUP/SupplementPackLocal.kt"
   "$DIAG/RunDiagnosticsPolicy.kt"
@@ -177,6 +181,10 @@ TEST_FILES=(
   "$TST/MapLocatorHeatmapPipelineTest.kt"
   "$TST/MapLocatorTrackingTest.kt"
   "$TST/MapLocateAssertPureTest.kt"
+  "$TST/WorldMapTypesTest.kt"
+  "$TST/WorldMapFindPureTest.kt"
+  "$TST/WorldMapSolverPureTest.kt"
+  "$TST/WorldMapImagePureTest.kt"
   "$TSUP/SupplementPackTest.kt"
   "$TSUP/SupplementPackLocalTest.kt"
   "$TDIAG/RunDiagnosticsPolicyTest.kt"
@@ -238,6 +246,10 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.MapLocatorHeatmapPipelineTest
   com.aliothmoon.maafw.remote.MapLocatorTrackingTest
   com.aliothmoon.maafw.remote.MapLocateAssertPureTest
+  com.aliothmoon.maafw.remote.WorldMapTypesTest
+  com.aliothmoon.maafw.remote.WorldMapFindPureTest
+  com.aliothmoon.maafw.remote.WorldMapSolverPureTest
+  com.aliothmoon.maafw.remote.WorldMapImagePureTest
   com.aliothmoon.maafw.supplement.SupplementPackTest
   com.aliothmoon.maafw.supplement.SupplementPackLocalTest
   com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest
@@ -398,6 +410,10 @@ fun main() {
         "com.aliothmoon.maafw.remote.MapLocatorHeatmapPipelineTest",
         "com.aliothmoon.maafw.remote.MapLocatorTrackingTest",
         "com.aliothmoon.maafw.remote.MapLocateAssertPureTest",
+        "com.aliothmoon.maafw.remote.WorldMapTypesTest",
+        "com.aliothmoon.maafw.remote.WorldMapFindPureTest",
+        "com.aliothmoon.maafw.remote.WorldMapSolverPureTest",
+        "com.aliothmoon.maafw.remote.WorldMapImagePureTest",
         "com.aliothmoon.maafw.supplement.SupplementPackTest",
         "com.aliothmoon.maafw.supplement.SupplementPackLocalTest",
         "com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest",

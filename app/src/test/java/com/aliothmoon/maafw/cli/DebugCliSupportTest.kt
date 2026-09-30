@@ -360,6 +360,55 @@ class DebugCliSupportTest {
         assertEquals(DebugCliIntent.TrackLocate(null, null), ok("tracklocate reset", ctx(controllerReady = false)))
     }
 
+    // ───────────────────── mapfind ─────────────────────
+
+    @Test
+    fun `mapfind 三参数只解坐标`() {
+        assertEquals(
+            DebugCliIntent.MapFind("Wuling", 942.6, 1781.2, null),
+            ok("mapfind Wuling 942.6 1781.2"),
+        )
+    }
+
+    @Test
+    fun `mapfind 带可选 icon`() {
+        assertEquals(
+            DebugCliIntent.MapFind("Wuling", 942.6, 1781.2, "TeleportAnchor"),
+            ok("mapfind Wuling 942.6 1781.2 TeleportAnchor"),
+        )
+    }
+
+    @Test
+    fun `mapfind 命令名大小写不敏感`() {
+        assertEquals(
+            DebugCliIntent.MapFind("Z", 1.0, 2.0, null),
+            ok("MapFind Z 1 2"),
+        )
+    }
+
+    @Test
+    fun `mapfind 缺少参数报错`() {
+        assertTrue(failure("mapfind").contains("需要 <zone> <at_x> <at_y>"))
+        assertTrue(failure("mapfind Wuling").contains("需要 <zone> <at_x> <at_y>"))
+        assertTrue(failure("mapfind Wuling 1").contains("需要 <zone> <at_x> <at_y>"))
+    }
+
+    @Test
+    fun `mapfind 坐标非数字报错`() {
+        assertTrue(failure("mapfind Wuling abc 2").contains("必须是数字"))
+        assertTrue(failure("mapfind Wuling 1 xyz").contains("必须是数字"))
+    }
+
+    @Test
+    fun `mapfind 过多参数报错`() {
+        assertTrue(failure("mapfind Wuling 1 2 Icon extra").contains("接受 <zone> <at_x> <at_y> [icon]"))
+    }
+
+    @Test
+    fun `mapfind controller 未就绪被拒绝`() {
+        assertTrue(failure("mapfind Wuling 1 2", ctx(controllerReady = false)).contains("controller 未就绪"))
+    }
+
     // ───────────────────── 渲染与常量 ─────────────────────
 
     @Test
@@ -381,7 +430,7 @@ class DebugCliSupportTest {
     @Test
     fun `helpText 列出全部命令`() {
         val text = DebugCliSupport.helpText()
-        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "probe-result", "overrideprobe", "yoloprobe", "coarselocate", "tracklocate")) {
+        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "probe-result", "overrideprobe", "yoloprobe", "coarselocate", "tracklocate", "mapfind")) {
             assertTrue("helpText 缺少 $command", text.contains(command))
         }
     }

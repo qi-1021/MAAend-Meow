@@ -207,26 +207,54 @@ GROWTH_CHAMBER_GROWBACK_INTERVAL_MS = 3000
 #   AutoCollectRouteNAssertLocation 直接命中，路线继续往下跑；不在目标 zone 时
 #   也只是正常判失败，不再空转刷屏。
 #
-# 覆盖范围（已核对 AutoCollect 全部路线的 SceneEnterWorld* → 锚点映射，见报告）：
-#   6 个武陵 WithPick 锚点 + 1 个谷地枢纽 WithPick 锚点（均为 MapFind 恒假）
-#   + 2 个谷地旧模板锚点（Route4 供能高地、Route13 矿脉源区）。
+# 覆盖范围（已独立扫描 SceneManager 下全部 `*EnterWorldAnchor*` 节点定义，共 18 个）：
+#   A 类 WithPick（MapFind 恒假 stub；next 末位是 [JumpBack][Anchor]TeleportPickAnchor）：
+#     武陵 9 个（WulingCity / JingyuValley / MarkerStone / TestArea /
+#     NorthWulingExclusionZone / SnowyForest / QingboStockade / SwordVaultDale /
+#     YinglungPass）+ 谷地枢纽 TheHub 1 个 = 10 个。
+#   B 类旧模板（SwipeToStep + Try1/2/3，真机模板 0.383/0.9 失配；next 末位是
+#     [JumpBack][Anchor]SwipeToStep4Anchor）：武陵 4 个（JingyuValley / WulingCity /
+#     MarkerStone / TestArea）+ 谷地 3 个（OriginiumSciencePark / PowerPlateau /
+#     OriginLodespring）+ 帝江 1 个（Dijiang）= 8 个。
+#   10 + 8 = 18。两类失败都会让锚点 next 整轮不命中（A 类 MapFind 恒假、B 类模板失配），
+#   末位兜底让首轮扫描即命中，真实候选仍排前面优先。
 AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE = "__ScenePrivateAnyExit"
 AUTOCOLLECT_ENTERWORLD_FALLBACK_FILE = (
     ASSETS_ROOT / "resource" / "pipeline" / "SceneManager" / "SceneCommon.json"
 )
+# 节点名里用于「独立枚举」的标记：verify 会据此重扫产物，任何新增/改名都会被抓住。
+AUTOCOLLECT_ENTERWORLD_ANCHOR_MARKER = "EnterWorldAnchor"
+# 兜底应覆盖的锚点总数（与下面枚举逐项对应；verify 会独立复算并断言相等，防止以后再漏）。
+AUTOCOLLECT_ENTERWORLD_EXPECTED_COUNT = 18
 AUTOCOLLECT_ENTERWORLD_ANCHORS = {
     "resource/pipeline/SceneManager/SceneWuling.json": [
+        # A 类 WithPick（MapFind 恒假）—— 其中 6 个上轮已补，其余 3 个本轮补。
         "__ScenePrivateMapWulingWulingCityEnterWorldAnchorWithPick",
         "__ScenePrivateMapWulingJingyuValleyEnterWorldAnchorWithPick",
         "__ScenePrivateMapWulingMarkerStoneEnterWorldAnchorWithPick",
         "__ScenePrivateMapWulingTestAreaEnterWorldAnchorWithPick",
         "__ScenePrivateMapWulingNorthWulingExclusionZoneEnterWorldAnchorWithPick",
         "__ScenePrivateMapWulingSnowyForestEnterWorldAnchorWithPick",
+        "__ScenePrivateMapWulingQingboStockadeEnterWorldAnchorWithPick",
+        "__ScenePrivateMapWulingSwordVaultDaleEnterWorldAnchorWithPick",
+        "__ScenePrivateMapWulingYinglungPassEnterWorldAnchorWithPick",
+        # B 类旧模板（SwipeToStep 模板失配）—— 本轮补。
+        "__ScenePrivateMapWulingJingyuValleyEnterWorldAnchor",
+        "__ScenePrivateMapWulingWulingCityEnterWorldAnchor",
+        "__ScenePrivateMapWulingMarkerStoneEnterWorldAnchor",
+        "__ScenePrivateMapWulingTestAreaEnterWorldAnchor",
     ],
     "resource/pipeline/SceneManager/SceneValleyIV.json": [
+        # A 类 WithPick —— 上轮已补。
         "__ScenePrivateMapValleyIVTheHubEnterWorldAnchorWithPick",
+        # B 类旧模板 —— PowerPlateau/OriginLodespring 上轮已补，OriginiumSciencePark 本轮补。
         "__ScenePrivateMapValleyIVPowerPlateauEnterWorldAnchor",
         "__ScenePrivateMapValleyIVOriginLodespringEnterWorldAnchor",
+        "__ScenePrivateMapValleyIVOriginiumScienceParkEnterWorldAnchor",
+    ],
+    "resource/pipeline/SceneManager/SceneDijiang.json": [
+        # B 类旧模板 —— 本轮补。
+        "__ScenePrivateMapDijiangEnterWorldAnchor",
     ],
 }
 
@@ -1637,12 +1665,38 @@ def patch_autocollect_enterworld_fallback():
     )
 
 
+def discover_enterworld_anchors() -> dict:
+    """
+    独立枚举：递归扫描 base resource/pipeline 下所有 JSON 的顶层节点名，收集含
+    AUTOCOLLECT_ENTERWORLD_ANCHOR_MARKER 的节点定义，返回 {节点名: 相对路径}。
+
+    这是 verify 的「第二种真相」：不依赖上面那份手写枚举。上游若新增一个进世界锚点、
+    或改了锚点所在文件，这里会立刻发现与枚举不一致 → 构建期报错，逼人复核，防止再漏。
+    """
+    found = {}
+    pipeline_root = ASSETS_ROOT / "resource" / "pipeline"
+    for path in sorted(pipeline_root.rglob("*.json")):
+        data = load_jsonc(path)
+        if not isinstance(data, dict):
+            continue
+        rel = str(path.relative_to(ASSETS_ROOT))
+        for name in data.keys():
+            if AUTOCOLLECT_ENTERWORLD_ANCHOR_MARKER in name:
+                found[name] = rel
+    return found
+
+
 def verify_autocollect_enterworld_fallback():
     """
     构建期断言：核对采集进世界兜底确实落在最终产物里。
 
     上游同步若改名/覆盖，补丁会「静默失效」——照样编得过、出得了包，只是真机又回到
     「MapFind 21 连击 + on_error 帧 + 整条路线失败」。这里读回最终产物核对。
+
+    保证「不再漏」的两道闸：
+      ① 独立重扫产物里的所有 EnterWorldAnchor 节点，断言其**数量 == 期望值**，
+         且与手写枚举**双向一一对应**（新增/改名/移文件都会被抓）；
+      ② 对枚举里每个锚点逐项断言 next 末位 == 兜底 且 on_error 含兜底。
     """
     problems = []
 
@@ -1653,6 +1707,45 @@ def verify_autocollect_enterworld_fallback():
             f"{fallback_file} 缺少兜底节点 {AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE}"
         )
 
+    enumerated = {
+        name: rel
+        for rel, node_names in AUTOCOLLECT_ENTERWORLD_ANCHORS.items()
+        for name in node_names
+    }
+    discovered = discover_enterworld_anchors()
+
+    # ① 数量闸：枚举与独立扫描都必须恰好等于期望值。
+    if len(enumerated) != AUTOCOLLECT_ENTERWORLD_EXPECTED_COUNT:
+        problems.append(
+            f"手写枚举锚点数 {len(enumerated)} != 期望 {AUTOCOLLECT_ENTERWORLD_EXPECTED_COUNT}"
+        )
+    if len(discovered) != AUTOCOLLECT_ENTERWORLD_EXPECTED_COUNT:
+        problems.append(
+            f"产物里扫描到的 EnterWorldAnchor 节点数 {len(discovered)} != "
+            f"期望 {AUTOCOLLECT_ENTERWORLD_EXPECTED_COUNT}（上游可能新增/改名/移除）"
+        )
+    unlisted = sorted(set(discovered) - set(enumerated))
+    if unlisted:
+        problems.append(
+            "产物里存在但未纳入兜底枚举的 EnterWorldAnchor 节点（漏补！）："
+            + "、".join(f"{n}@{discovered[n]}" for n in unlisted)
+        )
+    vanished = sorted(set(enumerated) - set(discovered))
+    if vanished:
+        problems.append(
+            "枚举里列出但产物里已找不到的 EnterWorldAnchor 节点（上游改名/移除）："
+            + "、".join(f"{n}@{enumerated[n]}" for n in vanished)
+        )
+    moved = sorted(
+        n for n in set(enumerated) & set(discovered) if enumerated[n] != discovered[n]
+    )
+    if moved:
+        problems.append(
+            "锚点所在文件与枚举不一致（上游移动了节点）："
+            + "、".join(f"{n}: {enumerated[n]} -> {discovered[n]}" for n in moved)
+        )
+
+    # ② 逐项闸：next 末位 + on_error。
     for rel, node_names in AUTOCOLLECT_ENTERWORLD_ANCHORS.items():
         path = ASSETS_ROOT / rel
         data = load_jsonc(path) if path.is_file() else {}
@@ -1680,7 +1773,10 @@ def verify_autocollect_enterworld_fallback():
             "构建期断言失败：采集进世界兜底不完整（上游同步可能覆盖/改名）：\n  "
             + "\n  ".join(problems)
         )
-    log("Asserted AutoCollect enter-world anchors carry next-tail + on_error fallback.")
+    log(
+        f"Asserted {len(discovered)} AutoCollect enter-world anchors carry "
+        f"next-tail + on_error fallback."
+    )
 
 
 def main():

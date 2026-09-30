@@ -252,6 +252,8 @@ object DebugCliServer {
             is DebugCliIntent.CoarseLocate -> host.coarseLocate(intent.imagePath, intent.zone)
 
             is DebugCliIntent.TrackLocate -> host.trackLocate(intent.imagePath, intent.zone)
+
+            is DebugCliIntent.MapFind -> host.mapFind(intent.zone, intent.atX, intent.atY, intent.icon)
         }
 
     /**
@@ -399,6 +401,15 @@ interface DebugCliHost {
      * [imagePath] 为 null 时清空状态机（`tracklocate reset`）。
      */
     fun trackLocate(imagePath: String?, zone: String?): List<String>
+
+    /**
+     * 世界地图找图标单点探针（`mapfind`）：在**当前全屏大地图画面**上解 viewport，
+     * 把目标底图坐标 ([atX],[atY]) 投到屏幕；给了 [icon] 再确认图标。
+     *
+     * 只读，不触发 ZoomOut / 拖动 / next 交回。返回多行结果（zone / 底图尺寸 / viewport /
+     * 目标屏幕框 / 是否命中 / 耗时），解不出时如实说明。
+     */
+    fun mapFind(zone: String, atX: Double, atY: Double, icon: String?): List<String>
 }
 
 /** [DebugCliHost.ocr] 的结果；[text] 为 null 时看 [reason]。 */

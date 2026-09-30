@@ -555,6 +555,9 @@ class RemoteServiceImpl : RemoteService.Stub() {
 
         override fun trackLocate(imagePath: String?, zone: String?): List<String> =
             runner.debugTrackLocate(imagePath, zone)
+
+        override fun mapFind(zone: String, atX: Double, atY: Double, icon: String?): List<String> =
+            runner.debugMapFind(zone, atX, atY, icon)
     }
 
     private companion object {

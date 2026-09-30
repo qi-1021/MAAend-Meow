@@ -4841,6 +4841,155 @@ class MaaRunner(private val agentHost: AgentHost) {
         return coarseLines + trackLines
     }
 
+    // ───────────────────── MapFind 调试探针（mapfind，仅 debug）─────────────────────
+    //
+    // 与 [mapFindRun] 同一条求解链（capture → SolveViewport → toScreen → ConfirmSpot），
+    // 但**只读**：不触发 ZoomOut、不拖动、不交回 next。用途：真机在「全屏大地图」上单点
+    // 验证 WorldMapFindPure / WorldMapSolverPure / WorldMapImagePure 的移植是否成立
+    // （输出 viewport / 目标屏幕框 / 是否命中 / 耗时）。
+
+    private val debugMapFindLock = Any()
+
+    @Volatile
+    private var debugMapFindResult: List<String>? = null
+
+    @Volatile
+    private var debugMapFindZone: String? = null
+
+    @Volatile
+    private var debugMapFindAt: DoubleArray? = null
+
+    @Volatile
+    private var debugMapFindIcon: String? = null
+
+    /**
+     * 在**当前全屏大地图**上做一次 MapFind 求解探针（仅 debug CLI `mapfind` 调用）。
+     *
+     * 借用临时 Custom 识别节点的回调拿到 `MaaContext`（外部拿不到），在回调里跑
+     * `SolveViewport`（多尺度 TemplateMatch）→ 目标投屏 → `ConfirmSpot`（给了 icon 时）。
+     * 只读，任何一步解不出来都如实报告，不伪造坐标。
+     */
+    fun debugMapFind(zone: String, atX: Double, atY: Double, icon: String?): List<String> {
+        if (!BuildConfig.DEBUG) return listOf("error: mapfind 仅在 debug 构建可用")
+        if (zone.isBlank()) return listOf("error: mapfind 的 zone 不能为空")
+        val lib = MaaFrameworkLoader.library ?: return listOf("error: MaaFramework 未加载")
+        val res = synchronized(lifecycleLock) { resource }
+            ?: return listOf("error: resource 未初始化（先跑一次任务）")
+        if (!ensureWorldMapAssets(res)) {
+            return listOf("error: 世界地图资产未加载（resource/image/SceneManager/MapIcons.json）")
+        }
+        loadWorldMapBase(zone)
+            ?: return listOf("error: zone=$zone 找不到 Base 底图（resource/image/MapLocator/$zone/*base*.png）")
+        val iconName = icon?.takeIf { it.isNotBlank() }
+        if (iconName != null && worldMapIconTable[iconName] == null) {
+            val sample = worldMapIconTable.keys.take(8).joinToString(", ")
+            return listOf("error: 图标表无此项 $iconName（例如：$sample）")
+        }
+
+        val startedAt = System.nanoTime()
+        synchronized(debugMapFindLock) {
+            debugMapFindResult = null
+            debugMapFindZone = zone
+            debugMapFindAt = doubleArrayOf(atX, atY)
+            debugMapFindIcon = iconName
+            val error = postProbeAndWait(lib, DEBUG_MAPFIND_NODE, DEBUG_MAPFIND_RECO, null, requireFrame = false)
+            if (error != null) return listOf("error: $error")
+            val result = debugMapFindResult ?: return listOf("error: 探针未返回结果")
+            return result + "cost: ${(System.nanoTime() - startedAt) / 1_000_000}ms"
+        }
+    }
+
+    /** 取探针可用的整帧 ARGB：优先框架传入的 [image]，为空再主动截一帧。 */
+    private fun probeScreenArgb(lib: MaaFrameworkLibrary, image: Pointer?): ArgbImage? {
+        if (image != null && lib.MaaImageBufferIsEmpty(image).toInt() == 0) {
+            decodeArgbFromBuffer(lib, image)?.let { if (it.width > 0 && it.height > 0) return it }
+        }
+        return captureArgbFrame(lib)
+    }
+
+    /**
+     * `mapfind` 探针识别：在回调里对当前帧解 viewport、投屏、按图标确认。
+     * 只读，绝不拖动或改 pipeline；解不出/认不出如实写进 [debugMapFindResult]。
+     */
+    private val debugCliMapFindCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback {
+            context, _, _, _, _, image, _, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null) {
+            debugMapFindResult = listOf("error: 探针回调缺少 context")
+            return@MaaCustomRecognitionCallback 0
+        }
+        val zone = debugMapFindZone
+        val at = debugMapFindAt
+        val base = if (zone != null) loadWorldMapBase(zone) else null
+        if (zone == null || at == null || base == null) {
+            debugMapFindResult = listOf("error: 探针缺少 zone/at/底图")
+            return@MaaCustomRecognitionCallback 0
+        }
+        try {
+            val frame = probeScreenArgb(lib, image) ?: run {
+                debugMapFindResult = listOf("error: 取当前帧失败（先让游戏停在全屏大地图页）")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val bgr = YoloPreprocess.argbToBgr(frame.pixels)
+            val gray = MapLocatorRefinePure.bgrToGray(bgr, frame.width, frame.height) ?: run {
+                debugMapFindResult = listOf("error: 整帧转灰度失败")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val screen = WorldMapGrayImage(gray, frame.width, frame.height)
+            val viewport = solveWorldMapViewport(lib, context, screen, base, WorldMapViewportConfig())
+            val iconName = debugMapFindIcon
+            val spec = iconName?.let { worldMapIconTable[it] }
+            var hit: WorldMapSpotHit? = null
+            if (viewport != null && spec != null) {
+                val expected = viewport.toScreen(at[0], at[1])
+                hit = confirmWorldMapSpot(lib, context, spec, screen, expected[0], expected[1], viewport.scale)
+            }
+            val outcome = WorldMapFindPure.ProbeOutcome(
+                zone = zone,
+                baseWidth = base.fullWidth,
+                baseHeight = base.fullHeight,
+                atX = at[0],
+                atY = at[1],
+                viewport = viewport,
+                icon = iconName,
+                hit = hit,
+                wantUnlocked = true,
+            )
+            debugMapFindResult = listOf("frame: ${frame.width}x${frame.height}") +
+                WorldMapFindPure.describeProbe(outcome)
+            if (hit != null && outBox != null) {
+                val box = WorldMapTypes.spotBox(hit)
+                lib.MaaRectSet(outBox, box.x, box.y, box.width, box.height)
+            }
+            RunDiagnostics.note(
+                "worldmap",
+                "mapfind 探针｜zone=$zone viewport=${viewport?.scale ?: "FAILED"} " +
+                    "icon=${iconName ?: "-"} hit=${hit != null}",
+                mapOf(
+                    "stage" to "mapfind_probe",
+                    "zone" to zone,
+                    "base_size" to listOf(base.fullWidth, base.fullHeight),
+                    "at" to listOf(at[0], at[1]),
+                    "viewport_scale" to viewport?.scale,
+                    "viewport_score" to viewport?.score,
+                    "viewport_delta" to viewport?.delta,
+                    "icon" to iconName,
+                    "hit" to (hit != null),
+                    "hit_score" to hit?.score,
+                ),
+            )
+            Ln.i(
+                "MaaRunner: mapfind 探针 zone=$zone viewport=${viewport?.scale ?: "FAILED"} " +
+                    "icon=${iconName ?: "-"} hit=${hit != null}",
+            )
+            if (hit != null) 1 else 0
+        } catch (t: Throwable) {
+            debugMapFindResult = listOf("error: ${t.javaClass.simpleName}: ${t.message}")
+            Ln.e("MaaRunner: mapfind 探针异常", t)
+            0
+        }
+    }
+
     // ───────────────────── MapLocateAssertLocation 真实实现 ─────────────────────
     //
     // 上游 `MapLocateAction.cpp:404-471`：`resetTrackingState` → 最多 60 帧、每帧 250ms
@@ -5263,6 +5412,668 @@ class MaaRunner(private val agentHost: AgentHost) {
             }
             1
         }
+    }
+
+    // ───────────────────── MapFind 真实实现（世界地图找图标） ─────────────────────
+    //
+    // 上游 `WorldMap/WorldMapFind.cpp` + `WorldMapSolver.cpp`。核心：大地图铺满全屏时，
+    // 屏幕内容与区域底图之间是一个平移+缩放的相似变换（无旋转）。先在屏幕上解出这个
+    // viewport（粗解在降采样底图上扫全尺度带 → 细解回原尺度在粗解邻域定尺度），再把目标
+    // 底图坐标投到屏幕；到期望位置附近按图标模板确认（窗口 + 判定圈），命中才把**图标本体**
+    // 的点框交回框架 Click。任何一步解不出来都如实返回 0：宁可失败，绝不交一个算出来的
+    // 空位置去点（那比恒假更危险）。
+    //
+    // 复用的既有部件：框架 `TemplateMatch`（单尺度，逐档调用即多尺度）+ 运行时模板
+    // `MaaContextOverrideImage`（不落盘，见 MapLocateAssert 同款链路）。纯逻辑全部下沉到
+    // [WorldMapTypes] / [WorldMapFindPure] / [WorldMapSolverPure] / [WorldMapImagePure] 并可本机回归。
+    //
+    // 与上游的**已知边界**（本轮报告有述）：
+    //  - `vote_grid` 分块投票（整窗被迷雾污染时的回退）未实现；
+    //  - `gold_ratio` 解锁判定未实现：图标一律按 unlocked=true 处理（只影响 Core / RecycleBin
+    //    这类带 gold_ratio 的图标，且当前管线从未用 `state` 请求锁定态）；
+    //  - 玩家标记（白三角）遮蔽回退未实现：人站在图标上时认不出就如实失败，不会误点；
+    //  - 拖动兑现率自补偿 / 顶边界多拍判定未实现：只影响重试效率，不影响正确性；
+    //  - 图标 alpha 掩膜未参与匹配（框架 `TemplateMatch` 不吃 mask），热点取模板中心。
+
+    /** 屏幕灰度帧；大地图全屏，灰度足以做相似变换求解。 */
+    private class WorldMapGrayImage(val gray: ByteArray, val width: Int, val height: Int)
+
+    /** 区域底图：全分辨率灰度 + 按 `coarseDownscale` 降采样的灰度。 */
+    private class WorldMapBaseAssets(
+        val fullGray: ByteArray,
+        val fullWidth: Int,
+        val fullHeight: Int,
+        val smallGray: ByteArray,
+        val smallWidth: Int,
+        val smallHeight: Int,
+    )
+
+    /** 一次单尺度匹配的峰：分数 + 框（[x, y, w, h]，模板左上角）。 */
+    private class WorldMapMatch(val score: Double, val box: IntArray)
+
+    private var worldMapAssetsFor: Pointer? = null
+    private var worldMapIconTable: Map<String, WorldMapIconSpec> = emptyMap()
+    private var worldMapTemplateDir: File? = null
+    private val worldMapBaseCache = HashMap<String, WorldMapBaseAssets?>()
+    private val worldMapTemplateCache = HashMap<String, WorldMapGrayImage?>()
+
+    /** 惰性加载图标表与模板目录；按 resource 指针缓存，换了 resource 必须重来。 */
+    private fun ensureWorldMapAssets(res: Pointer): Boolean {
+        if (worldMapAssetsFor == res && worldMapTemplateDir != null) return true
+        synchronized(mapLocateAssetsLock) {
+            if (worldMapAssetsFor == res && worldMapTemplateDir != null) return true
+            val root = projectRoot ?: return false
+            val imageRoot = File(root, "resource/image")
+            val tableFile = File(imageRoot, "SceneManager/MapIcons.json")
+            if (!tableFile.isFile) {
+                Ln.w("MaaRunner: MapFind 缺图标表 ${tableFile.path}")
+                return false
+            }
+            val table = runCatching { WorldMapFindPure.parseIconTable(tableFile.readText()) }
+                .getOrElse {
+                    Ln.w("MaaRunner: MapFind 图标表读取失败：${it.message}")
+                    emptyMap()
+                }
+            if (table.isEmpty()) {
+                Ln.w("MaaRunner: MapFind 图标表为空")
+                return false
+            }
+            worldMapIconTable = table
+            worldMapTemplateDir = File(imageRoot, "SceneManager")
+            worldMapBaseCache.clear()
+            worldMapTemplateCache.clear()
+            worldMapAssetsFor = res
+            Ln.i("MaaRunner: MapFind 图标表已加载 icons=${table.keys}")
+            return true
+        }
+    }
+
+    /** 读某 zone 的区域底图（全灰度 + 降采样灰度）。上游 `LoadZoneBase` + `SolveViewport` 降采样。 */
+    private fun loadWorldMapBase(zone: String): WorldMapBaseAssets? {
+        worldMapBaseCache[zone]?.let { return it }
+        synchronized(mapLocateAssetsLock) {
+            worldMapBaseCache[zone]?.let { return it }
+            val root = projectRoot ?: return null
+            val zoneDir = File(File(root, "resource/image/MapLocator"), zone)
+            if (!zoneDir.isDirectory) {
+                worldMapBaseCache[zone] = null
+                return null
+            }
+            val names = zoneDir.listFiles()?.map { it.name } ?: emptyList()
+            val baseName = WorldMapFindPure.findZoneBaseFile(names)
+            if (baseName == null) {
+                Ln.w("MaaRunner: MapFind zone=$zone 找不到 Base 底图")
+                worldMapBaseCache[zone] = null
+                return null
+            }
+            val bgr = decodeBgr(File(zoneDir, baseName))
+            if (bgr == null) {
+                worldMapBaseCache[zone] = null
+                return null
+            }
+            val gray = MapLocatorRefinePure.bgrToGray(bgr.bytes, bgr.width, bgr.height)
+            if (gray == null) {
+                worldMapBaseCache[zone] = null
+                return null
+            }
+            val down = WorldMapViewportConfig().coarseDownscale.coerceAtLeast(1)
+            val (sw, sh) = WorldMapImagePure.downscaledSize(bgr.width, bgr.height, down)
+            val small = WorldMapImagePure.downscaleGrayArea(gray, bgr.width, bgr.height, down) ?: gray
+            val assets = WorldMapBaseAssets(gray, bgr.width, bgr.height, small, sw, sh)
+            worldMapBaseCache[zone] = assets
+            Ln.i("MaaRunner: MapFind zone=$zone 底图 ${bgr.width}x${bgr.height} → 粗解 ${sw}x$sh")
+            return assets
+        }
+    }
+
+    /** 读一张图标模板（灰度）。名称可为相对 `SceneManager` 的路径（如 `../AutoDelivery/...`）。 */
+    private fun loadWorldMapTemplate(name: String): WorldMapGrayImage? {
+        worldMapTemplateCache[name]?.let { return it }
+        synchronized(mapLocateAssetsLock) {
+            worldMapTemplateCache[name]?.let { return it }
+            val dir = worldMapTemplateDir ?: return null
+            val file = runCatching { File(dir, name).canonicalFile }.getOrNull() ?: return null
+            if (!file.isFile) {
+                Ln.w("MaaRunner: MapFind 图标模板不存在 $name")
+                worldMapTemplateCache[name] = null
+                return null
+            }
+            val bgr = decodeBgr(file)
+            if (bgr == null) {
+                worldMapTemplateCache[name] = null
+                return null
+            }
+            val gray = MapLocatorRefinePure.bgrToGray(bgr.bytes, bgr.width, bgr.height)
+            if (gray == null) {
+                worldMapTemplateCache[name] = null
+                return null
+            }
+            val img = WorldMapGrayImage(gray, bgr.width, bgr.height)
+            worldMapTemplateCache[name] = img
+            return img
+        }
+    }
+
+    /** 主动截一帧并转灰度；失败返回 null。 */
+    private fun captureWorldMapScreen(lib: MaaFrameworkLibrary): WorldMapGrayImage? {
+        val frame = captureArgbFrame(lib) ?: return null
+        val bgr = YoloPreprocess.argbToBgr(frame.pixels)
+        val gray = MapLocatorRefinePure.bgrToGray(bgr, frame.width, frame.height) ?: return null
+        return WorldMapGrayImage(gray, frame.width, frame.height)
+    }
+
+    /**
+     * 在 [searchBuf]（一张 BGR 图）上用运行时模板 [patchGray] 跑一次单尺度 `TemplateMatch`。
+     *
+     * [threshold] 传 0.0 时框架总会给出最高分（供跨档比较）；[patchGray] 复制成 BGR 再喂框架，
+     * 三通道同值等价于灰度。模板 buffer 每次调用即销毁；搜索图 buffer 由调用方持有。
+     */
+    private fun runWorldMapMatch(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        searchBuf: Pointer,
+        patchGray: ByteArray,
+        patchWidth: Int,
+        patchHeight: Int,
+        keepAlive: MutableList<Memory>,
+        threshold: Double,
+    ): WorldMapMatch? {
+        if (patchWidth <= 0 || patchHeight <= 0) return null
+        val templBuf = lib.MaaImageBufferCreate() ?: return null
+        return try {
+            if (!setRawBgr(lib, templBuf, WorldMapImagePure.grayToBgr(patchGray), patchWidth, patchHeight, keepAlive)) {
+                return null
+            }
+            if (lib.MaaContextOverrideImage(context, MAP_FIND_TEMPLATE, templBuf).toInt() == 0) return null
+            val nodeOverride = MapLocatorProbeSupport.buildTemplateMatchOverride(
+                nodeName = MAP_FIND_TM_NODE,
+                templateName = MAP_FIND_TEMPLATE,
+                method = MapLocatorProbeSupport.DEFAULT_METHOD,
+                greenMask = false,
+                threshold = threshold,
+                roi = null,
+            )
+            val res = runRecognitionOnce(lib, context, searchBuf, MAP_FIND_TM_NODE, nodeOverride) ?: return null
+            val score = MapLocatorCoarsePure.bestMatchScore(res.detailJson) ?: return null
+            val box = res.box ?: return null
+            if (box.size < 4 || box[2] <= 0 || box[3] <= 0) return null
+            WorldMapMatch(score, box)
+        } finally {
+            lib.MaaImageBufferDestroy(templBuf)
+        }
+    }
+
+    /**
+     * 解一帧的 viewport（上游 `SolveViewport`）：粗解在降采样底图上扫尺度带取最优档，
+     * 细解在粗解落点邻域定尺度，置信不足返回 null。
+     */
+    private fun solveWorldMapViewport(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        screen: WorldMapGrayImage,
+        base: WorldMapBaseAssets,
+        cfg: WorldMapViewportConfig,
+    ): WorldMapViewport? {
+        val roiRect = WorldMapTypes.safeArea(screen.width, screen.height, cfg.roi, 0)
+        if (roiRect.width < WorldMapTypes.MIN_TEMPLATE_SIDE || roiRect.height < WorldMapTypes.MIN_TEMPLATE_SIDE) return null
+        val roiGray = WorldMapImagePure.cropGray(
+            screen.gray, screen.width, screen.height, roiRect.x, roiRect.y, roiRect.width, roiRect.height,
+        ) ?: return null
+        if (base.smallWidth < WorldMapTypes.MIN_TEMPLATE_SIDE || base.smallHeight < WorldMapTypes.MIN_TEMPLATE_SIDE) return null
+
+        val down = cfg.coarseDownscale.coerceAtLeast(1)
+        val (roiSmallW, roiSmallH) = WorldMapImagePure.downscaledSize(roiRect.width, roiRect.height, down)
+        val roiSmall = WorldMapImagePure.downscaleGrayArea(roiGray, roiRect.width, roiRect.height, down) ?: return null
+
+        val keepAlive = mutableListOf<Memory>()
+        var baseSmallBuf: Pointer? = null
+        var windowBuf: Pointer? = null
+        try {
+            baseSmallBuf = lib.MaaImageBufferCreate() ?: return null
+            if (!setRawBgr(lib, baseSmallBuf, WorldMapImagePure.grayToBgr(base.smallGray), base.smallWidth, base.smallHeight, keepAlive)) {
+                return null
+            }
+
+            val coarseScales = WorldMapSolverPure.coarseScalesFiltered(cfg, roiSmallW, roiSmallH, base.smallWidth, base.smallHeight)
+            val probes = ArrayList<WorldMapSolverPure.CoarseProbe>(coarseScales.size)
+            for (scale in coarseScales) {
+                val tw = WorldMapTypes.lround(roiSmallW * scale)
+                val th = WorldMapTypes.lround(roiSmallH * scale)
+                if (tw < WorldMapTypes.MIN_TEMPLATE_SIDE || th < WorldMapTypes.MIN_TEMPLATE_SIDE) {
+                    probes += WorldMapSolverPure.CoarseProbe(scale, null)
+                    continue
+                }
+                val patch = WorldMapImagePure.resizeGrayBilinear(roiSmall, roiSmallW, roiSmallH, tw, th)
+                val match = patch?.let { runWorldMapMatch(lib, context, baseSmallBuf, it, tw, th, keepAlive, 0.0) }
+                val peak = match?.let {
+                    WorldMapPeak(it.score, it.box[0].toDouble(), it.box[1].toDouble(), it.box[2], it.box[3])
+                }
+                probes += WorldMapSolverPure.CoarseProbe(scale, peak)
+            }
+            val coarse = WorldMapSolverPure.bestCoarse(probes) ?: return null
+            val rungs = WorldMapSolverPure.coarseRungs(probes)
+            val plan = WorldMapSolverPure.finePlan(
+                cfg, base.fullWidth, base.fullHeight, roiRect.width, roiRect.height, coarse,
+            ) ?: return null
+            val windowGray = WorldMapImagePure.cropGray(
+                base.fullGray, base.fullWidth, base.fullHeight,
+                plan.window.x, plan.window.y, plan.window.width, plan.window.height,
+            ) ?: return null
+            windowBuf = lib.MaaImageBufferCreate() ?: return null
+            if (!setRawBgr(lib, windowBuf, WorldMapImagePure.grayToBgr(windowGray), plan.window.width, plan.window.height, keepAlive)) {
+                return null
+            }
+
+            var bestScale = 0.0
+            var bestPeak: WorldMapPeak? = null
+            for (scale in plan.scales) {
+                val tw = WorldMapTypes.lround(roiRect.width * scale)
+                val th = WorldMapTypes.lround(roiRect.height * scale)
+                if (tw < WorldMapTypes.MIN_TEMPLATE_SIDE || th < WorldMapTypes.MIN_TEMPLATE_SIDE) continue
+                val patch = WorldMapImagePure.resizeGrayBilinear(roiGray, roiRect.width, roiRect.height, tw, th) ?: continue
+                val match = runWorldMapMatch(lib, context, windowBuf, patch, tw, th, keepAlive, 0.0) ?: continue
+                val peak = WorldMapPeak(match.score, match.box[0].toDouble(), match.box[1].toDouble(), match.box[2], match.box[3])
+                if (bestPeak == null || peak.score > bestPeak!!.score) {
+                    bestPeak = peak
+                    bestScale = scale
+                }
+            }
+            val finePeak = bestPeak ?: return null
+            return WorldMapSolverPure.buildViewport(cfg, roiRect, plan.window, bestScale, finePeak, rungs, cfg.voteGrid)
+        } finally {
+            baseSmallBuf?.let { lib.MaaImageBufferDestroy(it) }
+            windowBuf?.let { lib.MaaImageBufferDestroy(it) }
+        }
+    }
+
+    /**
+     * 在期望位置附近扫图标（上游 `ConfirmSpot` 的 `scan`）：窗口内逐模板 × 逐尺度匹配，
+     * 取最高一档，低于 `minScore` 判无。返回 null 表示窗口为空或没认出来。
+     */
+    private fun scanWorldMapSpot(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        spec: WorldMapSpotConfig,
+        screen: WorldMapGrayImage,
+        expectedX: Double,
+        expectedY: Double,
+        radius: Int,
+        viewportScale: Double,
+    ): WorldMapSpotHit? {
+        val centerIx = WorldMapTypes.lround(expectedX)
+        val centerIy = WorldMapTypes.lround(expectedY)
+        val window = MapRect(centerIx - radius, centerIy - radius, radius * 2, radius * 2)
+            .intersect(MapRect(0, 0, screen.width, screen.height))
+        if (window.isEmpty) return null
+        val patch = WorldMapImagePure.cropGray(
+            screen.gray, screen.width, screen.height, window.x, window.y, window.width, window.height,
+        ) ?: return null
+
+        val ladder = WorldMapTypes.spotScaleLadder(spec)
+        val keepAlive = mutableListOf<Memory>()
+        val searchBuf = lib.MaaImageBufferCreate() ?: return null
+        try {
+            if (!setRawBgr(lib, searchBuf, WorldMapImagePure.grayToBgr(patch), window.width, window.height, keepAlive)) return null
+            var bestTemplate = ""
+            var best: WorldMapMatch? = null
+            var bestScale = 0.0
+            for (name in spec.templates) {
+                val templ = loadWorldMapTemplate(name) ?: continue
+                for (scale in ladder) {
+                    val tw = WorldMapTypes.lround(templ.width * scale)
+                    val th = WorldMapTypes.lround(templ.height * scale)
+                    if (tw < WorldMapTypes.MIN_ANCHOR_SIDE || th < WorldMapTypes.MIN_ANCHOR_SIDE) continue
+                    if (tw > window.width || th > window.height) continue
+                    val resized = WorldMapImagePure.resizeGrayBilinear(templ.gray, templ.width, templ.height, tw, th) ?: continue
+                    val match = runWorldMapMatch(lib, context, searchBuf, resized, tw, th, keepAlive, 0.0) ?: continue
+                    if (best == null || match.score > best!!.score) {
+                        best = match
+                        bestTemplate = name
+                        bestScale = scale
+                    }
+                }
+            }
+            val hit = best ?: return null
+            if (hit.score < spec.minScore) return null
+            val centerX = window.x + hit.box[0] + hit.box[2] / 2.0
+            val centerY = window.y + hit.box[1] + hit.box[3] / 2.0
+            val hotspot = WorldMapTypes.hotspot(centerX, centerY, 0.0, 0.0, bestScale)
+            return WorldMapSpotHit(
+                templateName = bestTemplate,
+                centerX = centerX,
+                centerY = centerY,
+                hotspotX = hotspot[0],
+                hotspotY = hotspot[1],
+                sizeWidth = hit.box[2],
+                sizeHeight = hit.box[3],
+                score = hit.score,
+                matchScale = bestScale,
+                offsetBase = WorldMapTypes.offsetBase(centerX, centerY, expectedX, expectedY, viewportScale),
+                goldRatio = 0.0,
+                unlocked = true,
+            )
+        } finally {
+            lib.MaaImageBufferDestroy(searchBuf)
+        }
+    }
+
+    /**
+     * 上游 `ConfirmSpot`（`WorldMapSolver.cpp:581-701`）：浮动/定点窗口 + 判定圈。
+     * 定点点位偏出判定圈时，先在更小的窗口里再看一次近处（对齐上游 669-678）。
+     */
+    private fun confirmWorldMapSpot(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        spec: WorldMapIconSpec,
+        screen: WorldMapGrayImage,
+        expectedX: Double,
+        expectedY: Double,
+        viewportScale: Double,
+    ): WorldMapSpotHit? {
+        val floating = spec.spot.radiusBase > 0.0
+        val radius = WorldMapTypes.confirmRadius(spec.spot, viewportScale)
+        var found = scanWorldMapSpot(lib, context, spec.spot, screen, expectedX, expectedY, radius, viewportScale) ?: return null
+        if (!floating && found.offsetBase > spec.spot.gateBase) {
+            val tight = maxOf(
+                WorldMapTypes.lround(spec.spot.gateBase / viewportScale),
+                WorldMapTypes.MIN_TEMPLATE_SIDE,
+            )
+            if (tight < radius) {
+                val closer = scanWorldMapSpot(lib, context, spec.spot, screen, expectedX, expectedY, tight, viewportScale)
+                if (closer != null && closer.offsetBase < found.offsetBase) found = closer
+            }
+        }
+        if (WorldMapTypes.gateReject(found.offsetBase, spec.spot.gateBase, floating)) return null
+        return found
+    }
+
+    /** 上游 `DragMap` 的拖动部分（`WorldMapFind.cpp:236-261`）：随机落位 + 定额时长 + 等停稳。 */
+    private fun dragWorldMap(lib: MaaFrameworkLibrary, safe: MapRect, dx: Double, dy: Double): DoubleArray {
+        val ctrl = currentController ?: return doubleArrayOf(0.0, 0.0)
+        val issued = WorldMapTypes.dragClamp(safe, dx, dy)
+        if (kotlin.math.hypot(issued[0], issued[1]) < 1.0) return doubleArrayOf(0.0, 0.0)
+        val halfX = kotlin.math.abs(issued[0]) / 2.0
+        val halfY = kotlin.math.abs(issued[1]) / 2.0
+        val centerX = randomBetween(safe.x + halfX, safe.x + safe.width - halfX)
+        val centerY = randomBetween(safe.y + halfY, safe.y + safe.height - halfY)
+        val fromX = WorldMapTypes.lround(centerX - issued[0] / 2.0)
+        val fromY = WorldMapTypes.lround(centerY - issued[1] / 2.0)
+        val toX = WorldMapTypes.lround(centerX + issued[0] / 2.0)
+        val toY = WorldMapTypes.lround(centerY + issued[1] / 2.0)
+        val duration = WorldMapTypes.swipeDuration(issued[0], issued[1])
+        Ln.i("MaaRunner: MapFind 拖动 ($fromX,$fromY)→($toX,$toY) dur=$duration")
+        val id = lib.MaaControllerPostSwipe(ctrl, fromX, fromY, toX, toY, duration)
+        lib.MaaControllerWait(ctrl, id)
+        runCatching { Thread.sleep(WorldMapTypes.SETTLE_MILLIS.toLong()) }
+        return issued
+    }
+
+    private fun randomBetween(lo: Double, hi: Double): Double {
+        if (!(hi > lo)) return (lo + hi) / 2.0
+        return lo + kotlin.random.Random.nextDouble() * (hi - lo)
+    }
+
+    /** 候选归它的 next 节点管开关：读不出来一律当开着（上游 `CandidateEnabled`）。 */
+    private fun nodeEnabled(lib: MaaFrameworkLibrary, context: Pointer, name: String): Boolean {
+        val buf = lib.MaaStringBufferCreate() ?: return true
+        return try {
+            if (lib.MaaContextGetNodeData(context, name, buf).toInt() == 0) return true
+            val text = lib.MaaStringBufferGet(buf) ?: return true
+            val data = MaaJsonTree.parse(text) as? Map<*, *> ?: return true
+            (data["enabled"] as? Boolean) ?: true
+        } catch (_: Throwable) {
+            true
+        } finally {
+            lib.MaaStringBufferDestroy(buf)
+        }
+    }
+
+    /** 命中候选时把它的 `next` 交回框架（上游 `MaaContextOverrideNext`；本项目改用覆盖 `next` 字段）。 */
+    private fun handBackNext(lib: MaaFrameworkLibrary, context: Pointer, nodeName: String?, next: String): Boolean {
+        if (nodeName == null || next.isEmpty()) return true
+        val override = buildJsonObject {
+            put(nodeName, buildJsonObject { put("next", JsonArray(listOf(JsonPrimitive(next)))) })
+        }.toString()
+        return lib.MaaContextOverridePipeline(context, override).toInt() != 0
+    }
+
+    private fun rectContains(rect: MapRect, x: Double, y: Double): Boolean {
+        val ix = WorldMapTypes.lround(x)
+        val iy = WorldMapTypes.lround(y)
+        return ix >= rect.x && ix < rect.x + rect.width && iy >= rect.y && iy < rect.y + rect.height
+    }
+
+    private fun writeWorldMapDetail(
+        lib: MaaFrameworkLibrary,
+        outDetail: Pointer?,
+        param: WorldMapFindPure.FindParam,
+        index: Int,
+        target: WorldMapFindPure.Target,
+        expected: DoubleArray,
+        viewport: WorldMapViewport,
+        icon: String?,
+        hit: WorldMapSpotHit?,
+        next: String?,
+        playerMarker: Boolean,
+    ) {
+        if (outDetail == null) return
+        val json = WorldMapFindPure.findDetailJson(
+            zone = param.zone,
+            index = index,
+            atX = target.at[0],
+            atY = target.at[1],
+            screenX = expected[0],
+            screenY = expected[1],
+            viewportScale = viewport.scale,
+            viewportVote = viewport.voteGrid,
+            next = next,
+            icon = icon,
+            templateName = hit?.templateName,
+            score = hit?.score,
+            unlocked = hit?.unlocked,
+            clickX = hit?.hotspotX,
+            clickY = hit?.hotspotY,
+            playerMarker = playerMarker,
+        )
+        runCatching { lib.MaaStringBufferSet(outDetail, json) }
+            .onFailure { Ln.w("MaaRunner: MapFind 写 detail 失败：${it.message}") }
+    }
+
+    /**
+     * `MapFind` 的主流程（上游 `MapFindRun`）：解析参数 → 触发 ZoomOut → 逐候选解视口/平移/
+     * 认图标 → 命中交回点框与 next，否则 0。所有分支都不伪造坐标。
+     */
+    private fun mapFindRun(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        nodeName: String?,
+        rawParam: String?,
+        outBox: Pointer?,
+        outDetail: Pointer?,
+    ): Int {
+        val parse = WorldMapFindPure.parseFindParam(rawParam)
+        val param = parse.param
+        if (param == null) {
+            Ln.w("MaaRunner: MapFind 参数非法：${parse.error}")
+            return 0
+        }
+        val spec = if (param.icon.isNotEmpty()) {
+            val resolved = worldMapIconTable[param.icon]
+            if (resolved == null) {
+                Ln.w("MaaRunner: MapFind 图标表无此项 ${param.icon}")
+                return 0
+            }
+            resolved
+        } else {
+            null
+        }
+        if (param.state.isNotEmpty() && (spec == null || spec.spot.minGoldRatio <= 0.0)) {
+            Ln.w("MaaRunner: MapFind 图标 ${param.icon} 无解锁阈值，state 判不了")
+            return 0
+        }
+        val base = loadWorldMapBase(param.zone) ?: return 0
+        val config = WorldMapViewportConfig(voteGrid = param.voteGrid)
+        val targets = WorldMapFindPure.buildTargets(param)
+        if (targets.isEmpty()) return 0
+
+        runCatching { lib.MaaContextRunTask(context, MAP_FIND_ZOOM_OUT_NODE, "{}") }
+            .onFailure { Ln.w("MaaRunner: MapFind 触发 $MAP_FIND_ZOOM_OUT_NODE 失败：${it.message}") }
+
+        var screen: WorldMapGrayImage? = null
+        var viewport: WorldMapViewport? = null
+        var previousScale: Double? = null
+        var issued = doubleArrayOf(0.0, 0.0)
+        val wantUnlocked = WorldMapFindPure.wantsUnlocked(param.state)
+
+        for ((index, target) in targets.withIndex()) {
+            if (target.next.isNotEmpty() && !nodeEnabled(lib, context, target.next)) {
+                Ln.i("MaaRunner: MapFind 候选被关，跳过 index=$index next=${target.next}")
+                continue
+            }
+            var attempt = 0
+            var pans = 0
+            var nudges = 0
+            while (attempt < param.maxAttempts) {
+                if (screen == null) {
+                    screen = captureWorldMapScreen(lib)
+                    viewport = null
+                    if (screen == null) {
+                        attempt++
+                        runCatching { Thread.sleep(WorldMapTypes.RETRY_MILLIS.toLong()) }
+                        continue
+                    }
+                }
+                val frame = screen!!
+                val safe = WorldMapTypes.safeArea(
+                    frame.width, frame.height, WorldMapTypes.ICON_AREA, WorldMapTypes.ICON_MARGIN,
+                )
+                if (safe.isEmpty) {
+                    Ln.e("MaaRunner: MapFind 安全区退化 ${frame.width}x${frame.height}")
+                    return 0
+                }
+
+                if (viewport == null) {
+                    val pinned = previousScale?.let { WorldMapSolverPure.pinnedConfig(config, it) }
+                    if (pinned != null) viewport = solveWorldMapViewport(lib, context, frame, base, pinned)
+                    if (viewport == null) viewport = solveWorldMapViewport(lib, context, frame, base, config)
+                    if (viewport == null) {
+                        previousScale = null
+                        screen = null
+                        if (nudges >= WorldMapTypes.MAX_NUDGES) {
+                            attempt++
+                            runCatching { Thread.sleep(WorldMapTypes.RETRY_MILLIS.toLong()) }
+                            continue
+                        }
+                        val nudge = WorldMapTypes.nudgeDelta(safe, issued[0], issued[1], nudges)
+                        nudges++
+                        issued = dragWorldMap(lib, safe, nudge[0], nudge[1])
+                        if (kotlin.math.hypot(issued[0], issued[1]) < 1.0) attempt++
+                        continue
+                    }
+                    previousScale = viewport!!.scale
+                    issued = doubleArrayOf(0.0, 0.0)
+                }
+
+                val vp = viewport!!
+                val expected = vp.toScreen(target.at[0], target.at[1])
+                val need = WorldMapTypes.panDelta(safe, expected[0], expected[1])
+                if (kotlin.math.hypot(need[0], need[1]) >= 1.0) {
+                    if (pans >= WorldMapTypes.MAX_PANS) {
+                        val usable = WorldMapTypes.safeArea(frame.width, frame.height, WorldMapTypes.ICON_AREA, 0)
+                        if (!rectContains(usable, expected[0], expected[1])) {
+                            Ln.w("MaaRunner: MapFind 目标挪不进可点区 zone=${param.zone} index=$index")
+                            break
+                        }
+                    } else {
+                        pans++
+                        issued = dragWorldMap(lib, safe, need[0], need[1])
+                        screen = null
+                        viewport = null
+                        if (kotlin.math.hypot(issued[0], issued[1]) < 1.0) {
+                            Ln.w("MaaRunner: MapFind 目标出界但拖不动 index=$index")
+                            break
+                        }
+                        continue
+                    }
+                }
+
+                attempt++
+
+                // 不给图标名就只解坐标：交期望位置的点框（上游 WorldMapFind.cpp:536-543）
+                if (spec == null) {
+                    writeWorldMapDetail(
+                        lib, outDetail, param, index, target, expected, vp,
+                        icon = null, hit = null, next = null, playerMarker = false,
+                    )
+                    if (outBox != null) {
+                        val box = WorldMapTypes.pointBox(expected[0], expected[1])
+                        lib.MaaRectSet(outBox, box.x, box.y, box.width, box.height)
+                    }
+                    Ln.i("MaaRunner: MapFind 定位 zone=${param.zone} at=${target.at} screen=(${expected[0]},${expected[1]})")
+                    return 1
+                }
+
+                val hit = confirmWorldMapSpot(lib, context, spec, frame, expected[0], expected[1], vp.scale)
+                if (hit != null && hit.unlocked != wantUnlocked) {
+                    Ln.w(
+                        "MaaRunner: MapFind 图标在但解锁状态不符 zone=${param.zone} icon=${param.icon} " +
+                            "unlocked=${hit.unlocked} want=$wantUnlocked",
+                    )
+                    break
+                }
+                if (hit != null) {
+                    val next = target.next.ifEmpty { null }
+                    writeWorldMapDetail(
+                        lib, outDetail, param, index, target, expected, vp,
+                        icon = param.icon, hit = hit, next = next, playerMarker = false,
+                    )
+                    if (!handBackNext(lib, context, nodeName, target.next)) {
+                        Ln.e("MaaRunner: MapFind 命中但 next 交不回框架 next=${target.next}")
+                        return 0
+                    }
+                    if (outBox != null) {
+                        val box = WorldMapTypes.spotBox(hit)
+                        lib.MaaRectSet(outBox, box.x, box.y, box.width, box.height)
+                    }
+                    Ln.i(
+                        "MaaRunner: MapFind 命中 zone=${param.zone} icon=${param.icon} " +
+                            "screen=(${expected[0]},${expected[1]}) score=${hit.score} scale=${vp.scale}",
+                    )
+                    return 1
+                }
+
+                Ln.w("MaaRunner: MapFind 期望位置认不出图标 attempt=$attempt index=$index")
+                screen = null
+                viewport = null
+                runCatching { Thread.sleep(WorldMapTypes.RETRY_MILLIS.toLong()) }
+            }
+        }
+
+        Ln.w("MaaRunner: MapFind 放弃 zone=${param.zone} targets=${targets.size} icon=${param.icon}")
+        return 0
+    }
+
+    /** `MapFind` 的识别回调。任何解不出来/置信不足一律返回 0，绝不交错误坐标。 */
+    private val mapFindCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, customRecognitionParam, _, _, _, outBox, outDetail ->
+        if (!MAP_FIND_REAL_ENABLED) return@MaaCustomRecognitionCallback 0
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null) return@MaaCustomRecognitionCallback 0
+        val res = synchronized(lifecycleLock) { resource } ?: return@MaaCustomRecognitionCallback 0
+        if (!ensureWorldMapAssets(res)) return@MaaCustomRecognitionCallback 0
+        val startedAt = System.nanoTime()
+        val result = runCatching {
+            mapFindRun(lib, context, nodeName, customRecognitionParam, outBox, outDetail)
+        }.getOrElse {
+            Ln.e("MaaRunner: MapFind 异常", it)
+            0
+        }
+        RunDiagnostics.note(
+            "worldmap",
+            "mapfind｜" + if (result == 1) "命中" else "未命中" +
+                " cost=${(System.nanoTime() - startedAt) / 1_000_000}ms",
+            mapOf("node" to nodeName, "hit" to (result == 1), "param" to customRecognitionParam),
+        )
+        result.toByte()
     }
 
     /** 扫描地图资产目录，按上游 key 规则建 zoneId → 文件 索引。 */
@@ -6923,6 +7734,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             regReco(DEBUG_YOLO_RECO, debugCliYoloCallback)
             // 端到端粗定位探针（coarselocate）：YOLO → 约束 ROI → 地图资产 TemplateMatch
             regReco(DEBUG_COARSE_RECO, debugCliCoarseCallback)
+            // 世界地图找图标探针（mapfind）：全屏大地图上 SolveViewport → 投屏 → ConfirmSpot
+            regReco(DEBUG_MAPFIND_RECO, debugCliMapFindCallback)
         }
         // ItemQuantitySatisfied 不再是恒真：恒真会让采集「目标库存模式」的所有 SubSkipped
         // 直接命中，任务成功结束却什么都没采（见 ItemQuantitySupport 注释）。
@@ -6962,10 +7775,11 @@ class MaaRunner(private val agentHost: AgentHost) {
         // 小地图定位原语 + 追踪状态机；未装 map-locate 补充包 / 定位失败时如实返回 0。
         regReco("MapLocateAssertLocation", mapLocateAssertLocationCallback)
 
-        // MapFind（世界地图找图标，上游 WorldMap/WorldMapFind.cpp）**仍保持恒假**：
-        // 它操作的是全屏大地图（viewport 求解 + 图标模板确认 + 平移/缩放），依赖
-        // WorldMapSolver（1830 行 C++）与本 checkout 里不存在的图标/底图资产，无法用
-        // 小地图定位原语实现。详见本轮报告。
+        // MapFind（世界地图找图标，上游 WorldMap/WorldMapFind.cpp）已是真实实现：
+        // 多尺度 TemplateMatch 解屏幕↔底图相似变换 → 目标底图坐标投屏 → 图标模板确认 →
+        // 交回屏幕点框。解不出/置信不足一律如实返回 0（见 mapFindRun 的失败护栏）。
+        regReco("MapFind", mapFindCallback)
+
         val falseRecognitions = listOf(
             "ImageCheckNotPassedRecognition",
             "IconRecognition",
@@ -6976,7 +7790,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "EssenceFilterAfterBattleNthRecognition",
             "EssenceGridAdvanceRecognition",
             "EssenceGridPendingRecognition",
-            "MapFind",
             "PuzzleRecognition",
             "TrialOfSwordmancy.Recognize",
             "TrialOfSwordmancy.RecognizeAband",
@@ -7012,6 +7825,12 @@ class MaaRunner(private val agentHost: AgentHost) {
         mapLocateAssetsFor = null
         mapLocateAssets = null
         mapLocateAssertHeatmapCache.clear()
+        // resource 换了，世界地图的底图/图标表缓存也要重来
+        worldMapAssetsFor = null
+        worldMapIconTable = emptyMap()
+        worldMapTemplateDir = null
+        worldMapBaseCache.clear()
+        worldMapTemplateCache.clear()
     }
 
     private inline fun notify(block: IMaaRunnerCallback.() -> Unit) {
@@ -7068,6 +7887,10 @@ class MaaRunner(private val agentHost: AgentHost) {
         const val DEBUG_COARSE_TM_NODE = "__DebugCliCoarseTemplateMatch"
         const val DEBUG_COARSE_TEMPLATE = "__DebugCliCoarse/minimap.png"
 
+        /** 世界地图找图标探针（mapfind）：临时 Custom 包装节点名与注册识别名 */
+        const val DEBUG_MAPFIND_NODE = "__DebugCliMapFind__"
+        const val DEBUG_MAPFIND_RECO = "DebugCliMapFind"
+
         /**
          * PathHeatmap 并行路的临时 TemplateMatch 节点与运行时模板名（与灰度路分开，
          * 避免覆盖灰度路正在用的模板）。
@@ -7091,6 +7914,21 @@ class MaaRunner(private val agentHost: AgentHost) {
         const val MAP_LOCATE_ASSERT_TEMPLATE = "__MapLocateAssert/minimap.png"
         const val MAP_LOCATE_ASSERT_HEATMAP_TM_NODE = "__MapLocateAssertHeatmapTemplateMatch"
         const val MAP_LOCATE_ASSERT_HEATMAP_TEMPLATE = "__MapLocateAssert/heatmap.png"
+
+        /**
+         * `MapFind` 真实实现的回退开关。
+         *
+         * `false` 时识别退化为恒假（与改造前一致），真机出现回归时一键回退。
+         * 默认开；解不出来时如实返回 0，不会伪造坐标。
+         */
+        const val MAP_FIND_REAL_ENABLED = true
+
+        /** `MapFind` 用的临时 `TemplateMatch` 节点 / 运行时模板名（与 MapLocate 分开，避免覆盖表串味）。 */
+        const val MAP_FIND_TM_NODE = "__MapFindTemplateMatch"
+        const val MAP_FIND_TEMPLATE = "__MapFind/patch.png"
+
+        /** 进大地图先缩放到底：交给 pipeline 的子任务（上游 `kZoomOutNode`）。 */
+        const val MAP_FIND_ZOOM_OUT_NODE = "SceneMapZoomOutWithoutReco"
 
         /** 地图资产扩展名（框架 `imread` 可读的常见几种；上游资产只有 png）。 */
         val MAP_IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "bmp")

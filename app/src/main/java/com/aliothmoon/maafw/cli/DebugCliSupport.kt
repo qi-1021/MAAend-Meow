@@ -121,6 +121,20 @@ sealed interface DebugCliIntent {
      * [imagePath] 为 null 表示 `tracklocate reset`：清空状态机，不读图。
      */
     data class TrackLocate(val imagePath: String?, val zone: String?) : DebugCliIntent
+
+    /**
+     * 世界地图找图标单点探针：在**当前全屏大地图画面**上解屏幕↔底图的 viewport，
+     * 把目标底图坐标 [atX]/[atY] 投到屏幕；给了 [icon] 再在期望位置附近认图标。
+     *
+     * 只读：不触发 ZoomOut / 拖动 / 交回 next，专供真机单点验证 `MapFind` 的求解链。
+     * [icon] 为空时只解坐标（对齐 `MapFind` 不给图标的 at-only 分支）。
+     */
+    data class MapFind(
+        val zone: String,
+        val atX: Double,
+        val atY: Double,
+        val icon: String?,
+    ) : DebugCliIntent
 }
 
 /** 解析结果：要么是意图，要么是给用户看的错误。 */
@@ -216,6 +230,23 @@ object DebugCliSupport {
                 else -> DebugCliParse.Ok(DebugCliIntent.TrackLocate(args[0], args.getOrNull(1)))
             }
 
+            "mapfind" -> when {
+                args.size < 3 -> DebugCliParse.Failure("mapfind 需要 <zone> <at_x> <at_y> [icon]")
+                args.size > 4 -> DebugCliParse.Failure("mapfind 接受 <zone> <at_x> <at_y> [icon]（不要带空格）")
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> {
+                    val atX = args[1].toDoubleOrNull()
+                    val atY = args[2].toDoubleOrNull()
+                    if (atX == null || atY == null) {
+                        DebugCliParse.Failure("mapfind 的 at 坐标必须是数字：${args[1]} ${args[2]}")
+                    } else {
+                        DebugCliParse.Ok(
+                            DebugCliIntent.MapFind(args[0], atX, atY, args.getOrNull(3)),
+                        )
+                    }
+                }
+            }
+
             else -> DebugCliParse.Failure("未知命令：$command（输入 help 查看可用命令）")
         }
     }
@@ -238,6 +269,7 @@ object DebugCliSupport {
         appendLine("yoloprobe <img>     小地图预处理 → NeuralNetworkClassify(cls.onnx)，输出 zone/ROI")
         appendLine("coarselocate <frame> [zone]  全帧裁小地图 → YOLO → 地图资产上 TemplateMatch 粗定位")
         appendLine("tracklocate <frame> [zone] | reset  粗定位观测喂追踪状态机，打印 accept/reject/hold/relocate 与累计状态")
+        appendLine("mapfind <zone> <at_x> <at_y> [icon]  在当前全屏大地图上解 viewport → 目标投屏 → 图标确认（只读）")
     }.trimEnd()
 
     /** `status` 的渲染文本，多行。 */
