@@ -1,5 +1,6 @@
 package com.aliothmoon.maafw.settings
 
+import com.aliothmoon.maafw.cli.DEBUG_RELAY_DEFAULT_URL
 import com.aliothmoon.maafw.privileged.ShizukuInstallHelper
 import com.aliothmoon.maafw.update.UpdateChannel
 import com.aliothmoon.preferences.PrefKey
@@ -83,6 +84,13 @@ data class AppSettings(
     /** 远程调试安全警告的「我已知晓，不再提示」；只影响要不要再弹警告 */
     @PrefKey(default = "false")
     val remoteDebugWarningAcknowledged: String = "false",
+
+    /**
+     * 远程调试**中继地址**：默认值但可修改。手机出站连它，长轮询取命令。
+     * 默认指向开源套件 `scripts/debug_cli_bridge.py` 经 Cloudflare Tunnel 暴露的入口。
+     */
+    @PrefKey(default = DEBUG_RELAY_DEFAULT_URL)
+    val remoteDebugRelayUrl: String = DEBUG_RELAY_DEFAULT_URL,
 
     /** [com.aliothmoon.maafw.theme.ThemeStyle] 的 name；DEFAULT 暖石蓝，SEMI_DESIGN 取 Semi Design 配色 */
     @PrefKey(default = "DEFAULT")

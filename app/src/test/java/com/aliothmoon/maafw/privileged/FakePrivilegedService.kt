@@ -112,6 +112,38 @@ open class FakePrivilegedService : RemoteService {
     override fun setAppCommandCallback(callback: IAppCommandCallback?) {
         appCommandCallback = callback
     }
+
+    /** 远程调试中继：测试可观察启动/停止与入参 */
+    var debugRelayStarted: Boolean = false
+        private set
+    var debugRelayRelayUrl: String? = null
+        private set
+    var debugRelayToken: String? = null
+        private set
+    var debugRelayStopCount: Int = 0
+        private set
+    var debugRelayStatusValue: Int = 0
+    var debugRelayHandledValue: Long = 0L
+    var debugRelayDetailValue: String = ""
+    var debugRelaySessionIdValue: String = ""
+
+    override fun startDebugRelay(relayUrl: String?, token: String?): Boolean {
+        debugRelayStarted = true
+        debugRelayRelayUrl = relayUrl
+        debugRelayToken = token
+        return true
+    }
+
+    override fun stopDebugRelay() {
+        debugRelayStopCount++
+        debugRelayStarted = false
+    }
+
+    override fun debugRelayState(): Int = debugRelayStatusValue
+    override fun debugRelayHandled(): Long = debugRelayHandledValue
+    override fun debugRelayDetail(): String = debugRelayDetailValue
+    override fun debugRelaySessionId(): String = debugRelaySessionIdValue
+
     override fun setVirtualDisplayMode(mode: Int): Boolean = true
     override fun setVirtualDisplayResolution(width: Int, height: Int, dpi: Int) = Unit
     override fun startVirtualDisplay(): Int = 1

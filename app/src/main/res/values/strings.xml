@@ -575,6 +575,19 @@
     <string name="remote_debug_token_reset_title">重置访问令牌</string>
     <string name="remote_debug_token_reset_message">重置后旧令牌立即失效，已鉴权的远程会话会被断开，需要使用新令牌重新鉴权。</string>
     <string name="remote_debug_copied">令牌已复制</string>
+    <!-- 远程调试·中继（手机出站连公网；默认值可修改） -->
+    <string name="settings_remote_debug_relay_url_label">中继地址（默认值，可修改）</string>
+    <string name="settings_remote_debug_relay_url_hint">手机主动出站连接该地址，经公网长轮询取命令；蜂窝/CGNAT/异网也能用</string>
+    <string name="settings_remote_debug_relay_connect">连接远端</string>
+    <string name="settings_remote_debug_relay_disconnect">断开</string>
+    <string name="settings_remote_debug_relay_status_idle">未连接</string>
+    <string name="settings_remote_debug_relay_status_connecting">连接中…</string>
+    <string name="settings_remote_debug_relay_status_connected">已连接（会话 %1$s）</string>
+    <string name="settings_remote_debug_relay_status_failed">连接失败</string>
+    <string name="settings_remote_debug_relay_handled">已处理 %1$d 条命令</string>
+    <string name="settings_remote_debug_relay_warning">如不知道你在干什么，禁止更改或开启此设置</string>
+    <string name="settings_remote_debug_relay_url_invalid">中继地址无效</string>
+    <string name="settings_remote_debug_relay_start_failed">无法启动中继：请确认调试模式与特权服务已就绪</string>
 
     <!-- PI 解压 -->
     <string name="pi_install_title">正在准备项目资源</string>

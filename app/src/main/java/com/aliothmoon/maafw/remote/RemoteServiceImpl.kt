@@ -10,6 +10,7 @@ import com.aliothmoon.maafw.bridge.NativeBridgeLib
 import com.aliothmoon.maafw.cli.DebugCliContext
 import com.aliothmoon.maafw.cli.DebugCliHost
 import com.aliothmoon.maafw.cli.DebugCliOcrResult
+import com.aliothmoon.maafw.cli.DebugCliRelayClient
 import com.aliothmoon.maafw.cli.DebugCliServer
 import com.aliothmoon.maafw.constant.DefaultDisplayConfig
 import com.aliothmoon.maafw.constant.DisplayMode
@@ -55,6 +56,10 @@ class RemoteServiceImpl : RemoteService.Stub() {
     @Volatile
     private var appCommandCallback: IAppCommandCallback? = null
 
+    /** 当前 CLI 宿主；中继客户端复用它执行命令（与 [DebugCliServer] 同一份能力）。 */
+    @Volatile
+    private var debugCliHost: DebugCliRunnerHost? = null
+
     // 两者互相引用：host 要把 child 的输出交回 runner 的回调。用 lazy 打破初始化顺序——
     // host 的 lambda 到真正有输出时才读 runner，那会儿它早已建好
     private val runner: MaaRunner by lazy { MaaRunner(agentHost) }
@@ -80,6 +85,7 @@ class RemoteServiceImpl : RemoteService.Stub() {
         AppWatchdog.stopWatching()
         InputControlUtils.setTouchCallback(null)
         runner.destroy()
+        DebugCliRelayClient.stop()
         DebugCliServer.stop()
         cleanup()
         exitProcess(0)
@@ -178,7 +184,9 @@ class RemoteServiceImpl : RemoteService.Stub() {
             // debug CLI：仅 debug 构建且开启调试模式时监听 127.0.0.1；release 下 BuildConfig.DEBUG 为
             // false，完全不启动（不监听端口、不建文件）
             if (BuildConfig.DEBUG && isDebug) {
-                DebugCliServer.start(DebugCliRunnerHost(logDir))
+                val cliHost = DebugCliRunnerHost(logDir)
+                debugCliHost = cliHost
+                DebugCliServer.start(cliHost)
             }
         } else {
             Ln.w("$TAG: log dir unusable, MaaFramework will write to process CWD: $logDir")
@@ -345,6 +353,8 @@ class RemoteServiceImpl : RemoteService.Stub() {
     ): Boolean {
         if (!BuildConfig.DEBUG) return false
         if (!enabled) {
+            DebugCliRelayClient.stop()
+            debugCliHost = null
             DebugCliServer.stop()
             return false
         }
@@ -353,9 +363,39 @@ class RemoteServiceImpl : RemoteService.Stub() {
             runner.setProjectRoot(piRoot)
         }
         val dir = logDir?.takeIf { it.isNotBlank() } ?: return false
-        DebugCliServer.configure(DebugCliRunnerHost(dir), remoteEnabled, token)
+        val cliHost = DebugCliRunnerHost(dir)
+        debugCliHost = cliHost
+        DebugCliServer.configure(cliHost, remoteEnabled, token)
         return true
     }
+
+    /**
+     * 启动中继客户端：手机出站连公网桥，长轮询取命令后直接走 [DebugCliHost] 执行。
+     *
+     * 前提是调试 CLI 已配置（[configureDebugCli] 已建好宿主）；没有宿主时如实返回 false，
+     * 由 App 侧把失败原因呈现给用户，而不是假装连上了。
+     */
+    override fun startDebugRelay(relayUrl: String?, token: String?): Boolean {
+        if (!BuildConfig.DEBUG) return false
+        val host = debugCliHost
+        if (host == null) {
+            Ln.w("$TAG: startDebugRelay rejected, debug CLI host not ready")
+            return false
+        }
+        return DebugCliRelayClient.start(host, relayUrl.orEmpty(), token.orEmpty())
+    }
+
+    override fun stopDebugRelay() {
+        DebugCliRelayClient.stop()
+    }
+
+    override fun debugRelayState(): Int = DebugCliRelayClient.state()
+
+    override fun debugRelayHandled(): Long = DebugCliRelayClient.handled()
+
+    override fun debugRelayDetail(): String = DebugCliRelayClient.detail()
+
+    override fun debugRelaySessionId(): String = DebugCliRelayClient.sessionId()
 
     override fun startRun(runPlanJson: String?): Boolean {
         if (runPlanJson.isNullOrBlank()) return false

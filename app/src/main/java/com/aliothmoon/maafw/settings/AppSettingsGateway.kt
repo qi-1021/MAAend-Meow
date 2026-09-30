@@ -58,6 +58,10 @@ interface AppSettingsGateway {
     val remoteDebugWarningAcknowledged: StateFlow<Boolean>
     suspend fun setRemoteDebugWarningAcknowledged(acknowledged: Boolean)
 
+    /** 中继地址（默认值可修改）：手机出站连它，长轮询取命令 */
+    val remoteDebugRelayUrl: StateFlow<String>
+    suspend fun setRemoteDebugRelayUrl(url: String)
+
     val themeStyle: StateFlow<ThemeStyle>
     suspend fun setThemeStyle(style: ThemeStyle)
 

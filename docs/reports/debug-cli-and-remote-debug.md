@@ -5,7 +5,7 @@
 >
 > 本文描述的实现位于 `MAAend-Meow` 仓库：`app/src/main/java/com/aliothmoon/maafw/cli/`、
 > `app/src/main/java/com/aliothmoon/maafw/remote/RemoteServiceImpl.kt`、
-> `scripts/debug_cli_bridge.py`。相关提交：`4a3268c`(初版) → `0fa9aa1`(任务运行中可用) →
+> `scripts/debug_cli_bridge.py`、`scripts/relay_client.sh`。相关提交：`4a3268c`(初版) → `0fa9aa1`(任务运行中可用) →
 > `1ef04b8`(开机即启 + 远程调试 + start/stop) → `98012bd`(PI 就绪补触发)。
 
 ---
@@ -228,6 +228,102 @@ curl -s -X POST https://maaendset.qiisme1021.space/ \
 
 > **坑**：tunnel 的 `service: http://localhost:PORT` 在有些机器上会解析到 `::1`，
 > 而 `adb forward` 只监听 IPv4 `127.0.0.1` → 502。**写 `127.0.0.1` 最稳。**
+
+### 6.3 自建调试服务器（开源套件与设置方法）
+
+上面 6.2 那套「桥主动回拨手机 CLI」在**手机与桥不同网段 / 蜂窝网络**下不成立：手机在
+蜂窝 / CGNAT / 异网下**无法被入站连接**（拿不到公网可达的入站地址，NAT 也不放行），
+`adb forward` 与局域网直连自然全部失效——用户实测「一开 VPN 整条链就断」正是这个原因。
+
+正确架构是**手机出站**：手机主动连公网桥建立会话，握手成功后远端即可经桥发命令。
+本仓库自带的开源调试服务器套件就是为此准备的，**不需要自己再写**：
+
+| 文件 | 角色 |
+|---|---|
+| `scripts/debug_cli_bridge.py` | 服务端：HTTP 桥 + 中继（Cloudflare Tunnel 只暴露 HTTP(S)，它把 HTTP 翻译成 CLI；中继模式下把命令排队给手机出站会话） |
+| `scripts/relay_client.sh` | shell 版中继客户端（**无 App / 手工验证**场景用；App 内已有等价的 Kotlin 客户端，见 §6.4） |
+
+#### 协议（桥暴露的四个接口，都要 `X-Token`）
+
+```
+POST /attach                        → 200，响应体一行纯文本 sid（建立会话）
+GET  /pull?sid=..&timeout=25        → 200：第一行 rid、其余是命令；204：暂无命令（手机长轮询取命令）
+POST /result?sid=..&rid=..  body=输出 → 200（手机回传命令输出）
+POST /                     body=命令  → 200：命令输出（远端调试者入口；桥按最早会话排队并等结果）
+```
+
+#### 令牌从哪来
+
+令牌就是 App 设置页「远程调试」里的**访问令牌**（`SecureRandom` 生成的 32 位串，可复制/重置）。
+桥的 `--token`、`X-Token`、以及 App 内客户端用的都是同一个值：它既是桥的准入密钥，
+也是手机 CLI 的鉴权令牌（两道闸门）。
+
+#### 设置步骤
+
+```bash
+# 1) 在 App 里开「调试模式」→ 开「远程调试」（过强安全警告）→ 复制访问令牌
+# 2) 本机起桥（只监听回环；中继模式手机出站也能连）
+python3 scripts/debug_cli_bridge.py \
+    --listen 127.0.0.1:7788 --token '<App 里复制的令牌>' --mode relay
+# 3) Cloudflare Tunnel 把 maaendset.qiisme1021.space 指到 7788
+```
+
+`~/.cloudflared/config.yml`：
+
+```yaml
+ingress:
+  - hostname: maaendset.qiisme1021.space
+    service: http://127.0.0.1:7788     # 必须写 127.0.0.1，别写 localhost（可能解析到 ::1）
+  - service: http_status:404
+```
+
+```bash
+cloudflared tunnel route dns <tunnel> maaendset.qiisme1021.space   # 建 CNAME
+# 改完 config 必须重启 tunnel 进程（只在启动时读 ingress）
+```
+
+```bash
+# 4) 手机端：App 设置里「中继地址」默认就是 https://maaendset.qiisme1021.space
+#    （默认值可修改），点「连接远端」→ 状态变「已连接（会话 <sid>）」
+# 5) 远端任意机器发命令，拿到的就是完整 status：
+curl -sS -m 150 -X POST https://maaendset.qiisme1021.space/ \
+     -H 'X-Token: <App 中的访问令牌>' --data 'status'
+```
+
+无 App（或想手工验证桥）时用 shell 客户端：
+`sh scripts/relay_client.sh https://maaendset.qiisme1021.space <令牌>`（手机上有 `curl`/`nc` 时可直接跑）。
+
+#### 已知坑（照单全收）
+
+1. **Cloudflare 免费档单请求有 ~100s 上限**，而手机侧的长轮询不能太长：桥把 `timeout`
+   夹到 `1..60`，手机客户端取 `25s` 留足隧道与排队余量。别把 `timeout` 开到上百秒。
+2. **本地 CLI 的裸 socket 响应分三段、每段以 `--END--` 结尾**（①欢迎语 ②`auth` 回执 ③命令结果）。
+   shell 客户端（`relay_client.sh`）必须**只回传第 3 段**；漏了就会把欢迎语当成命令输出回给远端。
+   App 内客户端不绕这条 socket，而是直接在特权进程里复用解析+分发（见 §6.4），天然没有三段问题。
+3. **`adb shell` 起的后台进程会随会话退出被带走**，所以手机端客户端必须跑在**App 进程内**、
+   由用户开关驱动，而不是靠 adb 起一个 shell 常驻。App 内客户端正是为此。
+4. **手机在蜂窝 / CGNAT / 异网下只有出站可靠**；VPN 会改路由，直连/回拨方案一开 VPN 就断，
+   出站中继不受影响——这也是"必须有中继模式"的根本原因。
+5. **`X-Token` 同时是桥与 CLI 的密钥**：令牌一换，桥必须重启，App 内客户端需重连。
+
+### 6.4 App 内中继客户端（Kotlin）
+
+位置：`app/src/main/java/com/aliothmoon/maafw/cli/DebugCliRelayClient.kt`（I/O 与线程）、
+`DebugCliRelay.kt`（纯逻辑：地址规格化 / 桥响应解析 / 状态码 / 退避，纳入本机纯逻辑验证）。
+它在**特权进程**（与 `DebugCliServer` 同进程）里跑，这样命令能直接复用既有的
+`DebugCliSupport.parse` + `DebugCliHost` 执行路径，不另起一套：
+
+```
+runLoop（可停止，断线指数退避重连）
+  ├─ POST /attach                      → sid；失败记 detail 并退避重试
+  ├─ GET  /pull?sid=..&timeout=25       → 200 命令 / 204 无命令（长轮询）
+  ├─ DebugCliServer.executeRelayCommand(host, 命令)  ← 复用 parse + dispatch
+  └─ POST /result?sid=..&rid=..         → 回传输出
+```
+
+状态机对外经 binder 暴露：`IDLE → CONNECTING → CONNECTED(sid) / FAILED(原因)`，另有已处理条数。
+App 侧（`SessionViewModel`）只轮询这四个值写进 `SessionUiState`；设置页据此显示状态行与「断开」。
+生命周期完全由用户驱动：**开「远程调试」并点「连接远端」才跑，关设置或点「断开」即停**。
 
 ---
 

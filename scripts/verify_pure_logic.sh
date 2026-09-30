@@ -130,6 +130,7 @@ MAIN_FILES=(
   "$DIAG/GoodsProbeDumpPolicy.kt"
   "$CLI/DebugCliSupport.kt"
   "$CLI/DebugCliRemote.kt"
+  "$CLI/DebugCliRelay.kt"
 )
 TEST_FILES=(
   "$TST/BetterSlidingSupportTest.kt"
@@ -199,6 +200,7 @@ TEST_FILES=(
   "$TDIAG/GoodsProbeDumpPolicyTest.kt"
   "$TCLI/DebugCliSupportTest.kt"
   "$TCLI/DebugCliRemoteTest.kt"
+  "$TCLI/DebugCliRelayTest.kt"
 )
 TEST_CLASSES=(
   com.aliothmoon.maafw.remote.BetterSlidingSupportTest
@@ -268,6 +270,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.diagnostics.GoodsProbeDumpPolicyTest
   com.aliothmoon.maafw.cli.DebugCliSupportTest
   com.aliothmoon.maafw.cli.DebugCliRemoteTest
+  com.aliothmoon.maafw.cli.DebugCliRelayTest
 )
 
 stubs() {
@@ -436,6 +439,7 @@ fun main() {
         "com.aliothmoon.maafw.diagnostics.GoodsProbeDumpPolicyTest",
         "com.aliothmoon.maafw.cli.DebugCliSupportTest",
         "com.aliothmoon.maafw.cli.DebugCliRemoteTest",
+        "com.aliothmoon.maafw.cli.DebugCliRelayTest",
     )
     var pass = 0
     var fail = 0

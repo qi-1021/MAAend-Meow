@@ -2,6 +2,10 @@ package com.aliothmoon.maafw.session
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.aliothmoon.maafw.RemoteService
+import com.aliothmoon.maafw.cli.DEBUG_RELAY_DEFAULT_URL
+import com.aliothmoon.maafw.cli.DebugCliRelayStatus
+import com.aliothmoon.maafw.cli.normalizeRelayUrl
 import com.aliothmoon.maafw.config.ConfigurationResolver
 import com.aliothmoon.maafw.config.UserConfigurationStore
 import com.aliothmoon.maafw.R
@@ -56,8 +60,11 @@ import com.aliothmoon.maafw.MaaDispatchers
 import com.aliothmoon.maafw.i18n.AppLocales
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -65,6 +72,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -86,6 +95,15 @@ private data class RemoteDebugSnapshot(
     val enabled: Boolean = false,
     val token: String = "",
     val warningAcknowledged: Boolean = false,
+    val relayUrl: String = DEBUG_RELAY_DEFAULT_URL,
+)
+
+/** 中继客户端状态的一次快照；由 [SessionViewModel] 轮询特权进程得到。 */
+private data class RelayStatusSnapshot(
+    val status: DebugCliRelayStatus = DebugCliRelayStatus.IDLE,
+    val sessionId: String = "",
+    val handled: Long = 0L,
+    val detail: String = "",
 )
 
 /** 定时任务解锁那两项；单独一层只为把 combine 的元数压回上限内 */
@@ -111,6 +129,9 @@ private data class PrivilegedSnapshot(
     val serviceState: PrivilegedServiceState,
     val systemPermissions: SystemPermissionState,
 )
+
+/** 连接期间轮询中继状态的间隔。 */
+private const val RELAY_POLL_INTERVAL_MS = 1_000L
 
 class SessionViewModel(
     private val projectRepository: ProjectRepository,
@@ -169,10 +190,16 @@ class SessionViewModel(
                 appSettings.remoteDebug,
                 appSettings.remoteDebugToken,
                 appSettings.remoteDebugWarningAcknowledged,
+                appSettings.remoteDebugRelayUrl,
                 ::RemoteDebugSnapshot,
             ),
         ) { snapshot, remote -> snapshot.copy(remote = remote) }
 
+
+    /** 中继状态由 VM 轮询特权进程得到；轮询任务只在连接期间存在。 */
+    private val relayStatus = MutableStateFlow(RelayStatusSnapshot())
+
+    private var relayPollJob: Job? = null
 
     val uiState: StateFlow<SessionUiState> = combine(
         projectRepository.state,
@@ -185,6 +212,14 @@ class SessionViewModel(
     }.flowOn(MaaDispatchers.Default) // resolve 属重计算，不占用主线程
         .combine(permissionGateway.watchdogState) { base, wd -> base.copy(watchdogState = wd) }
         .combine(piInstall.state) { base, install -> base.copy(piInstallState = install) }
+        .combine(relayStatus) { base, relay ->
+            base.copy(
+                remoteRelayStatus = relay.status,
+                remoteRelaySessionId = relay.sessionId,
+                remoteRelayHandled = relay.handled,
+                remoteRelayDetail = relay.detail,
+            )
+        }
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.Eagerly,
@@ -315,6 +350,7 @@ class SessionViewModel(
             remoteDebug = settings.remote.enabled,
             remoteDebugToken = settings.remote.token,
             remoteDebugWarningAcknowledged = settings.remote.warningAcknowledged,
+            remoteDebugRelayUrl = settings.remote.relayUrl,
             themeStyle = settings.themeStyle,
             runMode = runMode,
             overlayControlMode = settings.overlayControlMode,
@@ -502,7 +538,12 @@ class SessionViewModel(
             // 远程调试不重启 App：协调器观察开关变化后立即通知特权进程重配监听。
             // 开启时保证有令牌——先生成再开，避免「开着但没令牌」的窗口
             is SessionIntent.SetRemoteDebug -> {
-                if (intent.enabled) appSettings.ensureRemoteDebugToken()
+                if (intent.enabled) {
+                    appSettings.ensureRemoteDebugToken()
+                } else {
+                    // 关闭设置即断开中继：语义上"关掉远程调试"不应还挂着一条出站长轮询
+                    stopRelay()
+                }
                 appSettings.setRemoteDebug(intent.enabled)
             }
 
@@ -510,6 +551,12 @@ class SessionViewModel(
 
             is SessionIntent.SetRemoteDebugWarningAcknowledged ->
                 appSettings.setRemoteDebugWarningAcknowledged(intent.acknowledged)
+
+            is SessionIntent.SetRemoteRelayUrl -> appSettings.setRemoteDebugRelayUrl(intent.url)
+
+            is SessionIntent.StartRemoteRelay -> startRelay(intent.url)
+
+            SessionIntent.StopRemoteRelay -> stopRelay()
 
             is SessionIntent.SetThemeStyle ->
                 appSettings.setThemeStyle(intent.style)
@@ -628,6 +675,64 @@ class SessionViewModel(
             SessionIntent.RefreshPermissions -> permissionGateway.refresh()
 
             SessionIntent.ClearRunLog -> recorder.clear()
+        }
+    }
+
+    /**
+     * 连接远端中继：手机**出站**连 [rawUrl]（空则用已保存地址），随后开始轮询特权进程的状态。
+     *
+     * 地址会先规格化再落盘（非法直接报错，不落到特权进程）。失败逐类如实提示：
+     * 地址非法 / 特权服务没连 / 特权进程拒绝（CLI 宿主未就绪）。
+     */
+    private suspend fun startRelay(rawUrl: String) {
+        val url = normalizeRelayUrl(rawUrl.ifBlank { appSettings.remoteDebugRelayUrl.value })
+        if (url == null) {
+            emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.settings_remote_debug_relay_url_invalid)))
+            return
+        }
+        appSettings.setRemoteDebugRelayUrl(url)
+        val service = servicePort.serviceOrNull()
+        if (service == null) {
+            emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.msg_privileged_service_not_connected)))
+            return
+        }
+        val token = appSettings.ensureRemoteDebugToken()
+        val started = runCatching { service.startDebugRelay(url, token) }.getOrDefault(false)
+        if (!started) {
+            emitEffect(SessionEffect.ShowMessage(uiTextOf(R.string.settings_remote_debug_relay_start_failed)))
+            return
+        }
+        relayStatus.value = RelayStatusSnapshot(status = DebugCliRelayStatus.CONNECTING)
+        relayPollJob?.cancel()
+        relayPollJob = viewModelScope.launch(MaaDispatchers.IO) { pollRelay(service) }
+    }
+
+    /** 断开中继并停掉轮询；幂等。特权服务不在时只清本地状态。 */
+    private fun stopRelay() {
+        relayPollJob?.cancel()
+        relayPollJob = null
+        runCatching { servicePort.serviceOrNull()?.stopDebugRelay() }
+            .onFailure { Timber.w(it, "stopDebugRelay failed") }
+        relayStatus.value = RelayStatusSnapshot()
+    }
+
+    /**
+     * 轮询特权进程的中继状态，直到状态回到 [DebugCliRelayStatus.IDLE]（对端停了 / 进程没了）或被取消。
+     * 每次 binder 调用都 runCatching：特权进程随时可能消失，不能让轮询把 VM 拖崩。
+     */
+    private suspend fun pollRelay(service: RemoteService) {
+        while (currentCoroutineContext().isActive) {
+            val snapshot = runCatching {
+                RelayStatusSnapshot(
+                    status = DebugCliRelayStatus.fromWire(service.debugRelayState()),
+                    sessionId = service.debugRelaySessionId().orEmpty(),
+                    handled = service.debugRelayHandled(),
+                    detail = service.debugRelayDetail().orEmpty(),
+                )
+            }.getOrNull() ?: break
+            relayStatus.value = snapshot
+            if (snapshot.status == DebugCliRelayStatus.IDLE) break
+            delay(RELAY_POLL_INTERVAL_MS)
         }
     }
 

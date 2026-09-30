@@ -1,5 +1,6 @@
 package com.aliothmoon.maafw.settings
 
+import com.aliothmoon.maafw.cli.DEBUG_RELAY_DEFAULT_URL
 import com.aliothmoon.maafw.domain.OverlayControlMode
 import com.aliothmoon.maafw.domain.RunMode
 import com.aliothmoon.maafw.runner.ResolutionPreference
@@ -93,6 +94,12 @@ class FakeAppSettingsGateway : AppSettingsGateway {
 
     override suspend fun setRemoteDebugWarningAcknowledged(acknowledged: Boolean) {
         remoteDebugWarningAcknowledged.value = acknowledged
+    }
+
+    override val remoteDebugRelayUrl = MutableStateFlow(DEBUG_RELAY_DEFAULT_URL)
+
+    override suspend fun setRemoteDebugRelayUrl(url: String) {
+        remoteDebugRelayUrl.value = url
     }
 
     override val themeStyle = MutableStateFlow(ThemeStyle.DEFAULT)

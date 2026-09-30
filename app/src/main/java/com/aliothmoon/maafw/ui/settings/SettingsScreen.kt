@@ -59,6 +59,8 @@ import androidx.core.net.toUri
 import com.aliothmoon.maafw.BuildConfig
 import com.aliothmoon.maafw.R
 import com.aliothmoon.maafw.cli.DEBUG_CLI_PORT
+import com.aliothmoon.maafw.cli.DEBUG_RELAY_DEFAULT_URL
+import com.aliothmoon.maafw.cli.DebugCliRelayStatus
 import com.aliothmoon.maafw.domain.RemoteBackend
 import com.aliothmoon.maafw.domain.ThemeMode
 import com.aliothmoon.maafw.i18n.AppLocales
@@ -83,6 +85,7 @@ import com.aliothmoon.maafw.ui.components.MaaLabeledControlRow
 import com.aliothmoon.maafw.ui.components.MaaMarkdown
 import com.aliothmoon.maafw.ui.components.MaaMarkdownSheet
 import com.aliothmoon.maafw.ui.components.MaaNavigationRow
+import com.aliothmoon.maafw.ui.components.MaaOutlinedButton
 import com.aliothmoon.maafw.ui.components.MaaSingleChoiceFlow
 import com.aliothmoon.maafw.ui.components.MaaSwitch
 import com.aliothmoon.maafw.ui.components.MaaSwitchRow
@@ -334,6 +337,8 @@ private fun LogCard(
     var showRemoteWarning by remember { mutableStateOf(false) }
     var remoteWarningAck by remember { mutableStateOf(state.remoteDebugWarningAcknowledged) }
     var showResetTokenConfirm by remember { mutableStateOf(false) }
+    // 中继地址输入：只在失焦时落盘，避免每敲一个字都写 DataStore
+    var relayUrlInput by remember(state.remoteDebugRelayUrl) { mutableStateOf(state.remoteDebugRelayUrl) }
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     MaaCard(title = stringResource(R.string.settings_section_log), collapsible = true) {
@@ -430,6 +435,88 @@ private fun LogCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
+
+                // ── 中继（手机出站连公网）──
+                Spacer(Modifier.height(MaaDesignTokens.Spacing.sm))
+                MaaFieldLabel(stringResource(R.string.settings_remote_debug_relay_url_label))
+                ITextFieldWithFocus(
+                    value = relayUrlInput,
+                    onValueChange = { relayUrlInput = it },
+                    onFocusLost = { onIntent(SessionIntent.SetRemoteRelayUrl(relayUrlInput)) },
+                    placeholder = DEBUG_RELAY_DEFAULT_URL,
+                    supportingText = {
+                        Text(
+                            text = stringResource(R.string.settings_remote_debug_relay_url_hint),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                )
+                // 红色硬提醒：这是会被外部主动连接的总开关，误改/误开等于把设备交出去
+                Text(
+                    text = stringResource(R.string.settings_remote_debug_relay_warning),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Spacer(Modifier.height(MaaDesignTokens.Spacing.xs))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(MaaDesignTokens.Spacing.xs),
+                ) {
+                    MaaButton(
+                        onClick = { onIntent(SessionIntent.StartRemoteRelay(relayUrlInput)) },
+                        enabled = state.remoteRelayStatus != DebugCliRelayStatus.CONNECTING,
+                    ) { Text(stringResource(R.string.settings_remote_debug_relay_connect)) }
+                    if (state.remoteRelayStatus != DebugCliRelayStatus.IDLE) {
+                        MaaOutlinedButton(onClick = { onIntent(SessionIntent.StopRemoteRelay) }) {
+                            Text(stringResource(R.string.settings_remote_debug_relay_disconnect))
+                        }
+                    }
+                }
+                Spacer(Modifier.height(MaaDesignTokens.Spacing.xs))
+                Text(
+                    text = when (state.remoteRelayStatus) {
+                        DebugCliRelayStatus.IDLE ->
+                            stringResource(R.string.settings_remote_debug_relay_status_idle)
+
+                        DebugCliRelayStatus.CONNECTING ->
+                            stringResource(R.string.settings_remote_debug_relay_status_connecting)
+
+                        DebugCliRelayStatus.CONNECTED -> stringResource(
+                            R.string.settings_remote_debug_relay_status_connected,
+                            state.remoteRelaySessionId,
+                        )
+
+                        DebugCliRelayStatus.FAILED ->
+                            stringResource(R.string.settings_remote_debug_relay_status_failed)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (state.remoteRelayStatus == DebugCliRelayStatus.FAILED) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+                if (state.remoteRelayStatus == DebugCliRelayStatus.CONNECTED) {
+                    Text(
+                        text = stringResource(
+                            R.string.settings_remote_debug_relay_handled,
+                            state.remoteRelayHandled,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (state.remoteRelayStatus == DebugCliRelayStatus.FAILED &&
+                    state.remoteRelayDetail.isNotBlank()
+                ) {
+                    Text(
+                        text = state.remoteRelayDetail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
     }

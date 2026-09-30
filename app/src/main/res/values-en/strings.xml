@@ -584,6 +584,19 @@
     <string name="remote_debug_token_reset_title">Reset access token</string>
     <string name="remote_debug_token_reset_message">Resetting immediately invalidates the old token and disconnects authenticated remote sessions; they must re-authenticate with the new token.</string>
     <string name="remote_debug_copied">Token copied</string>
+    <!-- Remote debug relay (phone connects outbound; editable default) -->
+    <string name="settings_remote_debug_relay_url_label">Relay URL (default, editable)</string>
+    <string name="settings_remote_debug_relay_url_hint">The phone connects outbound to this address and long-polls it for commands; works on cellular/CGNAT/foreign networks</string>
+    <string name="settings_remote_debug_relay_connect">Connect relay</string>
+    <string name="settings_remote_debug_relay_disconnect">Disconnect</string>
+    <string name="settings_remote_debug_relay_status_idle">Not connected</string>
+    <string name="settings_remote_debug_relay_status_connecting">Connecting…</string>
+    <string name="settings_remote_debug_relay_status_connected">Connected (session %1$s)</string>
+    <string name="settings_remote_debug_relay_status_failed">Connection failed</string>
+    <string name="settings_remote_debug_relay_handled">%1$d commands handled</string>
+    <string name="settings_remote_debug_relay_warning">If you don\'t know what you\'re doing, do NOT change or enable this setting</string>
+    <string name="settings_remote_debug_relay_url_invalid">Invalid relay URL</string>
+    <string name="settings_remote_debug_relay_start_failed">Cannot start relay: make sure debug mode and the privileged service are ready</string>
 
     <!-- PI unpacking -->
     <string name="pi_install_title">Preparing project resources</string>

@@ -2,6 +2,8 @@ package com.aliothmoon.maafw.session
 
 import android.view.Surface
 import com.aliothmoon.maafw.R
+import com.aliothmoon.maafw.cli.DEBUG_RELAY_DEFAULT_URL
+import com.aliothmoon.maafw.cli.DebugCliRelayStatus
 import com.aliothmoon.maafw.domain.Diagnostic
 import com.aliothmoon.maafw.domain.OptionEditorState
 import com.aliothmoon.maafw.domain.OptionValue
@@ -63,6 +65,16 @@ data class SessionUiState(
     val remoteDebugToken: String = "",
     /** 强安全警告的「我已知晓，不再提示」 */
     val remoteDebugWarningAcknowledged: Boolean = false,
+    /** 中继地址（默认值可修改） */
+    val remoteDebugRelayUrl: String = DEBUG_RELAY_DEFAULT_URL,
+    /** 中继客户端状态；仅在开了远程调试、点了连接后才有非 IDLE 值 */
+    val remoteRelayStatus: DebugCliRelayStatus = DebugCliRelayStatus.IDLE,
+    /** 已连接时的会话 sid；未连接为空串 */
+    val remoteRelaySessionId: String = "",
+    /** 已处理的命令条数 */
+    val remoteRelayHandled: Long = 0L,
+    /** 最近一次失败 / 异常描述；无则空串 */
+    val remoteRelayDetail: String = "",
     val runMode: RunMode = RunMode.BACKGROUND,
     val overlayControlMode: OverlayControlMode = OverlayControlMode.FLOAT_BALL,
     val screenSaverEnabled: Boolean = false,
@@ -261,6 +273,18 @@ sealed interface SessionIntent {
 
     /** 记住「我已知晓，不再提示」 */
     data class SetRemoteDebugWarningAcknowledged(val acknowledged: Boolean) : SessionIntent
+
+    /** 保存中继地址（默认值可修改）；空串回落默认 */
+    data class SetRemoteRelayUrl(val url: String) : SessionIntent
+
+    /**
+     * 连接远端：手机出站连 [url]（空则用已保存地址）并开始长轮询。
+     * 要求特权服务已连接；失败会如实弹错。
+     */
+    data class StartRemoteRelay(val url: String = "") : SessionIntent
+
+    /** 断开远端中继；幂等 */
+    data object StopRemoteRelay : SessionIntent
 
     /** 主屏 / 后台虚拟屏；运行中不允许改，下一轮才生效 */
     data class SetRunMode(val mode: RunMode) : SessionIntent

@@ -100,6 +100,9 @@ class AppSettingsManager(private val context: Context) : AppSettingsGateway {
     private val _remoteDebugWarningAcknowledged = MutableStateFlow(defaults.remoteDebugWarningAcknowledged.toBoolean())
     override val remoteDebugWarningAcknowledged: StateFlow<Boolean> = _remoteDebugWarningAcknowledged.asStateFlow()
 
+    private val _remoteDebugRelayUrl = MutableStateFlow(defaults.remoteDebugRelayUrl)
+    override val remoteDebugRelayUrl: StateFlow<String> = _remoteDebugRelayUrl.asStateFlow()
+
     private val _themeStyle = MutableStateFlow(parseThemeStyle(defaults.themeStyle))
     override val themeStyle: StateFlow<ThemeStyle> = _themeStyle.asStateFlow()
 
@@ -155,6 +158,7 @@ class AppSettingsManager(private val context: Context) : AppSettingsGateway {
                 _remoteDebug.value = s.remoteDebug.toBoolean()
                 _remoteDebugToken.value = s.remoteDebugToken
                 _remoteDebugWarningAcknowledged.value = s.remoteDebugWarningAcknowledged.toBoolean()
+                _remoteDebugRelayUrl.value = s.remoteDebugRelayUrl
                 _themeStyle.value = parseThemeStyle(s.themeStyle)
                 _eventNotificationLevel.value = parseEventNotificationLevel(s.eventNotificationLevel)
                 _wakeUnlockEnabled.value = s.wakeUnlockEnabled.toBoolean()
@@ -238,6 +242,13 @@ class AppSettingsManager(private val context: Context) : AppSettingsGateway {
 
     override suspend fun setRemoteDebugWarningAcknowledged(acknowledged: Boolean): Unit = with(AppSettingsSchema) {
         context.dataStore.edit { it[remoteDebugWarningAcknowledged] = acknowledged.toString() }
+    }
+
+    /** 存规格化后的地址；空串回落默认，避免把非法输入写死进去 */
+    override suspend fun setRemoteDebugRelayUrl(url: String): Unit = with(AppSettingsSchema) {
+        val normalized = com.aliothmoon.maafw.cli.normalizeRelayUrl(url)
+            ?: com.aliothmoon.maafw.cli.DEBUG_RELAY_DEFAULT_URL
+        context.dataStore.edit { it[remoteDebugRelayUrl] = normalized }
     }
 
     override suspend fun setThemeStyle(style: ThemeStyle): Unit = with(AppSettingsSchema) {

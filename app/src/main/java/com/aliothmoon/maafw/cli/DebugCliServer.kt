@@ -188,10 +188,38 @@ object DebugCliServer {
             connection = connection,
             authenticated = authenticated,
         )
-        return when (val parsed = DebugCliSupport.parse(line, context)) {
+        return process(line, host, context, session)
+    }
+
+    /** 解析一行并按意图分发；[respond] 与中继客户端共用，避免两套执行路径跑偏。 */
+    private fun process(
+        line: String,
+        host: DebugCliHost,
+        context: DebugCliContext,
+        session: ClientSession,
+    ): List<String> =
+        when (val parsed = DebugCliSupport.parse(line, context)) {
             is DebugCliParse.Failure -> listOf("error: ${parsed.message}")
             is DebugCliParse.Ok -> dispatch(parsed.intent, host, session)
         }
+
+    /**
+     * 中继模式（手机出站）专用入口：把远端经公网桥投递来的一条命令按**已鉴权远程连接**处理。
+     *
+     * 为什么不复用 [handleClient] 的 socket：中继客户端在特权进程内，没有理由绕一圈本地 TCP；
+     * 直接复用 [DebugCliSupport.parse] + [dispatch] 才是一条执行路径。令牌校验已在桥与
+     * [configure] 握手时完成，这里构造 `authenticated = true` 的上下文即可，`auth` 命令仍能正常应答。
+     */
+    fun executeRelayCommand(host: DebugCliHost, line: String): List<String> {
+        if (!BuildConfig.DEBUG) return listOf("error: 中继仅 debug 构建可用")
+        val session = ClientSession(isLoopback = false).apply { authGeneration = tokenGeneration.get() }
+        val context = host.context().copy(
+            remoteEnabled = true,
+            connection = DebugCliConnection.REMOTE,
+            authenticated = true,
+        )
+        return runCatching { process(line, host, context, session) }
+            .getOrElse { listOf("error: ${it.javaClass.simpleName}: ${it.message}") }
     }
 
     private fun dispatch(intent: DebugCliIntent, host: DebugCliHost, session: ClientSession): List<String> =

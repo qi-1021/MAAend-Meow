@@ -164,4 +164,28 @@ interface RemoteService {
      * 传 null 解注册。特权进程重启后 app 需重新注册。
      */
     oneway void setAppCommandCallback(IAppCommandCallback callback) = 81;
+
+    /**
+     * 启动远程调试**中继客户端**：手机主动出站连 relayUrl，长轮询取命令后复用 CLI 解析+分发。
+     * 因此蜂窝 / CGNAT / 异网（无法被入站连接）也能用，且不需要 adb forward。
+     *
+     * relayUrl 是用户可改的调试接口地址（默认见设置）；token 即 App 设置页的访问令牌，
+     * 同时用作桥的 X-Token。enabled=false / release 构建 / 地址非法时返回 false。
+     */
+    boolean startDebugRelay(String relayUrl, String token) = 82;
+
+    /** 停止中继客户端并断开当前长轮询；幂等。 */
+    oneway void stopDebugRelay() = 83;
+
+    /** 中继状态：0=IDLE / 1=CONNECTING / 2=CONNECTED / 3=FAILED（见 DebugCliRelayStatus.wire）。 */
+    int debugRelayState() = 84;
+
+    /** 中继客户端已处理（已回传结果）的命令条数。 */
+    long debugRelayHandled() = 85;
+
+    /** 最近一次失败 / 异常的如实描述；无则空串。供设置页状态行展示。 */
+    String debugRelayDetail() = 86;
+
+    /** 当前中继会话 sid；未连接时为空串。 */
+    String debugRelaySessionId() = 87;
 }
