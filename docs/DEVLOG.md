@@ -8,6 +8,55 @@
 
 ---
 
+## 2026-09-30 · 采集/送货打通：MapFind（WorldMap）移植完成并真机验证
+
+### 做了什么
+
+**① `MapFind` 从恒假 stub 变成真实现（找了一整天的最后一块大件）** —— `cf6a83b`
+- 上游 `agent/cpp-algo/source/WorldMap/`（约 1830 行 C++）整体移植：`WorldMapTypes/FindPure/SolverPure/ImagePure`
+  共 **1114 行纯逻辑 + 60 个测试**；框架 IO（多尺度 `TemplateMatch` + 运行时模板覆盖）留在 `MaaRunner`。
+- 关键侦察结论：**资产本来就在包里**（`SceneManager/MapIcons.json`、传送图标、各 zone `Base.png`，
+  已从已装 APK 的 `assets/pi.zip` 里逐条核实）；而"已知点 + 固定缩放"的捷径**不成立**
+  （scale = 底图像素/屏幕像素，随分辨率+底图尺寸+缩放档变化），所以老老实实做两级 viewport 求解。
+- **真机验证命中**：全屏武陵地图上 `scale=0.599 score=0.759` → 投屏 `at[942.6,1781.2] → (1035.2,171.5)`
+  → `MapTeleportAnchor` 确认 `0.780`，返回框**肉眼确认落在天井院传送锚点上**；
+  真实 `MapFind` 在 AutoCollect 里连续命中 3 个锚点（`viewport_scale 0.59–0.60`）。
+- 失败护栏：解不出/置信不足/图标未知/状态不符 → 一律 false，**绝不返回算错的屏幕坐标**；
+  `MAP_FIND_REAL_ENABLED` 可一键回退。未移植项（vote_grid 分块、gold_ratio 解锁判定、玩家标记遮挡回退、
+  拖动增益补偿、alpha 掩膜/亚像素）**每一项都退化为 miss 而不是误点**。
+
+**② 采集进世界锚点兜底覆盖 9 → 18（用枚举+独立扫描断言防再漏）**
+A 类 WithPick（依赖 MapFind）与 B 类旧模板（`SwipeToStep`）**都**追加 `__ScenePrivateAnyExit` 到 `next` 末位 + `on_error`；
+验证改为**扫描产物发现锚点**再断言数量与双向一致，漏一个就 fail build（已做负例测试）。
+真机：锚点不再 `PipelineNode.Failed`、不再有 MapFind 21 连击、无新增失败帧，流程推进到 `RouteN AssertLocation`。
+
+**③ 顺带修掉两个"修了但没生效"的**
+- `MapLocateAssertLocation` 的**逐像素静止快速失败在真机永不触发**（3D 画面每帧都在变）——仍是 60 帧 61.8s/105s。
+  改为**语义判据**：区分"还在等地图"（WAITING，继续轮询）与"画面已切过去但定位就是失败"（DETERMINISTIC，
+  连续 6 帧同因 → 早停），并加 **20s 墙钟保底**（帧数上限 60×250ms 只是睡眠预算，真机每帧 ~1s，时间才是真闸）。
+- 另加 `mapfind <zone> <x> <y> [icon]` 调试命令（只读，不 ZoomOut/不拖/不交回 next），
+  正是它让上面的真机验证成为可能。
+
+### 怎么验的
+
+- 纯逻辑：`scripts/verify_pure_logic.sh all` → **1280/1280**。
+- 真机（设备 `b8459a87`）：MapFind 命中并肉眼核对；锚点无风暴；`mapfind` 探针输出与真实 MapFind 交叉一致。
+- 遗留未验：① `GrowBack` 时序修复（培养舱 3 槽被上午种下的作物占满 16–43h，分支不可达，今天无法验）；
+  ② assert 早停（任务 20 分钟内没走到 AutoCollect，实测未观测到）。
+
+### 教训
+
+- **"我修了"和"真机上有效"是两件事**：逐像素静止判据在合成场景下天然成立，在真实 3D 画面里几乎永不触发；
+  第一版快速失败因此等于没做。判据必须建立在**业务语义**（这次是"失败原因是否确定"）而不是表象（画面是否在动）。
+- 帧数上限 ≠ 时间上限：60×250ms 看起来 15s，实测 105s——**每帧成本**才是主导项，预算要按墙钟设。
+
+### 未做（明确边界）
+
+- `MapFind` 未移植项（见 ①）与性能（单次 25–117s，Wuling 底图 2016×2976 的多尺度搜索很重）。
+- 送货/采集的"指定送达点""大地图寻路"等仍依赖上游后续与更多真机标定。
+- CreditShopping 等上游 draft PR #6055 合并后再整体更新。
+- 其它大件 stub（`EssenceFilter`/`AutoEssence`/IMS/滑索导入等）未动。
+
 ## 2026-09-30 · PathHeatmap 真机打通 + 追踪状态机移植（deepwork Phase 1/2）
 
 ### 做了什么
