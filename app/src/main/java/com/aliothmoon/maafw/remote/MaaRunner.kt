@@ -2491,7 +2491,25 @@ class MaaRunner(private val agentHost: AgentHost) {
                 Ln.w("MaaRunner: AutoSellItemExecuteItemTaskAction empty region on node=$nodeName")
                 return@MaaCustomActionCallback 0
             }
-            val names = regionItemMap[region] ?: return@MaaCustomActionCallback 1
+            val names = regionItemMap[region]
+            if (names == null) {
+                // 扫描回调本应把本区物资写进 regionItemMap；连该区的 key 都没有，说明**扫描没生效**
+                // （页签没切过去、识别失败等）。若按上游 `return true` 跳过，会在「一件都没卖」的
+                // 情况下让整任务显示成功——正是用户报「没卖出去却成功」的隐患。判失败让问题可见。
+                Ln.w(
+                    "MaaRunner: AutoSellItemExecuteItemTaskAction [$nodeName] region='$region' " +
+                        "regionItemMap 里没有该区（扫描未生效），动作判失败",
+                )
+                return@MaaCustomActionCallback 0
+            }
+            if (names.isEmpty()) {
+                // 扫描过、本区确实没有可处理的物资：与上游语义一致——跳过，不算失败。
+                Ln.i(
+                    "MaaRunner: AutoSellItemExecuteItemTaskAction [$nodeName] region='$region' " +
+                        "扫描过但无可处理物资，跳过（不算失败）",
+                )
+                return@MaaCustomActionCallback 1
+            }
             for (name in names) {
                 if (isStopRequested()) return@MaaCustomActionCallback 0
                 val modKey = AutoSellKeywords.firstContainedKeyword(name, AutoSellKeywords.moderate)
@@ -2545,8 +2563,16 @@ class MaaRunner(private val agentHost: AgentHost) {
                     })
                 }.toString()
                 val subId = lib.MaaContextRunTask(context, "AutoSellStockRedistributionItemOpenPrepare", override)
-                if (subId <= 0L) {
-                    Ln.w("MaaRunner: AutoSellItemExecuteItemTaskAction prepare failed for '$name'")
+                // 对齐上游 autosell.go:172-181：RunTask 后不仅要拿到 detail，还必须
+                // detail.Status.Success()，否则 hasError → return false。此前只查 subId<=0，
+                // 子任务内部失败（识别没命中 / 价格不达标 / 点击没生效）全被吞掉，外层照样
+                // 显示成功——这就是「卖不出去任务却成功」的直接原因。用 subTaskSucceeded
+                // 查 tasker 上该子任务的状态（与 failurecollector 同一套判定）。
+                if (!subTaskSucceeded(lib, context, subId)) {
+                    Ln.e(
+                        "MaaRunner: AutoSellItemExecuteItemTaskAction [$nodeName] prepare 子任务未成功 " +
+                            "item='$name' target='$targetName' subId=$subId",
+                    )
                     return@MaaCustomActionCallback 0
                 }
             }
@@ -3268,6 +3294,24 @@ class MaaRunner(private val agentHost: AgentHost) {
             // image 是框架本次识别用的那一帧，透传下去优先 OCR（可能为空，探针内部回退自抓）
             val items = goodsOcrProbe(lib, ctrl, context, AutoStockpileSupport.goodsRoi, region, image)
             val candidates = AutoStockpileSupport.scan(items, region)
+            // 可观测性（不改选品行为）：把「价格没绑上」（price==null）的候选显式打出来。
+            // 选品把 null 价当最贵排最后；若本页价格全没绑上，minWith 就退化成按 tier/位置挑，
+            // 真机表现为「没买最便宜的、选了中间价」。这里说清是哪一步、哪些候选、为什么 null：
+            // 本帧到底有没有可解析的价格文本——没有就是 OCR 没读到价，有则是几何没绑上。
+            val unbound = candidates.filter { it.price == null }
+            if (unbound.isNotEmpty()) {
+                val priceTexts = items.mapNotNull { it.text.takeIf { t -> AutoStockpileSupport.parsePrice(t) != null } }
+                Ln.w(
+                    "MaaRunner: AutoStockpile.Recognition [$nodeName] stage=scan 价格未绑定 price==null " +
+                        "region=$region 候选=${candidates.size} 未绑定=${unbound.size} " +
+                        "names=${unbound.map { it.name }} 本帧可解析价格文本=$priceTexts 原因=" +
+                        if (priceTexts.isEmpty()) {
+                            "本帧无价格文本（OCR 未读到价）"
+                        } else {
+                            "有价格文本但未按 右上方向/距离阈值 绑到货组名上"
+                        },
+                )
+            }
             val pick = AutoStockpileSupport.Session.decide(region, node, candidates)
             if (pick == null) {
                 // 本区候选已试完：把中继指向 Skip，本区就此收尾而不是把整任务判失败
