@@ -5307,7 +5307,16 @@ class MaaRunner(private val agentHost: AgentHost) {
                 null
             }
 
+            val startNs = System.nanoTime()
+            var stopReason = AssertStopReason.MAX_FRAMES
             for (index in 0 until MapLocateAssertPure.ASSERT_LOCATE_MAX_FRAMES) {
+                // 帧间墙钟守卫：预算到点就不再跑下一整帧昂贵定位（避免多 overshoot 一整帧）
+                if (index > 0 &&
+                    (System.nanoTime() - startNs) / 1_000_000L >= MapLocateAssertPure.ASSERT_LOCATE_MAX_WALL_MS
+                ) {
+                    stopReason = AssertStopReason.WALL_CLOCK_BUDGET
+                    break
+                }
                 val frame = if (index == 0) firstFrame else captureArgbFrame(lib)
                 if (frame == null) {
                     // 取帧失败：指纹记 null（不参与静止判定、且打断连续计数），也不复用上一帧定位结果
@@ -5343,23 +5352,33 @@ class MaaRunner(private val agentHost: AgentHost) {
                     }
                 }
 
-                val last = frames.last()
-                if (last.located && last.position != null &&
-                    MapLocateActionPure.isPositionInsideRect(last.position, targetRect)
-                ) {
-                    break
-                }
-                // 画面已连续 N 帧完全不变：再等也不会有地图，立即结束并判未命中
-                if (MapLocateAssertPure.isScreenStatic(fingerprints)) {
-                    Ln.i(
-                        "MaaRunner: MapLocateAssertLocation 画面连续 " +
-                            "${MapLocateAssertPure.ASSERT_LOCATE_STATIC_FRAMES_TO_FAIL} 帧未变，提前结束轮询",
-                    )
+                // 纯逻辑裁决：命中 / 连续确定性失败 / 画面静止 / 墙钟上限 / 帧数上限
+                // （帧数上限与时间上限取先到者；确定性失败见 MapLocateAssertPure）。
+                val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+                val stopDecision = MapLocateAssertPure.decideAssertStop(
+                    frames = frames,
+                    targetRect = targetRect,
+                    elapsedMs = elapsedMs,
+                    screenStatic = MapLocateAssertPure.isScreenStatic(fingerprints),
+                )
+                if (stopDecision != AssertStopReason.CONTINUE) {
+                    stopReason = stopDecision
                     break
                 }
                 if (index + 1 < MapLocateAssertPure.ASSERT_LOCATE_MAX_FRAMES) {
-                    runCatching { Thread.sleep(MapLocateAssertPure.ASSERT_LOCATE_POLL_DELAY_MS) }
+                    // 睡眠也不越过墙钟上限：到点即缩短为剩余预算
+                    val remainMs = (MapLocateAssertPure.ASSERT_LOCATE_MAX_WALL_MS - elapsedMs)
+                        .coerceAtLeast(0L)
+                    runCatching {
+                        Thread.sleep(minOf(MapLocateAssertPure.ASSERT_LOCATE_POLL_DELAY_MS, remainMs))
+                    }
                 }
+            }
+            if (stopReason != AssertStopReason.MATCHED && stopReason != AssertStopReason.MAX_FRAMES) {
+                Ln.i(
+                    "MaaRunner: MapLocateAssertLocation 提前结束轮询 reason=$stopReason " +
+                        "frames=${frames.size} cost=${(System.nanoTime() - startNs) / 1_000_000L}ms",
+                )
             }
 
             val outcome = MapLocateAssertPure.evaluateAssertFrames(frames, targetRect)
@@ -5394,6 +5413,7 @@ class MaaRunner(private val agentHost: AgentHost) {
                     "matched" to outcome.matched,
                     "matched_frame" to outcome.matchedFrame,
                     "frames_polled" to outcome.framesPolled,
+                    "stop_reason" to stopReason.name,
                     "target" to listOf(targetRect.x, targetRect.y, targetRect.width, targetRect.height),
                     "position" to finalFrame.position?.let { listOf(it.x, it.y, it.score) },
                     "message" to finalFrame.debugMessage,
@@ -5402,6 +5422,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             Ln.i(
                 "MaaRunner: MapLocateAssertLocation[$nodeName] zone=${assertParam.zoneId} " +
                     "matched=${outcome.matched} frame=${outcome.matchedFrame}/${outcome.framesPolled} " +
+                    "stop=${stopReason.name} " +
                     "target=[${targetRect.x},${targetRect.y},${targetRect.width},${targetRect.height}] " +
                     "pos=$posText msg=${finalFrame.debugMessage}",
             )
