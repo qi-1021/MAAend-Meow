@@ -56,7 +56,16 @@ heatmap: override=ok coarse_hit=true coarse_score=0.555124 coarse_box=[66,124,98
 
 ### 未做
 
-- `GrowBack` 超时的根因（返回键模板 / 等待节点）。
+- `GrowBack` 超时的根因（返回键模板 / 等待节点）。**已取证到**：
+  - GrowBack 的**识别是成功的**（`And(GrowthChamberBackButton)` 通过后才有自定义动作），失败在**动作**
+    `RepeatUntilFoundAction {action: Click, wait_nodes: [GrowthChamberGrowViewIn]}`——
+    实现是 `repeatCount`（**默认 3**）× 「点一次 + 等 wait node」，3 次都没等到就判失败。
+  - `GrowthChamberBackButton` = `TemplateMatch roi=[1146,0,134,112] template=ClaimDijiangRewards/BackButton.png
+    green_mask=true **method=10001**` —— **method 是非标准值**（框架常规 1/3/5），需确认框架是否真支持。
+  - 但纯坐标兜底 `SeedExtractCloseByCoord` 能过（点固定位置 + 下一节点 GrowViewIn 命中），
+    所以更像是**返回键识别框/点击落点**或与弹窗关闭动画的时序问题。
+  - 下次现场调试：抓 GrowBack 失败帧（`on_error/` 已有）+ 看实现里那句
+    `RepeatUntilFoundAction [node] attempt n/N click (cx, cy)` 的落点。
 - PathHeatmap 的 native 加速（当前全图细搜在 Kotlin 侧是 O(W·H·w·h)）。
 - AutoSell 的真机复测（当日任务已被消耗）。
 
