@@ -88,9 +88,12 @@ python3 scripts/debug_cli_bridge.py --listen 127.0.0.1:7788 --target 127.0.0.1:7
 ### 关键未完成
 - **走路闭环（最高优先）**：朝向源、转向/摇杆纯逻辑、闭环执行器、`walk` 探针都实现了，真机上闭环每拍都在跑，
   但**位置源有 ~170px 伪匹配**且**相机 swipe 未见生效**（yaw 位级不变）→ 判据"真的在走近/到点/采集"未达成。
-- **模拟器**：已能在移动硬盘上跑（API 35 / arm64 / `adb root` / Shizuku；脚本与说明在
-  `/Volumes/mac第三磁盘/AndroidStudio/`）。游戏已装入并**跑到标题页且保持登录态**，
-  但进 3D 世界时 `-gpu host`（Metal/MoltenVK）触发 Unity `VK_SUCCESS` 断言崩溃。
+- **模拟器（现已是唯一设备）**：手机 `b8459a87` 已离开；`emulator-5554` 完全可用，
+  且**游戏已能进 3D 世界**（配方：`EMU_GPU=host` + 游戏内画质调低；`swiftshader_indirect` 会全黑）。
+  MAAend 已装（`Shizuku (Connected)`、`Service status: Ready`；Shizuku server 以 root 运行——
+  `adb root` 后执行 APK 内 `lib/arm64/libshizuku.so` 即可）。
+  只剩两步 UI 操作：**开「调试模式」**（CLI 才监听 7777）+ 在「补充包」里**下载 map-locate**（走镜像）。
+  启停：`EMU_GPU=host bash /Volumes/mac第三磁盘/AndroidStudio/start_emulator.sh`（见同目录 `EMULATOR.md`）。
 - **GrowBack 修复待复测**：培养舱 3 槽被种满（16~43h 成熟），提取分支当前不可达。
 - **root 隐藏模块未装**（Zygisk-Next / Shamiko + 排除列表）——用户明确要求过。
 - CreditShopping 等上游 draft PR #6055 合并后再整体更新。
