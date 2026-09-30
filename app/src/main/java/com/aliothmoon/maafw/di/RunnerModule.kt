@@ -147,6 +147,7 @@ val runnerModule = module {
             settings = get(),
             servicePort = get(),
             installer = get(),
+            piInstall = get(),
             runLauncher = get(),
             runnerPort = get(),
             scope = get(named<AppCoroutineScope>()),

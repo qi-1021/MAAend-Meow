@@ -6,6 +6,8 @@ import com.aliothmoon.maafw.MaaDispatchers
 import com.aliothmoon.maafw.constant.AppPaths
 import com.aliothmoon.maafw.privileged.PrivilegedServicePort
 import com.aliothmoon.maafw.privileged.PrivilegedServiceState
+import com.aliothmoon.maafw.project.PiInstallCoordinator
+import com.aliothmoon.maafw.project.PiInstallState
 import com.aliothmoon.maafw.project.PiInstaller
 import com.aliothmoon.maafw.runner.RunLaunchResult
 import com.aliothmoon.maafw.runner.RunLauncher
@@ -15,6 +17,7 @@ import com.aliothmoon.maafw.settings.AppSettingsGateway
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -31,11 +34,17 @@ import timber.log.Timber
  *    app 进程构建得出来，这是唯一不硬造的做法。
  *
  * 只在 debug 构建接线（Release 里 [start] 直接返回，不注册、不绑定）。
+ *
+ * PI 根不是启动那一下就固定的：App 一起来时若 PI 还没解包（首次安装 / versionCode 变了要重解，
+ * [PiInstaller.installedDir] 会抛 [com.aliothmoon.maafw.project.PiNotInstalledException]），
+ * 早先这里只读一次就永远空着。所以把 [PiInstallCoordinator.state] 也纳入触发源：
+ * 一旦解包到 [PiInstallState.Ready]，重新 configure，把补上的 projectRoot 交给 CLI。
  */
 class DebugCliCoordinator(
     private val settings: AppSettingsGateway,
     private val servicePort: PrivilegedServicePort,
     private val installer: PiInstaller,
+    private val piInstall: PiInstallCoordinator,
     private val runLauncher: RunLauncher,
     private val runnerPort: RunnerPort,
     private val scope: CoroutineScope,
@@ -62,7 +71,10 @@ class DebugCliCoordinator(
                 settings.remoteDebug,
                 settings.remoteDebugToken,
                 servicePort.serviceState,
-            ) { debug, remote, token, state -> DebugCliConfig(debug, remote, token, state) }
+                // 只关心「解包好了没」这一个跃迁：Unpacking 的进度是几千次的高频更新，
+                // 若把状态本身塞进 combine，distinctUntilChanged 拦不住，会疯狂重复 configure。
+                piInstall.state.map { it is PiInstallState.Ready },
+            ) { debug, remote, token, state, piReady -> DebugCliConfig(debug, remote, token, state, piReady) }
                 .distinctUntilChanged()
                 .collect { apply(it) }
         }
@@ -81,7 +93,8 @@ class DebugCliCoordinator(
             return
         }
 
-        // PI 未装时 piRoot 为空：CLI 仍能起（status/help/start/stop），只是拿不到 controller
+        // PI 未装时 piRoot 为空：CLI 仍能起（status/help/start/stop），只是拿不到 controller。
+        // 每次 apply 都现读：PI 解包完成后 piInstall.state 会跃到 Ready，触发这里重跑并补上根。
         val piRoot = runCatching { installer.installedDir().absolutePath }.getOrNull()
         val logDir = AppPaths.LOG_DIR.absolutePath
         runCatching {
@@ -116,5 +129,7 @@ class DebugCliCoordinator(
         val remote: Boolean,
         val token: String,
         val serviceState: PrivilegedServiceState,
+        /** PI 是否已解包完成；仅用于在 Ready 那一下重新 configure 补 projectRoot。 */
+        val piReady: Boolean,
     )
 }
