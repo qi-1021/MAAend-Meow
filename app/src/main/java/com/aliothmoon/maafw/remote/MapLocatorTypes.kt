@@ -175,6 +175,15 @@ fun getMinimapRoiConfig(useAdbMinimapRoi: Boolean): MinimapRoiConfig =
 /** 上游 `MaxLostTrackingCount`（`MapTypes.h:174`）。 */
 const val MAX_LOST_TRACKING_COUNT = 3
 
+/**
+ * 路径网区（`IsPathHeatmapZone`）的丢失上限放宽到 10。
+ *
+ * 上游是内联字面量 `IsPathHeatmapZone(...) ? 10 : options.max_lost_frames`
+ * （`MapLocator.cpp:1008`、`1950`、`2036`）；这里提成命名常量，与
+ * [MAX_LOST_TRACKING_COUNT] 并列，避免三处魔法数字漂移。
+ */
+const val PATH_HEATMAP_MAX_LOST_TRACKING_COUNT = 10
+
 /** 上游 `MobileSearchRadius`（`MapTypes.h:175`）。 */
 const val MOBILE_SEARCH_RADIUS = 50.0
 

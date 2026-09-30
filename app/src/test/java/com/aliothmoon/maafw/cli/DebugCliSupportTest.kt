@@ -311,6 +311,55 @@ class DebugCliSupportTest {
         assertTrue(failure("coarselocate /a.png", ctx(controllerReady = false)).contains("controller 未就绪"))
     }
 
+    // ───────────────────── tracklocate ─────────────────────
+
+    @Test
+    fun `tracklocate 只带路径 zone 为空`() {
+        assertEquals(
+            DebugCliIntent.TrackLocate("/sdcard/frame.png", null),
+            ok("tracklocate /sdcard/frame.png"),
+        )
+    }
+
+    @Test
+    fun `tracklocate 带可选 zone`() {
+        assertEquals(
+            DebugCliIntent.TrackLocate("/sdcard/frame.png", "Wuling_Base"),
+            ok("tracklocate /sdcard/frame.png Wuling_Base"),
+        )
+    }
+
+    @Test
+    fun `tracklocate reset 清空状态`() {
+        assertEquals(DebugCliIntent.TrackLocate(null, null), ok("tracklocate reset"))
+        assertEquals(DebugCliIntent.TrackLocate(null, null), ok("TrackLocate RESET"))
+    }
+
+    @Test
+    fun `tracklocate reset 不接受额外参数`() {
+        assertTrue(failure("tracklocate reset extra").contains("reset 不接受额外参数"))
+    }
+
+    @Test
+    fun `tracklocate 缺少参数报错`() {
+        assertTrue(failure("tracklocate").contains("需要 <截图路径>"))
+    }
+
+    @Test
+    fun `tracklocate 过多参数报错`() {
+        assertTrue(failure("tracklocate a.png Wuling_Base extra").contains("接受 <截图路径> [zone] 或 reset"))
+    }
+
+    @Test
+    fun `tracklocate controller 未就绪被拒绝`() {
+        assertTrue(failure("tracklocate /a.png", ctx(controllerReady = false)).contains("controller 未就绪"))
+    }
+
+    @Test
+    fun `tracklocate reset 不要求 controller`() {
+        assertEquals(DebugCliIntent.TrackLocate(null, null), ok("tracklocate reset", ctx(controllerReady = false)))
+    }
+
     // ───────────────────── 渲染与常量 ─────────────────────
 
     @Test
@@ -332,7 +381,7 @@ class DebugCliSupportTest {
     @Test
     fun `helpText 列出全部命令`() {
         val text = DebugCliSupport.helpText()
-        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "probe-result", "overrideprobe", "yoloprobe", "coarselocate")) {
+        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "probe-result", "overrideprobe", "yoloprobe", "coarselocate", "tracklocate")) {
             assertTrue("helpText 缺少 $command", text.contains(command))
         }
     }

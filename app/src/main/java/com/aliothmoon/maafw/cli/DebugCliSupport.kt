@@ -113,6 +113,14 @@ sealed interface DebugCliIntent {
      * 为空时用 YOLO 分类出的 zone。
      */
     data class CoarseLocate(val imagePath: String, val zone: String?) : DebugCliIntent
+
+    /**
+     * 追踪状态机单帧累加：读一张全帧截图 → 走与 [CoarseLocate] 相同的地图观测 →
+     * 喂进 `MapLocatorTracking` 状态机（跨调用保留状态）→ 返回本帧裁决与累计状态。
+     *
+     * [imagePath] 为 null 表示 `tracklocate reset`：清空状态机，不读图。
+     */
+    data class TrackLocate(val imagePath: String?, val zone: String?) : DebugCliIntent
 }
 
 /** 解析结果：要么是意图，要么是给用户看的错误。 */
@@ -194,6 +202,20 @@ object DebugCliSupport {
                 else -> DebugCliParse.Ok(DebugCliIntent.CoarseLocate(args[0], args.getOrNull(1)))
             }
 
+            "tracklocate" -> when {
+                args.isEmpty() -> DebugCliParse.Failure("tracklocate 需要 <截图路径>，或用 tracklocate reset 清空状态")
+                args.size > 2 -> DebugCliParse.Failure("tracklocate 接受 <截图路径> [zone] 或 reset")
+                args[0].equals("reset", ignoreCase = true) ->
+                    if (args.size == 1) {
+                        DebugCliParse.Ok(DebugCliIntent.TrackLocate(null, null))
+                    } else {
+                        DebugCliParse.Failure("tracklocate reset 不接受额外参数")
+                    }
+
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> DebugCliParse.Ok(DebugCliIntent.TrackLocate(args[0], args.getOrNull(1)))
+            }
+
             else -> DebugCliParse.Failure("未知命令：$command（输入 help 查看可用命令）")
         }
     }
@@ -215,6 +237,7 @@ object DebugCliSupport {
         appendLine("overrideprobe       验证 OverrideImage+TemplateMatch 链（合成图，不依赖游戏/补充包）")
         appendLine("yoloprobe <img>     小地图预处理 → NeuralNetworkClassify(cls.onnx)，输出 zone/ROI")
         appendLine("coarselocate <frame> [zone]  全帧裁小地图 → YOLO → 地图资产上 TemplateMatch 粗定位")
+        appendLine("tracklocate <frame> [zone] | reset  粗定位观测喂追踪状态机，打印 accept/reject/hold/relocate 与累计状态")
     }.trimEnd()
 
     /** `status` 的渲染文本，多行。 */

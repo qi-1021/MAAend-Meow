@@ -4678,6 +4678,19 @@ class MaaRunner(private val agentHost: AgentHost) {
     @Volatile
     private var debugCoarseResult: List<String>? = null
 
+    /**
+     * 本帧粗定位得到的地图观测（绝对坐标 + 分数），供 `tracklocate` 喂追踪状态机。
+     * 回调里在算完热图/灰度结果后写入；[debugCoarseLocate] 入口先清空。
+     */
+    @Volatile
+    private var debugCoarseObservation: MapPosition? = null
+
+    /**
+     * `tracklocate` 的运行期追踪状态机：跨命令调用保留状态（单帧累加）。
+     * 纯逻辑 [MapLocatorTracking]，不依赖 Android。
+     */
+    private val debugTrackingState = MapLocatorTracking()
+
     /** 128×128 BGR（YOLO 输入）。 */
     @Volatile
     private var debugCoarseYoloBgr: ByteArray? = null
@@ -4768,6 +4781,7 @@ class MaaRunner(private val agentHost: AgentHost) {
 
         synchronized(debugCoarseLock) {
             debugCoarseResult = null
+            debugCoarseObservation = null
             debugCoarseYoloBgr = yoloBgr
             debugCoarseTemplateBgr = templateBgr
             debugCoarseTemplateW = plan.roi.width
@@ -4781,6 +4795,42 @@ class MaaRunner(private val agentHost: AgentHost) {
             if (error != null) return listOf("error: $error")
             return debugCoarseResult ?: listOf("error: 探针未返回结果")
         }
+    }
+
+    /**
+     * 追踪状态机单帧累加（仅 debug CLI `tracklocate` 调用）。
+     *
+     * 复用 [debugCoarseLocate] 的完整地图观测（灰度路 + 热图路均不破坏），把本帧位置/分数
+     * 与单调时间戳喂进运行期保留的 [debugTrackingState]，打印 accept / reject / hold /
+     * relocate 裁决与累计状态（zone / 丢失计数 / 冷启动帧数）。
+     *
+     * [imagePath] 为 null 表示 `tracklocate reset`：清空状态机。
+     */
+    fun debugTrackLocate(imagePath: String?, zone: String?): List<String> {
+        if (!BuildConfig.DEBUG) return listOf("error: tracklocate 仅在 debug 构建可用")
+        if (imagePath == null) {
+            debugTrackingState.reset()
+            return listOf("track: state reset") + debugTrackingState.describe()
+        }
+
+        val coarseLines = debugCoarseLocate(imagePath, zone)
+        val observation = debugCoarseObservation
+            ?: return coarseLines + listOf("track: error: 本帧没有可用观测（粗定位未产出位置）")
+
+        val nowSeconds = System.nanoTime() / 1_000_000_000.0
+        val decision = debugTrackingState.feed(observation, nowSeconds)
+        val posText = decision.position
+            ?.let { String.format(java.util.Locale.US, "(%.2f,%.2f,score=%.3f)", it.x, it.y, it.score) }
+            ?: "-"
+        val trackLines = listOf(
+            "track: action=${decision.action} reason=${decision.reason} pos=$posText",
+        ) + debugTrackingState.describe()
+
+        Ln.i(
+            "MaaRunner: tracklocate zone=${observation.zoneId} score=${observation.score} " +
+                "action=${decision.action} lost=${decision.lostCount}",
+        )
+        return coarseLines + trackLines
     }
 
     /** 扫描地图资产目录，按上游 key 规则建 zoneId → 文件 索引。 */
@@ -5184,6 +5234,34 @@ class MaaRunner(private val agentHost: AgentHost) {
                 "heatmap: error: ${heatmap.error}"
             }
 
+            // 供 tracklocate 喂追踪状态机的本帧观测：优先热图路（精排分/框），否则灰度路命中框。
+            // box 是地图坐标下模板左上角 [x,y,w,h]，MapPosition 取模板中心。
+            debugCoarseObservation = run {
+                val hmBox = heatmap.box
+                val hmScore = heatmap.score
+                if (hmScore != null && hmBox != null && hmBox.size >= 4) {
+                    MapPosition(
+                        zoneId = targetZoneId,
+                        x = hmBox[0] + hmBox[2] / 2.0,
+                        y = hmBox[1] + hmBox[3] / 2.0,
+                        score = hmScore,
+                    )
+                } else if (hit && box != null && box.size >= 4 && score != null) {
+                    MapPosition(
+                        zoneId = targetZoneId,
+                        x = box[0] + box[2] / 2.0,
+                        y = box[1] + box[3] / 2.0,
+                        score = score,
+                    )
+                } else {
+                    null
+                }
+            }
+
+            // 两条路（灰度模板 / 路径热图）任一被接受即算定位成功；输出里标明是哪条过的，
+            // 免得只看 `result:` 的人以为整体失败（灰度路对这类雷达小地图天然不命中）。
+            val heatmapPass = heatmap.ok && heatmap.globalAccepted != null
+            val overallPass = outcome.hit || heatmapPass
             debugCoarseResult = listOf(
                 "zone selector: ${selector.ifBlank { "-" }}",
                 "yolo: index=${parsed.clsIndex} class=${coarse.rawClass} zone=${coarse.zoneId} " +
@@ -5202,13 +5280,21 @@ class MaaRunner(private val agentHost: AgentHost) {
                 "box: $boxText",
                 "in_map: ${outcome.inMap}",
                 "in_roi: ${outcome.inRoi}",
-                "result: ${if (outcome.hit) "PASS" else "FAIL"}",
+                "result: " + when {
+                    outcome.hit -> "PASS（灰度路）"
+                    heatmapPass -> "PASS（热图路 score=${heatmap.score ?: "-"}）"
+                    else -> "FAIL"
+                },
                 heatmapLine,
             )
 
             RunDiagnostics.note(
                 "maplocator",
-                "coarselocate｜${if (outcome.hit) "命中" else "未命中"} zone=$targetZoneId class=${coarse.rawClass}",
+                "coarselocate｜" + when {
+                    outcome.hit -> "命中（灰度路）"
+                    heatmapPass -> "命中（热图路 ${heatmap.score ?: "-"}）"
+                    else -> "未命中"
+                } + " zone=$targetZoneId class=${coarse.rawClass}",
                 mapOf(
                     "stage" to "coarse_locate",
                     "zone_id" to targetZoneId,

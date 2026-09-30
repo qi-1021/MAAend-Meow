@@ -552,6 +552,9 @@ class RemoteServiceImpl : RemoteService.Stub() {
 
         override fun coarseLocate(imagePath: String, zone: String?): List<String> =
             runner.debugCoarseLocate(imagePath, zone)
+
+        override fun trackLocate(imagePath: String?, zone: String?): List<String> =
+            runner.debugTrackLocate(imagePath, zone)
     }
 
     private companion object {

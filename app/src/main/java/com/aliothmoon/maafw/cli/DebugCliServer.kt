@@ -250,6 +250,8 @@ object DebugCliServer {
             is DebugCliIntent.YoloProbe -> host.yoloProbe(intent.imagePath)
 
             is DebugCliIntent.CoarseLocate -> host.coarseLocate(intent.imagePath, intent.zone)
+
+            is DebugCliIntent.TrackLocate -> host.trackLocate(intent.imagePath, intent.zone)
         }
 
     /**
@@ -389,6 +391,14 @@ interface DebugCliHost {
      * [zone] 是可选 expected zone selector；为空用 YOLO 分类结果。
      */
     fun coarseLocate(imagePath: String, zone: String?): List<String>
+
+    /**
+     * 追踪状态机单帧累加：走与 [coarseLocate] 相同的地图观测，喂进运行期保留的
+     * `MapLocatorTracking` 状态机，返回本帧裁决与累计状态。
+     *
+     * [imagePath] 为 null 时清空状态机（`tracklocate reset`）。
+     */
+    fun trackLocate(imagePath: String?, zone: String?): List<String>
 }
 
 /** [DebugCliHost.ocr] 的结果；[text] 为 null 时看 [reason]。 */

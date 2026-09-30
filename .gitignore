@@ -63,3 +63,6 @@ __pycache__/
 /agent-dist/
 /.tmp/
 /output_apks/
+
+# deepwork 会话状态（只留本地，不进 git）
+.slim/deepwork/

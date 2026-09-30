@@ -113,6 +113,7 @@ MAIN_FILES=(
   "$SRC/MapLocatorRefinePure.kt"
   "$SRC/MapLocatorPathHeatmap.kt"
   "$SRC/MapLocatorHeatmapPipeline.kt"
+  "$SRC/MapLocatorTracking.kt"
   "$SUP/SupplementPack.kt"
   "$SUP/SupplementPackLocal.kt"
   "$DIAG/RunDiagnosticsPolicy.kt"
@@ -171,6 +172,7 @@ TEST_FILES=(
   "$TST/MapLocatorRefinePureTest.kt"
   "$TST/MapLocatorPathHeatmapTest.kt"
   "$TST/MapLocatorHeatmapPipelineTest.kt"
+  "$TST/MapLocatorTrackingTest.kt"
   "$TSUP/SupplementPackTest.kt"
   "$TSUP/SupplementPackLocalTest.kt"
   "$TDIAG/RunDiagnosticsPolicyTest.kt"
@@ -229,6 +231,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.MapLocatorRefinePureTest
   com.aliothmoon.maafw.remote.MapLocatorPathHeatmapTest
   com.aliothmoon.maafw.remote.MapLocatorHeatmapPipelineTest
+  com.aliothmoon.maafw.remote.MapLocatorTrackingTest
   com.aliothmoon.maafw.supplement.SupplementPackTest
   com.aliothmoon.maafw.supplement.SupplementPackLocalTest
   com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest
@@ -386,6 +389,7 @@ fun main() {
         "com.aliothmoon.maafw.remote.MapLocatorRefinePureTest",
         "com.aliothmoon.maafw.remote.MapLocatorPathHeatmapTest",
         "com.aliothmoon.maafw.remote.MapLocatorHeatmapPipelineTest",
+        "com.aliothmoon.maafw.remote.MapLocatorTrackingTest",
         "com.aliothmoon.maafw.supplement.SupplementPackTest",
         "com.aliothmoon.maafw.supplement.SupplementPackLocalTest",
         "com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest",
