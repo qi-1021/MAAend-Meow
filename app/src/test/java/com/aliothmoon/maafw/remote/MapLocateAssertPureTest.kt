@@ -104,6 +104,73 @@ class MapLocateAssertPureTest {
         assertEquals(LocateStatus.NOT_INITIALIZED, outcome.finalFrame.status)
     }
 
+    // ───────────────── 画面静止快速失败（isScreenStatic） ─────────────────
+
+    @Test
+    fun `静止阈值常量对齐任务建议`() {
+        assertEquals(3, MapLocateAssertPure.ASSERT_LOCATE_STATIC_FRAMES_TO_FAIL)
+    }
+
+    @Test
+    fun `画面持续变化不会提前失败`() {
+        val n = MapLocateAssertPure.ASSERT_LOCATE_STATIC_FRAMES_TO_FAIL
+        // 每帧都不同：一直轮询到上限
+        assertFalse(MapLocateAssertPure.isScreenStatic((0 until 60).map { it.toLong() }))
+        // 有相同但从不连续到 N 帧
+        assertFalse(MapLocateAssertPure.isScreenStatic(listOf(1L, 1L, 2L, 2L, 3L, 3L)))
+        assertFalse(MapLocateAssertPure.isScreenStatic(List(n - 1) { 42L }))
+    }
+
+    @Test
+    fun `连续N帧相同则判定静止`() {
+        val n = MapLocateAssertPure.ASSERT_LOCATE_STATIC_FRAMES_TO_FAIL
+        assertTrue(MapLocateAssertPure.isScreenStatic(List(n) { 7L }))
+        assertTrue(MapLocateAssertPure.isScreenStatic(listOf(1L, 2L, 3L) + List(n) { 9L }))
+        // 全相同（远超阈值）
+        assertTrue(MapLocateAssertPure.isScreenStatic(List(60) { 5L }))
+    }
+
+    @Test
+    fun `第0帧与不足阈值的边界`() {
+        assertFalse(MapLocateAssertPure.isScreenStatic(emptyList()))
+        assertFalse(MapLocateAssertPure.isScreenStatic(listOf(1L)))
+        // 恰好 n-1 帧相同仍不算静止
+        assertFalse(
+            MapLocateAssertPure.isScreenStatic(
+                List(MapLocateAssertPure.ASSERT_LOCATE_STATIC_FRAMES_TO_FAIL - 1) { 1L },
+            ),
+        )
+        // 恰好 n 帧相同才算
+        assertTrue(
+            MapLocateAssertPure.isScreenStatic(
+                List(MapLocateAssertPure.ASSERT_LOCATE_STATIC_FRAMES_TO_FAIL) { 1L },
+            ),
+        )
+    }
+
+    @Test
+    fun `只认末尾连续窗口`() {
+        // 前面连续 3 帧相同，但末尾变了 → 不算静止
+        assertFalse(MapLocateAssertPure.isScreenStatic(listOf(1L, 1L, 1L, 2L)))
+        // 末尾恰好 3 帧相同 → 静止
+        assertTrue(MapLocateAssertPure.isScreenStatic(listOf(1L, 2L, 3L, 3L, 3L)))
+    }
+
+    @Test
+    fun `交替抖动不算静止`() {
+        assertFalse(MapLocateAssertPure.isScreenStatic(listOf(1L, 2L, 1L, 2L, 1L, 2L)))
+        assertFalse(MapLocateAssertPure.isScreenStatic(listOf(1L, 2L, 1L, 2L, 1L)))
+    }
+
+    @Test
+    fun `取帧失败 null 打断静止判定`() {
+        assertFalse(MapLocateAssertPure.isScreenStatic(listOf<Long?>(3L, 3L, 3L, null)))
+        assertFalse(MapLocateAssertPure.isScreenStatic(listOf<Long?>(3L, null, 3L, 3L)))
+        assertFalse(MapLocateAssertPure.isScreenStatic(listOf<Long?>(null, null, null)))
+        // null 之后重新累积满阈值（且中间无 null）又可以判定静止
+        assertTrue(MapLocateAssertPure.isScreenStatic(listOf<Long?>(1L, null, 4L, 4L, 4L)))
+    }
+
     @Test
     fun `buildAssertOptions 固定 expected_zone_id 与 force_global_search`() {
         val options = MapLocateAssertPure.buildAssertOptions(AssertLocationParam(zoneId = "Wuling_Base"))

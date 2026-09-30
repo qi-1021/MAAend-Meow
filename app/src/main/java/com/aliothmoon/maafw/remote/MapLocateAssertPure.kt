@@ -26,6 +26,23 @@ object MapLocateAssertPure {
     const val ASSERT_LOCATE_POLL_DELAY_MS = 250L
 
     /**
+     * 快速失败阈值：末尾连续这么多帧画面指纹完全一致，就认定「画面已静止」，
+     * 立即结束轮询并判未命中。
+     *
+     * 上游没有这个短路：真机上「传送后地图已开 / 卡在静态全屏地图页」时，60 帧里画面
+     * 可能一帧都没变，而每帧仍要跑一遍截图 + YOLO + 模板匹配 + 热图（实测 ~0.9s/帧），
+     * `cost≈54s` 纯属空转，还持续产生 on_error 失败帧。画面不再变化就意味着再等下去
+     * 也不会有地图出现，可以立刻判未命中。
+     *
+     * 它同时保住了「传送后等地图加载出来」：只要画面仍在变化（加载动画 / 渐入），
+     * [isScreenStatic] 就为 false，照常轮询到 [ASSERT_LOCATE_MAX_FRAMES]。
+     *
+     * 取值沿用任务建议的 2~3 帧上界；这是「快速失败」与「静态加载页误判」之间的折中，
+     * 是纯逻辑常量，真机复测若发现加载页被误杀可下调/上调。
+     */
+    const val ASSERT_LOCATE_STATIC_FRAMES_TO_FAIL = 3
+
+    /**
      * 单帧定位观测。
      *
      * [status] 对齐上游 [LocateStatus]；[position] 是追踪状态机稳定化后的绝对地图坐标。
@@ -75,6 +92,27 @@ object MapLocateAssertPure {
             framesPolled = frames.size,
             finalFrame = finalFrame,
         )
+    }
+
+    /**
+     * 依据逐帧画面指纹判断「画面已静止到可以提前放弃」。
+     *
+     * 判定只看**末尾连续**的 [ASSERT_LOCATE_STATIC_FRAMES_TO_FAIL] 帧：只要这窗口内指纹
+     * 全部相等且非 null，就认为画面停止变化、再等也不会有地图，返回 true。
+     *
+     * @param fingerprints 按轮询顺序记录的每帧画面指纹。`null` 表示该帧取帧失败、没有
+     *   可用画面：它既不算「相同」也不算「不同」，但会**打断连续计数**（落在窗口内即
+     *   返回 false），避免把「连续取帧失败」误判成「画面静止」。
+     * @return 画面已静止为 true；帧数不足阈值、或窗口内出现 null、或有差异时为 false。
+     */
+    fun isScreenStatic(fingerprints: List<Long?>): Boolean {
+        val n = ASSERT_LOCATE_STATIC_FRAMES_TO_FAIL
+        if (n <= 0 || fingerprints.size < n) return false
+        val first = fingerprints[fingerprints.size - n] ?: return false
+        for (i in fingerprints.size - n + 1 until fingerprints.size) {
+            if (fingerprints[i] != first) return false
+        }
+        return true
     }
 
     /**

@@ -5092,6 +5092,22 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    /**
+     * 画面指纹：对整帧像素做一次便宜的 64 位滚动哈希。
+     *
+     * 用于 [MapLocateAssertPure.isScreenStatic] 的「画面是否还在变」判定，以及
+     * 「与上一帧逐像素一致 → 复用上一帧定位结果」的短路。这里**逐像素**累加、不采样：
+     * 逐帧约 2M 次乘加在真机上是毫秒级，远低于本帧 YOLO + 模板匹配 + 热图的 ~0.9s；
+     * 换来的是把「哈希碰撞导致把不同画面误判成静止」的概率压到可忽略，避免误判。
+     */
+    private fun frameFingerprint(frame: ArgbImage): Long {
+        var h = 1125899906842597L
+        for (pixel in frame.pixels) {
+            h = h * 31 + pixel
+        }
+        return h
+    }
+
     /** 主动截一帧（assert 轮询的非首帧）。 */
     private fun captureArgbFrame(lib: MaaFrameworkLibrary): ArgbImage? {
         val ctrl = currentController ?: return null
@@ -5132,6 +5148,10 @@ class MaaRunner(private val agentHost: AgentHost) {
         synchronized(mapLocateAssertLock) {
             mapLocateAssertTracking.reset()
             val frames = ArrayList<MapLocateAssertPure.AssertFrame>(MapLocateAssertPure.ASSERT_LOCATE_MAX_FRAMES)
+            // 逐帧画面指纹：既用于「画面静止 → 提前失败」，也用于「与上一帧逐像素一致 → 复用定位结果」
+            val fingerprints = ArrayList<Long?>(MapLocateAssertPure.ASSERT_LOCATE_MAX_FRAMES)
+            var prevFingerprint: Long? = null
+            var prevLocated: MinimapLocateFrame? = null
             val firstFrame = if (image != null && lib.MaaImageBufferIsEmpty(image).toInt() == 0) {
                 decodeArgbFromBuffer(lib, image)
             } else {
@@ -5141,13 +5161,29 @@ class MaaRunner(private val agentHost: AgentHost) {
             for (index in 0 until MapLocateAssertPure.ASSERT_LOCATE_MAX_FRAMES) {
                 val frame = if (index == 0) firstFrame else captureArgbFrame(lib)
                 if (frame == null) {
+                    // 取帧失败：指纹记 null（不参与静止判定、且打断连续计数），也不复用上一帧定位结果
+                    fingerprints += null
+                    prevFingerprint = null
+                    prevLocated = null
                     frames += MapLocateAssertPure.AssertFrame(LocateStatus.TRACKING_LOST, null, "取帧失败")
                 } else {
-                    val located = runCatching {
-                        locateMinimapFrame(lib, context, frame, options, assets, mapLocateAssertHeatmapCache)
-                    }.getOrElse {
-                        MinimapLocateFrame(LocateStatus.TRACKING_LOST, null, "${it.javaClass.simpleName}: ${it.message}")
+                    val fingerprint = frameFingerprint(frame)
+                    fingerprints += fingerprint
+                    // 画面与上一帧逐像素一致 → 定位输入完全相同、输出确定，直接复用上一帧结果，
+                    // 省掉这一帧的 YOLO + 模板匹配 + 热图（~0.9s）；喂给追踪状态机的观测与上游逐帧重跑等价。
+                    val reuse = prevLocated != null && prevFingerprint != null && prevFingerprint == fingerprint
+                    val located = if (reuse) {
+                        Ln.i("MaaRunner: MapLocateAssertLocation 画面未变，复用上一帧定位结果 (frame=$index)")
+                        prevLocated
+                    } else {
+                        runCatching {
+                            locateMinimapFrame(lib, context, frame, options, assets, mapLocateAssertHeatmapCache)
+                        }.getOrElse {
+                            MinimapLocateFrame(LocateStatus.TRACKING_LOST, null, "${it.javaClass.simpleName}: ${it.message}")
+                        }
                     }
+                    prevFingerprint = fingerprint
+                    prevLocated = located
                     val decision = located.observation?.let {
                         mapLocateAssertTracking.feed(it, System.nanoTime() / 1_000_000_000.0)
                     }
@@ -5162,6 +5198,14 @@ class MaaRunner(private val agentHost: AgentHost) {
                 if (last.located && last.position != null &&
                     MapLocateActionPure.isPositionInsideRect(last.position, targetRect)
                 ) {
+                    break
+                }
+                // 画面已连续 N 帧完全不变：再等也不会有地图，立即结束并判未命中
+                if (MapLocateAssertPure.isScreenStatic(fingerprints)) {
+                    Ln.i(
+                        "MaaRunner: MapLocateAssertLocation 画面连续 " +
+                            "${MapLocateAssertPure.ASSERT_LOCATE_STATIC_FRAMES_TO_FAIL} 帧未变，提前结束轮询",
+                    )
                     break
                 }
                 if (index + 1 < MapLocateAssertPure.ASSERT_LOCATE_MAX_FRAMES) {
