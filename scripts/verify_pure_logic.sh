@@ -111,6 +111,7 @@ MAIN_FILES=(
   "$SRC/YoloClassifySupport.kt"
   "$SRC/MapLocatorCoarsePure.kt"
   "$SRC/MapLocatorRefinePure.kt"
+  "$SRC/MapLocatorPathHeatmap.kt"
   "$SUP/SupplementPack.kt"
   "$SUP/SupplementPackLocal.kt"
   "$DIAG/RunDiagnosticsPolicy.kt"
@@ -167,6 +168,7 @@ TEST_FILES=(
   "$TST/YoloClassifySupportTest.kt"
   "$TST/MapLocatorCoarsePureTest.kt"
   "$TST/MapLocatorRefinePureTest.kt"
+  "$TST/MapLocatorPathHeatmapTest.kt"
   "$TSUP/SupplementPackTest.kt"
   "$TSUP/SupplementPackLocalTest.kt"
   "$TDIAG/RunDiagnosticsPolicyTest.kt"
@@ -223,6 +225,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.YoloClassifySupportTest
   com.aliothmoon.maafw.remote.MapLocatorCoarsePureTest
   com.aliothmoon.maafw.remote.MapLocatorRefinePureTest
+  com.aliothmoon.maafw.remote.MapLocatorPathHeatmapTest
   com.aliothmoon.maafw.supplement.SupplementPackTest
   com.aliothmoon.maafw.supplement.SupplementPackLocalTest
   com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest
@@ -378,6 +381,7 @@ fun main() {
         "com.aliothmoon.maafw.remote.YoloClassifySupportTest",
         "com.aliothmoon.maafw.remote.MapLocatorCoarsePureTest",
         "com.aliothmoon.maafw.remote.MapLocatorRefinePureTest",
+        "com.aliothmoon.maafw.remote.MapLocatorPathHeatmapTest",
         "com.aliothmoon.maafw.supplement.SupplementPackTest",
         "com.aliothmoon.maafw.supplement.SupplementPackLocalTest",
         "com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest",
