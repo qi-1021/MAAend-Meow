@@ -39,6 +39,25 @@ interface AppSettingsGateway {
     val debugMode: StateFlow<Boolean>
     suspend fun setDebugMode(enabled: Boolean)
 
+    // ── 远程调试（仅 debug 构建生效） ──
+
+    /** 远程调试开关；开启后 CLI 监听非回环，远程连接需令牌 */
+    val remoteDebug: StateFlow<Boolean>
+    suspend fun setRemoteDebug(enabled: Boolean)
+
+    /** 远程调试令牌；可查看 / 复制 / 重置 */
+    val remoteDebugToken: StateFlow<String>
+
+    /** 确保已有令牌，没有就生成一个并落盘，返回当前值 */
+    suspend fun ensureRemoteDebugToken(): String
+
+    /** 重置令牌（立即作废已鉴权会话），返回新令牌 */
+    suspend fun resetRemoteDebugToken(): String
+
+    /** 强安全警告的「我已知晓，不再提示」 */
+    val remoteDebugWarningAcknowledged: StateFlow<Boolean>
+    suspend fun setRemoteDebugWarningAcknowledged(acknowledged: Boolean)
+
     val themeStyle: StateFlow<ThemeStyle>
     suspend fun setThemeStyle(style: ThemeStyle)
 

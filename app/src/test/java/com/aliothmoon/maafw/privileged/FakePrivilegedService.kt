@@ -2,6 +2,7 @@ package com.aliothmoon.maafw.privileged
 
 import android.os.IBinder
 import android.view.Surface
+import com.aliothmoon.maafw.IAppCommandCallback
 import com.aliothmoon.maafw.IMaaRunnerCallback
 import com.aliothmoon.maafw.ITouchEventCallback
 import com.aliothmoon.maafw.RemoteService
@@ -77,6 +78,40 @@ open class FakePrivilegedService : RemoteService {
     override fun pid(): Int = 0
     override fun heartbeat(appPid: Int) = Unit
     override fun setup(piRoot: String?, logDir: String?, isDebug: Boolean): Boolean = setupResult
+
+    /** 调试 CLI 协调器注册的反向命令桥；测试可据此触发 start/stop 请求 */
+    var appCommandCallback: IAppCommandCallback? = null
+        private set
+
+    /** 最近一次 configureDebugCli 的入参；null 表示从未调用 */
+    data class DebugCliConfig(
+        val piRoot: String?,
+        val logDir: String?,
+        val enabled: Boolean,
+        val remoteEnabled: Boolean,
+        val token: String?,
+    )
+
+    var lastDebugCliConfig: DebugCliConfig? = null
+        private set
+    var debugCliConfigureCount: Int = 0
+        private set
+
+    override fun configureDebugCli(
+        piRoot: String?,
+        logDir: String?,
+        enabled: Boolean,
+        remoteEnabled: Boolean,
+        token: String?,
+    ): Boolean {
+        debugCliConfigureCount++
+        lastDebugCliConfig = DebugCliConfig(piRoot, logDir, enabled, remoteEnabled, token)
+        return enabled
+    }
+
+    override fun setAppCommandCallback(callback: IAppCommandCallback?) {
+        appCommandCallback = callback
+    }
     override fun setVirtualDisplayMode(mode: Int): Boolean = true
     override fun setVirtualDisplayResolution(width: Int, height: Int, dpi: Int) = Unit
     override fun startVirtualDisplay(): Int = 1

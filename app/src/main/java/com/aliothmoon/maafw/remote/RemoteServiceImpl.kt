@@ -1,6 +1,7 @@
 package com.aliothmoon.maafw.remote
 
 import com.aliothmoon.maafw.IMaaRunnerCallback
+import com.aliothmoon.maafw.IAppCommandCallback
 import com.aliothmoon.maafw.ITouchEventCallback
 import com.aliothmoon.maafw.RemoteService
 import com.aliothmoon.maafw.BuildConfig
@@ -31,6 +32,8 @@ import com.aliothmoon.maafw.third.wrappers.ServiceManager
 import com.aliothmoon.maafw.third.Workarounds
 import android.view.Surface
 import android.os.Process
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -46,6 +49,10 @@ class RemoteServiceImpl : RemoteService.Stub() {
     private val appPid = AtomicInteger(0)
     private val destroyed = AtomicBoolean(false)
     private var piRoot: String? = null
+
+    /** 调试 CLI 的 start/stop 反向桥；由 app 进程注册，CLI 收到命令时回调。 */
+    @Volatile
+    private var appCommandCallback: IAppCommandCallback? = null
 
     // 两者互相引用：host 要把 child 的输出交回 runner 的回调。用 lazy 打破初始化顺序——
     // host 的 lambda 到真正有输出时才读 runner，那会儿它早已建好
@@ -311,6 +318,44 @@ class RemoteServiceImpl : RemoteService.Stub() {
         runner.setCallback(callback)
     }
 
+    override fun setAppCommandCallback(callback: IAppCommandCallback?) {
+        appCommandCallback = callback
+        Ln.i("$TAG: setAppCommandCallback registered=${callback != null}")
+    }
+
+    /**
+     * 预初始化调试 CLI，让它在 App 启动（调试模式开启）时就监听，而不必先跑一次任务。
+     *
+     * 只提前 CLI 真正需要的部分：[MaaRunner.setProjectRoot]（纯路径赋值 + 清两处缓存，无 IO/无 native）
+     * 与 [DebugCliServer.configure]。**不搬** setup() 的其余副作用：
+     *  - `disablePhantomProcessKiller()`：改系统设置，只在真要 fork agent child 前才该做；
+     *  - `applyGlobalOptions()`：配置 MaaFramework native 日志，需要 native 库与明确的 logDir；
+     *  - `RunDiagnostics.start()`：会建目录 / 落盘，属于「开跑」才发生的事。
+     * 这三项继续留在 setup()，从「提前」改为「维持原位」。
+     *
+     * 硬门控：release 构建 BuildConfig.DEBUG 为 false，整段 no-op，不监听端口、不建文件。
+     */
+    override fun configureDebugCli(
+        piRoot: String?,
+        logDir: String?,
+        enabled: Boolean,
+        remoteEnabled: Boolean,
+        token: String?,
+    ): Boolean {
+        if (!BuildConfig.DEBUG) return false
+        if (!enabled) {
+            DebugCliServer.stop()
+            return false
+        }
+        if (!piRoot.isNullOrBlank() && File(piRoot).isDirectory) {
+            // 纯路径赋值：CLI 的 status / 探针要它；与 setup() 同源，重复设置幂等
+            runner.setProjectRoot(piRoot)
+        }
+        val dir = logDir?.takeIf { it.isNotBlank() } ?: return false
+        DebugCliServer.configure(DebugCliRunnerHost(dir), remoteEnabled, token)
+        return true
+    }
+
     override fun startRun(runPlanJson: String?): Boolean {
         if (runPlanJson.isNullOrBlank()) return false
         val started = runner.start(runPlanJson)
@@ -466,6 +511,31 @@ class RemoteServiceImpl : RemoteService.Stub() {
         override fun screenshotDir(): File = cliDir
 
         override fun screenshot(target: File): String? = runner.debugSaveCachedImage(target.absolutePath)
+
+        /**
+         * 启动任务：特权进程拿不到 RunPlan（在 app 进程构建），经反向桥请求 app 侧用
+         * 既有 RunLauncher → RunnerPort 代发。桥未注册时如实说明，不硬造。
+         */
+        override fun start(taskNames: List<String>): String {
+            val callback = appCommandCallback
+                ?: return "error: app 未注册启动桥（确认 app 在前台且调试模式已开启）"
+            val json = JsonArray(taskNames.map { JsonPrimitive(it) }).toString()
+            return runCatching {
+                callback.onStartTasks(json)
+                val target = if (taskNames.isEmpty()) "当前激活配置全部任务" else taskNames.joinToString(" ")
+                "已请求 app 侧启动：$target（用 status / logtail 观察进度）"
+            }.getOrElse { "error: 请求 app 启动失败：${it.javaClass.simpleName}: ${it.message}" }
+        }
+
+        /** 停止任务：同样回落给 app 侧 [com.aliothmoon.maafw.runner.RunnerPort.stop]。 */
+        override fun stop(): String {
+            val callback = appCommandCallback
+                ?: return "error: app 未注册启动桥（确认 app 在前台且调试模式已开启）"
+            return runCatching {
+                callback.onStopRun()
+                "已请求 app 侧停止当前任务"
+            }.getOrElse { "error: 请求 app 停止失败：${it.javaClass.simpleName}: ${it.message}" }
+        }
 
         override fun ocr(nodeName: String): DebugCliOcrResult {
             val outcome = runner.debugOcrOnce(nodeName)

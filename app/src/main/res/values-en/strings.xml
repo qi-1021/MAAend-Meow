@@ -570,6 +570,21 @@
     <string name="dialog_enable_debug_title">Enable debug mode</string>
     <string name="dialog_enable_debug_message">Requires an app restart to take effect. Detailed MaaFramework logs plus app and privileged-process logcat will be recorded.</string>
 
+    <!-- Remote debug (debug builds only) -->
+    <string name="settings_remote_debug">Remote debug</string>
+    <string name="settings_remote_debug_desc">When enabled, the debug CLI also listens on the LAN; remote connections must enter a token. Off by default</string>
+    <string name="settings_remote_debug_port">Port %1$d; loopback (adb forward) still needs no token</string>
+    <string name="dialog_remote_debug_title">⚠ High-risk action</string>
+    <string name="dialog_remote_debug_message">Once enabled, anyone who obtains the access address and token can remotely control this device and app, including starting/stopping tasks, reading screenshots and logs, and simulating taps.\n\nEnable it only on a network you trust, and turn it off when not in use. Keep the token secret; if you suspect a leak, reset it immediately.</string>
+    <string name="dialog_remote_debug_ack">I understand, don\'t show again</string>
+    <string name="dialog_remote_debug_confirm">I understand the risk, enable anyway</string>
+    <string name="remote_debug_token_label">Access token</string>
+    <string name="remote_debug_token_copy">Copy</string>
+    <string name="remote_debug_token_reset">Reset</string>
+    <string name="remote_debug_token_reset_title">Reset access token</string>
+    <string name="remote_debug_token_reset_message">Resetting immediately invalidates the old token and disconnects authenticated remote sessions; they must re-authenticate with the new token.</string>
+    <string name="remote_debug_copied">Token copied</string>
+
     <!-- PI unpacking -->
     <string name="pi_install_title">Preparing project resources</string>
     <string name="pi_install_progress">%1$d / %2$d (%3$d%%)</string>

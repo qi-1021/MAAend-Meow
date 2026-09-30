@@ -363,4 +363,124 @@ class DebugCliSupportTest {
         val text = DebugCliSupport.statusText(ctx(projectRoot = "  "))
         assertTrue(text.contains("(未设置)"))
     }
+
+    // ───────────────────── 远程调试门控 ─────────────────────
+
+    private fun remoteCtx(authenticated: Boolean = false) = DebugCliContext(
+        projectRoot = "/pi",
+        controllerReady = true,
+        taskRunning = false,
+        reportDir = "/r",
+        logDir = "/l",
+        remoteEnabled = true,
+        connection = DebugCliConnection.REMOTE,
+        authenticated = authenticated,
+    )
+
+    @Test
+    fun `远程未鉴权时 status 被拒`() {
+        assertTrue(failure("status", remoteCtx()).contains("未鉴权"))
+    }
+
+    @Test
+    fun `远程未鉴权时 screenshot 被拒`() {
+        assertTrue(failure("screenshot", remoteCtx()).contains("未鉴权"))
+    }
+
+    @Test
+    fun `远程未鉴权时 start 被拒`() {
+        assertTrue(failure("start", remoteCtx()).contains("未鉴权"))
+    }
+
+    @Test
+    fun `远程未鉴权时未知命令也只报销鉴权`() {
+        assertTrue(failure("frobnicate", remoteCtx()).contains("未鉴权"))
+    }
+
+    @Test
+    fun `远程未鉴权时 auth 放行`() {
+        assertEquals(DebugCliIntent.Auth("tok"), ok("auth tok", remoteCtx()))
+    }
+
+    @Test
+    fun `远程未鉴权时 help 放行`() {
+        assertEquals(DebugCliIntent.Help, ok("help", remoteCtx()))
+    }
+
+    @Test
+    fun `远程已鉴权后可执行 status`() {
+        assertEquals(DebugCliIntent.Status, ok("status", remoteCtx(authenticated = true)))
+    }
+
+    @Test
+    fun `回环连接远程开关开启也免令牌`() {
+        val loopback = remoteCtx().copy(connection = DebugCliConnection.LOOPBACK)
+        assertEquals(DebugCliIntent.Status, ok("status", loopback))
+    }
+
+    @Test
+    fun `远程开关关闭时远程连接不门控`() {
+        val ctx = remoteCtx().copy(remoteEnabled = false)
+        assertEquals(DebugCliIntent.Status, ok("status", ctx))
+    }
+
+    @Test
+    fun `requiresAuth 只在远程未鉴权且开关开启时为真`() {
+        assertTrue(remoteCtx().requiresAuth)
+        assertFalse(remoteCtx(authenticated = true).requiresAuth)
+        assertFalse(remoteCtx().copy(connection = DebugCliConnection.LOOPBACK).requiresAuth)
+        assertFalse(remoteCtx().copy(remoteEnabled = false).requiresAuth)
+    }
+
+    // ───────────────────── auth ─────────────────────
+
+    @Test
+    fun `auth 缺少令牌报错`() {
+        assertTrue(failure("auth").contains("需要一个令牌"))
+    }
+
+    @Test
+    fun `auth 多余参数报错`() {
+        assertTrue(failure("auth a b").contains("只接受一个令牌"))
+    }
+
+    @Test
+    fun `auth 返回令牌意图`() {
+        assertEquals(DebugCliIntent.Auth("AbC-123_"), ok("auth AbC-123_"))
+    }
+
+    // ───────────────────── start / stop ─────────────────────
+
+    @Test
+    fun `start 无参数表示当前激活配置`() {
+        assertEquals(DebugCliIntent.Start(emptyList()), ok("start"))
+    }
+
+    @Test
+    fun `start 带任务名按序保留`() {
+        assertEquals(DebugCliIntent.Start(listOf("StartUp", "Reception")), ok("start StartUp Reception"))
+    }
+
+    @Test
+    fun `start 命令名大小写不敏感`() {
+        assertEquals(DebugCliIntent.Start(emptyList()), ok("START"))
+    }
+
+    @Test
+    fun `stop 返回停止意图`() {
+        assertEquals(DebugCliIntent.Stop, ok("stop"))
+    }
+
+    @Test
+    fun `stop 不接受参数`() {
+        assertTrue(failure("stop now").contains("不接受参数"))
+    }
+
+    @Test
+    fun `helpText 列出 start stop auth`() {
+        val text = DebugCliSupport.helpText()
+        for (command in listOf("start", "stop", "auth")) {
+            assertTrue("helpText 缺少 $command", text.contains(command))
+        }
+    }
 }

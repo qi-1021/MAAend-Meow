@@ -1,6 +1,7 @@
 package com.aliothmoon.maafw.di
 
 import com.aliothmoon.maafw.MaaDispatchers
+import com.aliothmoon.maafw.cli.DebugCliCoordinator
 import com.aliothmoon.maafw.i18n.LocalizedTextRenderer
 import com.aliothmoon.maafw.overlay.screensaver.ScreenSaverOverlayManager
 import com.aliothmoon.maafw.runner.AutoSleepHook
@@ -137,6 +138,18 @@ val runnerModule = module {
             runMode = get<AppSettingsManager>().runMode::value,
             scope = get(named<AppCoroutineScope>()),
             journal = get(),
+        )
+    }
+
+    // 调试 CLI 协调器：debug 构建下 App 启动即拉起 CLI，并注册 start/stop 反向桥
+    single {
+        DebugCliCoordinator(
+            settings = get(),
+            servicePort = get(),
+            installer = get(),
+            runLauncher = get(),
+            runnerPort = get(),
+            scope = get(named<AppCoroutineScope>()),
         )
     }
 }

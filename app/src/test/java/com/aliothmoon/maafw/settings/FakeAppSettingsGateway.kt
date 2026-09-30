@@ -68,6 +68,33 @@ class FakeAppSettingsGateway : AppSettingsGateway {
         debugMode.value = enabled
     }
 
+    override val remoteDebug = MutableStateFlow(false)
+
+    override suspend fun setRemoteDebug(enabled: Boolean) {
+        remoteDebug.value = enabled
+    }
+
+    override val remoteDebugToken = MutableStateFlow("")
+
+    private var tokenSeq = 0
+
+    override suspend fun ensureRemoteDebugToken(): String {
+        if (remoteDebugToken.value.isBlank()) resetRemoteDebugToken()
+        return remoteDebugToken.value
+    }
+
+    override suspend fun resetRemoteDebugToken(): String {
+        val token = "test-token-${++tokenSeq}"
+        remoteDebugToken.value = token
+        return token
+    }
+
+    override val remoteDebugWarningAcknowledged = MutableStateFlow(false)
+
+    override suspend fun setRemoteDebugWarningAcknowledged(acknowledged: Boolean) {
+        remoteDebugWarningAcknowledged.value = acknowledged
+    }
+
     override val themeStyle = MutableStateFlow(ThemeStyle.DEFAULT)
 
     override suspend fun setThemeStyle(style: ThemeStyle) {

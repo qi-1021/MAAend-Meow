@@ -91,6 +91,15 @@ class AppSettingsManager(private val context: Context) : AppSettingsGateway {
     private val _debugMode = MutableStateFlow(defaults.debugMode.toBoolean())
     override val debugMode: StateFlow<Boolean> = _debugMode.asStateFlow()
 
+    private val _remoteDebug = MutableStateFlow(defaults.remoteDebug.toBoolean())
+    override val remoteDebug: StateFlow<Boolean> = _remoteDebug.asStateFlow()
+
+    private val _remoteDebugToken = MutableStateFlow(defaults.remoteDebugToken)
+    override val remoteDebugToken: StateFlow<String> = _remoteDebugToken.asStateFlow()
+
+    private val _remoteDebugWarningAcknowledged = MutableStateFlow(defaults.remoteDebugWarningAcknowledged.toBoolean())
+    override val remoteDebugWarningAcknowledged: StateFlow<Boolean> = _remoteDebugWarningAcknowledged.asStateFlow()
+
     private val _themeStyle = MutableStateFlow(parseThemeStyle(defaults.themeStyle))
     override val themeStyle: StateFlow<ThemeStyle> = _themeStyle.asStateFlow()
 
@@ -143,6 +152,9 @@ class AppSettingsManager(private val context: Context) : AppSettingsGateway {
                 _touchPreviewEnabled.value = s.touchPreviewEnabled.toBoolean()
                 _resolutionPreference.value = parseResolutionPreference(s.resolutionPreference)
                 _debugMode.value = s.debugMode.toBoolean()
+                _remoteDebug.value = s.remoteDebug.toBoolean()
+                _remoteDebugToken.value = s.remoteDebugToken
+                _remoteDebugWarningAcknowledged.value = s.remoteDebugWarningAcknowledged.toBoolean()
                 _themeStyle.value = parseThemeStyle(s.themeStyle)
                 _eventNotificationLevel.value = parseEventNotificationLevel(s.eventNotificationLevel)
                 _wakeUnlockEnabled.value = s.wakeUnlockEnabled.toBoolean()
@@ -204,6 +216,28 @@ class AppSettingsManager(private val context: Context) : AppSettingsGateway {
 
     override suspend fun setDebugMode(enabled: Boolean): Unit = with(AppSettingsSchema) {
         context.dataStore.edit { it[debugMode] = enabled.toString() }
+    }
+
+    override suspend fun setRemoteDebug(enabled: Boolean): Unit = with(AppSettingsSchema) {
+        context.dataStore.edit { it[remoteDebug] = enabled.toString() }
+    }
+
+    override suspend fun ensureRemoteDebugToken(): String {
+        val existing = remoteDebugToken.value.takeIf { it.isNotBlank() }
+        if (existing != null) return existing
+        return resetRemoteDebugToken()
+    }
+
+    override suspend fun resetRemoteDebugToken(): String {
+        val token = com.aliothmoon.maafw.cli.debugCliNewToken()
+        with(AppSettingsSchema) {
+            context.dataStore.edit { it[remoteDebugToken] = token }
+        }
+        return token
+    }
+
+    override suspend fun setRemoteDebugWarningAcknowledged(acknowledged: Boolean): Unit = with(AppSettingsSchema) {
+        context.dataStore.edit { it[remoteDebugWarningAcknowledged] = acknowledged.toString() }
     }
 
     override suspend fun setThemeStyle(style: ThemeStyle): Unit = with(AppSettingsSchema) {

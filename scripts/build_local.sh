@@ -15,8 +15,13 @@
 #    `upstream/maaend/assets` 的工作树。CI 在 gradle 之前显式跑它
 #    （`.github/workflows/build-apk.yml`）；**本地直接 gradle 会拿到没打补丁的管线**——
 #    那种包能装、能跑，但行为与发布包不一致，调试结论会假。
-# 2. **固定 JDK 17**：与 CI 对齐（actions/setup-java 用 17）。工具链位置见下。
-# 3. **固定 SDK / Gradle 家目录**：都放移动硬盘（系统盘空间紧张）。
+# 2. **必须跑 `setup_maa_framework.py`**：MaaFramework 的 13 个 native `.so`
+#    （`libMaaFramework.so` 等，约 225 MB）不在 git 里，由这个脚本从 GitHub Release
+#    下载并铺进 `app/src/main/jniLibs/<abi>/`。**漏了它打出的包会缺 `libMaaFramework.so`**：
+#    能装、能开 UI，但框架加载失败（`MAA_LOAD_FAIL UnsatisfiedLinkError`）、
+#    任何任务都以 `NOT_RUN` 立刻收场——昨天就踩了这个坑。
+# 3. **固定 JDK 17**：与 CI 对齐（actions/setup-java 用 17）。工具链位置见下。
+# 4. **固定 SDK / Gradle 家目录**：都放移动硬盘（系统盘空间紧张）。
 #
 set -euo pipefail
 
@@ -44,10 +49,19 @@ export ANDROID_SDK_ROOT="$ANDROID_SDK"
 VARIANT="${1:-debug}"
 cd "$REPO_ROOT"
 
-echo "== [1/2] 打上游补丁（prepare_maaend.py，与 CI 同一步）=="
+echo "== [1/3] 打上游补丁（prepare_maaend.py，与 CI 同一步）=="
 python3 scripts/prepare_maaend.py
 
-echo "== [2/2] gradle assemble${VARIANT} =="
+echo "== [2/3] 铺 MaaFramework native 库（setup_maa_framework.py，与 CI 同一步）=="
+# 有 gh 登录就带上 token，避免 API 限流；没有也能跑（脚本会退化为匿名请求）
+MAAFW_TOKEN="$(env -u http_proxy -u https_proxy gh auth token 2>/dev/null || true)"
+if [ -n "$MAAFW_TOKEN" ]; then
+  GITHUB_TOKEN="$MAAFW_TOKEN" python3 scripts/setup_maa_framework.py --abi arm64-v8a
+else
+  python3 scripts/setup_maa_framework.py --abi arm64-v8a
+fi
+
+echo "== [3/3] gradle assemble${VARIANT} =="
 case "$VARIANT" in
   debug)   ./gradlew assembleDebug ;;
   release) ./gradlew assembleRelease ;;

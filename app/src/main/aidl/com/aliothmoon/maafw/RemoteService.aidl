@@ -3,6 +3,7 @@ package com.aliothmoon.maafw;
 import android.view.Surface;
 import com.aliothmoon.maafw.ITouchEventCallback;
 import com.aliothmoon.maafw.IMaaRunnerCallback;
+import com.aliothmoon.maafw.IAppCommandCallback;
 
 /**
  * 特权进程的服务面（docs/privileged-runtime.md §6）
@@ -145,4 +146,22 @@ interface RemoteService {
      * 在后台虚拟屏模式下直接在虚拟屏上拉起，在前台模式下拉起至主屏。
      */
     boolean startTargetApp(String packageName) = 76;
+
+    // ── 调试 CLI（仅 debug 构建生效） ──
+
+    /**
+     * 预初始化 / 重配调试 CLI。App 启动时（调试模式开启）调一次，让 CLI 从第一刻就在监听，
+     * 不必先跑任务；远程开关与令牌变化时也调它。
+     *
+     * 只做 CLI 需要的初始化（设置 PI 根、启动监听），**不**搬 setup() 的其余副作用：
+     * applyGlobalOptions / RunDiagnostics.start / disablePhantomProcessKiller 仍留在开跑时。
+     * enabled=false 停止监听。release 下 BuildConfig.DEBUG 硬门控，本方法直接 no-op。
+     */
+    boolean configureDebugCli(String piRoot, String logDir, boolean enabled, boolean remoteEnabled, String token) = 80;
+
+    /**
+     * app 侧注册反向命令桥：CLI 收到 start/stop 时回调它，由 app 进程走既有 RunLauncher / RunnerPort。
+     * 传 null 解注册。特权进程重启后 app 需重新注册。
+     */
+    oneway void setAppCommandCallback(IAppCommandCallback callback) = 81;
 }

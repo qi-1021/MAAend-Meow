@@ -65,6 +65,25 @@ data class AppSettings(
     @PrefKey(default = "false")
     val debugMode: String = "false",
 
+    /**
+     * 远程调试：开启后调试 CLI 额外监听非回环地址，远程连接必须先 `auth <token>`。
+     * 默认关；开启前必须过强安全警告。回环连接始终免令牌。
+     */
+    @PrefKey(default = "false")
+    val remoteDebug: String = "false",
+
+    /**
+     * 远程调试令牌；由 App 用 [com.aliothmoon.maafw.cli.debugCliNewToken] 生成。
+     * 明文存本 DataStore：它只是「谁可访问」的共享密钥，不是用户的账号凭证；
+     * 重置即作废已鉴权会话。空表示尚未生成。
+     */
+    @PrefKey(default = "")
+    val remoteDebugToken: String = "",
+
+    /** 远程调试安全警告的「我已知晓，不再提示」；只影响要不要再弹警告 */
+    @PrefKey(default = "false")
+    val remoteDebugWarningAcknowledged: String = "false",
+
     /** [com.aliothmoon.maafw.theme.ThemeStyle] 的 name；DEFAULT 暖石蓝，SEMI_DESIGN 取 Semi Design 配色 */
     @PrefKey(default = "DEFAULT")
     val themeStyle: String = "DEFAULT",

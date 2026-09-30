@@ -99,6 +99,8 @@ class RunLauncher(
      * @param configurationId null 跑当前激活的那份；定时规则可以指定别的
      * @param requestId 非 null 时做幂等：同一个 id 第二次进来直接 [RunLaunchResult.DuplicateRequest]
      * @param force 已有执行在跑时是否掐掉它再上；false 就让 RunnerPort 拒
+     * @param taskFilter 非空时按 taskName 过滤已构建的计划（调试 CLI 的 `start <task...>` 用）；
+     *   过滤后无任务即 [RunLaunchResult.NoExecutableTasks]
      * @param steps 非 null 时把每个挂载物的落点抄一份给调用方，用于记账
      * @param signals 用户的打断面；只有会等待的挂载物（倒计时）读它
      * @param progress 挂载物的进度上报口；调用方决定往哪显示
@@ -109,6 +111,7 @@ class RunLauncher(
         configurationId: RunConfigurationId? = null,
         requestId: RunRequestId? = null,
         force: Boolean = false,
+        taskFilter: Set<String> = emptySet(),
         steps: RunStepSink? = null,
         signals: RunSignals = RunSignals(),
         progress: RunProgress = RunProgress { _, _ -> },
@@ -138,11 +141,18 @@ class RunLauncher(
                 clientVersion = BuildConfig.VERSION_NAME,
                 clientLanguage = AppLocales.currentProjectTag(),
             )
-            val plan = when (built) {
+            val basePlan = when (built) {
                 RunPlanResult.NoExecutableTasks -> return RunLaunchResult.NoExecutableTasks
                 is RunPlanResult.Invalid -> return RunLaunchResult.Invalid(built.diagnostics)
                 is RunPlanResult.Success -> built.plan
             }
+            // 调试 CLI 的 start <task...>：在既有计划上按 taskName 过滤，不绕开 RunPlanBuilder
+            val plan = if (taskFilter.isEmpty()) {
+                basePlan
+            } else {
+                basePlan.copy(tasks = basePlan.tasks.filter { it.taskName in taskFilter })
+            }
+            if (plan.tasks.isEmpty()) return RunLaunchResult.NoExecutableTasks
 
             val ctx = RunContext(trigger, runMode(), plan, acknowledged, signals, progress, journal)
             runPrechecks(ctx)?.let { return it }

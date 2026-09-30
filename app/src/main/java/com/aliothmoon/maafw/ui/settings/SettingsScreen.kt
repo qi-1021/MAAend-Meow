@@ -26,6 +26,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -57,6 +58,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.core.net.toUri
 import com.aliothmoon.maafw.BuildConfig
 import com.aliothmoon.maafw.R
+import com.aliothmoon.maafw.cli.DEBUG_CLI_PORT
 import com.aliothmoon.maafw.domain.RemoteBackend
 import com.aliothmoon.maafw.domain.ThemeMode
 import com.aliothmoon.maafw.i18n.AppLocales
@@ -328,6 +330,12 @@ private fun LogCard(
     onExportLogs: () -> Unit,
 ) {
     var showEnableConfirm by remember { mutableStateOf(false) }
+    // 远程调试：强安全警告、令牌重置各有自己的确认框；勾选态是弹窗内本地状态
+    var showRemoteWarning by remember { mutableStateOf(false) }
+    var remoteWarningAck by remember { mutableStateOf(state.remoteDebugWarningAcknowledged) }
+    var showResetTokenConfirm by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
     MaaCard(title = stringResource(R.string.settings_section_log), collapsible = true) {
         MaaNavigationRow(
             label = stringResource(R.string.log_archive_title),
@@ -362,6 +370,68 @@ private fun LogCard(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+
+        // 远程调试只在调试模式下有意义：CLI 本身也要调试模式才起
+        if (state.debugMode) {
+            Spacer(Modifier.height(MaaDesignTokens.Spacing.sm))
+            MaaLabeledControlRow(
+                label = stringResource(R.string.settings_remote_debug),
+                trailing = {
+                    MaaSwitch(
+                        checked = state.remoteDebug,
+                        onCheckedChange = { enabled ->
+                            when {
+                                !enabled -> onIntent(SessionIntent.SetRemoteDebug(false))
+                                // 已勾过「不再提示」就直接开，否则先弹强安全警告
+                                state.remoteDebugWarningAcknowledged ->
+                                    onIntent(SessionIntent.SetRemoteDebug(true))
+
+                                else -> {
+                                    remoteWarningAck = false
+                                    showRemoteWarning = true
+                                }
+                            }
+                        },
+                    )
+                },
+            )
+            Text(
+                text = stringResource(R.string.settings_remote_debug_desc),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (state.remoteDebug) {
+                Text(
+                    text = stringResource(R.string.settings_remote_debug_port, DEBUG_CLI_PORT),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(MaaDesignTokens.Spacing.xs))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = stringResource(R.string.remote_debug_token_label),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = {
+                        clipboard.setText(AnnotatedString(state.remoteDebugToken))
+                        Toast.makeText(
+                            context,
+                            context.getString(R.string.remote_debug_copied),
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }) { Text(stringResource(R.string.remote_debug_token_copy)) }
+                    TextButton(onClick = { showResetTokenConfirm = true }) {
+                        Text(stringResource(R.string.remote_debug_token_reset))
+                    }
+                }
+                Text(
+                    text = state.remoteDebugToken,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
     }
     if (showEnableConfirm) {
         AlertDialog(
@@ -376,6 +446,58 @@ private fun LogCard(
             },
             dismissButton = {
                 TextButton(onClick = { showEnableConfirm = false }) {
+                    Text(stringResource(R.string.dialog_cancel))
+                }
+            },
+        )
+    }
+    // 强安全警告：比普通弹窗更醒目（标题带警示符号 + 逐条列风险），必须显式确认
+    if (showRemoteWarning) {
+        AlertDialog(
+            onDismissRequest = { showRemoteWarning = false },
+            title = { Text(stringResource(R.string.dialog_remote_debug_title)) },
+            text = {
+                Column {
+                    Text(stringResource(R.string.dialog_remote_debug_message))
+                    Spacer(Modifier.height(MaaDesignTokens.Spacing.sm))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable { remoteWarningAck = !remoteWarningAck },
+                    ) {
+                        Checkbox(checked = remoteWarningAck, onCheckedChange = { remoteWarningAck = it })
+                        Text(stringResource(R.string.dialog_remote_debug_ack))
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRemoteWarning = false
+                    if (remoteWarningAck) {
+                        onIntent(SessionIntent.SetRemoteDebugWarningAcknowledged(true))
+                    }
+                    onIntent(SessionIntent.SetRemoteDebug(true))
+                }) { Text(stringResource(R.string.dialog_remote_debug_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRemoteWarning = false }) {
+                    Text(stringResource(R.string.dialog_cancel))
+                }
+            },
+        )
+    }
+    if (showResetTokenConfirm) {
+        AlertDialog(
+            onDismissRequest = { showResetTokenConfirm = false },
+            title = { Text(stringResource(R.string.remote_debug_token_reset_title)) },
+            text = { Text(stringResource(R.string.remote_debug_token_reset_message)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    showResetTokenConfirm = false
+                    onIntent(SessionIntent.ResetRemoteDebugToken)
+                }) { Text(stringResource(R.string.remote_debug_token_reset)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetTokenConfirm = false }) {
                     Text(stringResource(R.string.dialog_cancel))
                 }
             },

@@ -16,6 +16,7 @@ import com.aliothmoon.maafw.di.viewModelModule
 import com.aliothmoon.maafw.log.AppLogWriter
 import com.aliothmoon.maafw.log.CrashHandler
 import com.aliothmoon.maafw.log.LogTreeHolder
+import com.aliothmoon.maafw.cli.DebugCliCoordinator
 import com.aliothmoon.maafw.overlay.OverlayController
 import com.aliothmoon.maafw.overlay.screensaver.ScreenSaverOverlayManager
 import com.aliothmoon.maafw.ui.SessionMessagePresenter
@@ -82,6 +83,8 @@ class MaaFwApp : Application() {
         koin.get<SessionMessagePresenter>().setup()
         koin.get<ScreenSaverOverlayManager>().setup()
         koin.get<TelemetryController>().setup()
+        // debug 构建 + 调试模式：特权进程一连上就把调试 CLI 拉起来，无需先跑任务
+        koin.get<DebugCliCoordinator>().start()
     }
 
     private fun initLibsu() {

@@ -57,6 +57,12 @@ data class SessionUiState(
     val themeMode: ThemeMode = ThemeMode.System,
     val themeStyle: ThemeStyle = ThemeStyle.DEFAULT,
     val debugMode: Boolean = false,
+    /** 远程调试开关；需先开调试模式才有意义。仅 debug 构建生效 */
+    val remoteDebug: Boolean = false,
+    /** 远程调试令牌；可查看 / 复制 / 重置 */
+    val remoteDebugToken: String = "",
+    /** 强安全警告的「我已知晓，不再提示」 */
+    val remoteDebugWarningAcknowledged: Boolean = false,
     val runMode: RunMode = RunMode.BACKGROUND,
     val overlayControlMode: OverlayControlMode = OverlayControlMode.FLOAT_BALL,
     val screenSaverEnabled: Boolean = false,
@@ -244,6 +250,17 @@ sealed interface SessionIntent {
      */
     data class SetLanguage(val localeTag: String?) : SessionIntent
     data class SetDebugMode(val enabled: Boolean) : SessionIntent
+
+    // ── 远程调试（仅 debug 构建生效） ──
+
+    /** 开关远程调试；开启前 UI 必须走强安全警告。开启时若还没有令牌会先生成一个 */
+    data class SetRemoteDebug(val enabled: Boolean) : SessionIntent
+
+    /** 重置令牌（立即作废已鉴权会话） */
+    data object ResetRemoteDebugToken : SessionIntent
+
+    /** 记住「我已知晓，不再提示」 */
+    data class SetRemoteDebugWarningAcknowledged(val acknowledged: Boolean) : SessionIntent
 
     /** 主屏 / 后台虚拟屏；运行中不允许改，下一轮才生效 */
     data class SetRunMode(val mode: RunMode) : SessionIntent

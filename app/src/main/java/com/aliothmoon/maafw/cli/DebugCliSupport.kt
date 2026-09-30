@@ -10,7 +10,8 @@ package com.aliothmoon.maafw.cli
  * 协议约定（写死在这里，服务端与测试共用）：
  *  - 一行一条命令；
  *  - 每次响应的**最后一行固定是 [DEBUG_CLI_END_MARKER]**，脚本据此判断读完；
- *  - 只绑 [DEBUG_CLI_PORT] 对应的回环地址，用 `adb forward tcp:7777 tcp:7777` 访问。
+ *  - 默认只绑回环 [DEBUG_CLI_PORT]，用 `adb forward tcp:7777 tcp:7777` 访问；
+ *    开启远程调试后改绑通配地址（同端口），非回环连接必须先 `auth`（见 [DebugCliRemote]）。
  *
  * 这里**不碰任何文件、网络、Android**：只有数据类、密封接口与纯函数。
  */
@@ -44,12 +45,36 @@ data class DebugCliContext(
     val reportDir: String?,
     /** 主日志所在目录绝对路径；未知时 null。 */
     val logDir: String?,
-)
+    /** 远程调试开关是否开启。关闭时不罚远程连接——远程连接本就不存在。 */
+    val remoteEnabled: Boolean = false,
+    /** 本次连接来源；默认回环，保持既有脚本免令牌。 */
+    val connection: DebugCliConnection = DebugCliConnection.LOOPBACK,
+    /** 本连接是否已 `auth` 成功；回环连接由服务端视为已鉴权。 */
+    val authenticated: Boolean = false,
+) {
+    /**
+     * 是否必须鉴权：开了远程调试、连接来自非回环、且尚未鉴权。
+     *
+     * 解析层据此把除 `auth` / `help` 外的命令一律拒掉。
+     */
+    val requiresAuth: Boolean
+        get() = remoteEnabled && connection == DebugCliConnection.REMOTE && !authenticated
+}
 
 /** 解析成功后的命令意图；执行侧按类型分发。 */
 sealed interface DebugCliIntent {
     data object Help : DebugCliIntent
     data object Status : DebugCliIntent
+
+    /** 远程调试：提交令牌换一次本会话的鉴权。令牌校验在服务端，这里只带出候选值。 */
+    data class Auth(val token: String) : DebugCliIntent
+
+    /** 启动任务；[taskNames] 为空 = 跑当前激活配置的全部任务。 */
+    data class Start(val taskNames: List<String>) : DebugCliIntent
+
+    /** 停止当前任务；幂等。 */
+    data object Stop : DebugCliIntent
+
     data class Report(val lines: Int) : DebugCliIntent
     data class LogTail(val lines: Int) : DebugCliIntent
     data object Screenshot : DebugCliIntent
@@ -103,11 +128,17 @@ object DebugCliSupport {
     /** controller 未就绪时统一的错误文案，测试与实现共用一处。 */
     const val CONTROLLER_NOT_READY = "controller 未就绪（先跑一次任务建立 controller）"
 
+    /** 远程连接未鉴权时统一的错误文案。 */
+    const val REMOTE_AUTH_REQUIRED = "远程连接未鉴权：请先执行 auth <令牌>"
+
     /**
      * 解析一行命令。
      *
      * 规则：命令名大小写不敏感（`HELP` 也可以），节点名大小写敏感；多余参数一律报错而不是忽略，
      * 免得调试者以为「加了个参数生效了」。
+     *
+     * 网络门控在最前面：远程调试开启且连接来自非回环且未鉴权时，除 `auth` / `help` 外一律拒绝。
+     * 这条先于命令分派，未知命令也走同一句话，不泄露「这个命令存在但你没权限」。
      */
     fun parse(line: String, context: DebugCliContext): DebugCliParse {
         val trimmed = line.trim()
@@ -117,9 +148,21 @@ object DebugCliSupport {
         val tokens = trimmed.split(WHITESPACE)
         val command = tokens[0].lowercase()
         val args = tokens.drop(1)
+        if (context.requiresAuth && command != "auth" && command != "help") {
+            return DebugCliParse.Failure(REMOTE_AUTH_REQUIRED)
+        }
         return when (command) {
             "help" -> noArgs(command, args) { DebugCliIntent.Help }
             "status" -> noArgs(command, args) { DebugCliIntent.Status }
+            "auth" -> when {
+                args.isEmpty() -> DebugCliParse.Failure("auth 需要一个令牌：auth <token>")
+                args.size > 1 -> DebugCliParse.Failure("auth 只接受一个令牌")
+                else -> DebugCliParse.Ok(DebugCliIntent.Auth(args[0]))
+            }
+
+            // taskNames 为空 = 当前激活配置的全部任务；有值按声明序筛选
+            "start" -> DebugCliParse.Ok(DebugCliIntent.Start(args))
+            "stop" -> noArgs(command, args) { DebugCliIntent.Stop }
             "report" -> tailIntent(command, args) { DebugCliIntent.Report(it) }
             "logtail" -> tailIntent(command, args) { DebugCliIntent.LogTail(it) }
             "screenshot" -> when {
@@ -157,9 +200,12 @@ object DebugCliSupport {
 
     /** 命令帮助文本，多行。 */
     fun helpText(): String = buildString {
-        appendLine("Maaend debug CLI（仅 debug 构建；只绑 127.0.0.1）")
+        appendLine("Maaend debug CLI（仅 debug 构建；回环连接 127.0.0.1，远程需 auth）")
         appendLine("help                列出命令")
+        appendLine("auth <token>        远程连接鉴权；回环连接无需令牌")
         appendLine("status              项目根 / controller 就绪 / 当前任务状态")
+        appendLine("start [task...]     启动任务（不带参数=当前激活配置；带参数按 taskName 筛选）")
+        appendLine("stop                停止当前任务")
         appendLine("report [n]          最新 RunDiagnostics JSONL 的末 n 行（默认 $DEBUG_CLI_DEFAULT_TAIL）")
         appendLine("logtail [n]         主日志的末 n 行（默认 $DEBUG_CLI_DEFAULT_TAIL）")
         appendLine("screenshot          把当前缓存帧存成 png，返回路径")

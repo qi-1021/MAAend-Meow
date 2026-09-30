@@ -78,6 +78,14 @@ private data class SettingsSnapshot(
     val themeStyle: ThemeStyle = ThemeStyle.DEFAULT,
     val env: EnvSnapshot = EnvSnapshot(),
     val quick: QuickSnapshot = QuickSnapshot(),
+    val remote: RemoteDebugSnapshot = RemoteDebugSnapshot(),
+)
+
+/** 远程调试那几项；单独一层只为把 combine 的元数压回上限内 */
+private data class RemoteDebugSnapshot(
+    val enabled: Boolean = false,
+    val token: String = "",
+    val warningAcknowledged: Boolean = false,
 )
 
 /** 定时任务解锁那两项；单独一层只为把 combine 的元数压回上限内 */
@@ -156,6 +164,14 @@ class SessionViewModel(
                 ::QuickSnapshot,
             ),
         ) { snapshot, quick -> snapshot.copy(quick = quick) }
+        .combine(
+            combine(
+                appSettings.remoteDebug,
+                appSettings.remoteDebugToken,
+                appSettings.remoteDebugWarningAcknowledged,
+                ::RemoteDebugSnapshot,
+            ),
+        ) { snapshot, remote -> snapshot.copy(remote = remote) }
 
 
     val uiState: StateFlow<SessionUiState> = combine(
@@ -296,6 +312,9 @@ class SessionViewModel(
             runner = runner,
             themeMode = config.themeMode,
             debugMode = settings.debugMode,
+            remoteDebug = settings.remote.enabled,
+            remoteDebugToken = settings.remote.token,
+            remoteDebugWarningAcknowledged = settings.remote.warningAcknowledged,
             themeStyle = settings.themeStyle,
             runMode = runMode,
             overlayControlMode = settings.overlayControlMode,
@@ -479,6 +498,18 @@ class SessionViewModel(
                 appSettings.setDebugMode(intent.enabled)
                 if (intent.enabled) emitEffect(SessionEffect.RestartApp)
             }
+
+            // 远程调试不重启 App：协调器观察开关变化后立即通知特权进程重配监听。
+            // 开启时保证有令牌——先生成再开，避免「开着但没令牌」的窗口
+            is SessionIntent.SetRemoteDebug -> {
+                if (intent.enabled) appSettings.ensureRemoteDebugToken()
+                appSettings.setRemoteDebug(intent.enabled)
+            }
+
+            SessionIntent.ResetRemoteDebugToken -> appSettings.resetRemoteDebugToken()
+
+            is SessionIntent.SetRemoteDebugWarningAcknowledged ->
+                appSettings.setRemoteDebugWarningAcknowledged(intent.acknowledged)
 
             is SessionIntent.SetThemeStyle ->
                 appSettings.setThemeStyle(intent.style)
