@@ -175,6 +175,61 @@ GROWTH_CHAMBER_CLOSE_POST_FREEZE = {
 GROWTH_CHAMBER_GROWBACK_REPEAT_COUNT = 4
 GROWTH_CHAMBER_GROWBACK_INTERVAL_MS = 3000
 
+# ============================================================================
+# 采集（AutoCollect）进世界/传送链 on_error 兜底（真机诊断 + 框架源码，2026-09-30）
+#
+# 真机现场（new_maafw.log，submodule fcdc53a7 构建）：
+#   AutoCollectRoute1Start 的 SubTask(SceneEnterWorldWulingWulingCity5) 进入世界后，
+#   锚点节点 __ScenePrivateMapWulingWulingCityEnterWorldAnchorWithPick 识别是好的，
+#   但它的 next 里真正干活的 __ScenePrivateMapWulingWulingCityEnterWorldWulingWulingCity5
+#   （recognition=Custom/MapFind，SceneTeleportWuling.json:929-962）在本 Android 端口是
+#   **恒假 stub**（MaaRunner.kt 的 falseRecognitions 名单，WorldMap 未移植）。
+#   → WithPick.next 整轮都不命中；MaaFramework PipelineTask::run_next 按 reco_timeout
+#     默认 20000ms 反复重扫（每次 cost=0ms ret=false 的 MapFind 连击 21 次）→
+#     PipelineNode.Failed → save_on_error 落一张 on_error 帧 → 全屏地图一直开着 →
+#     下游 AutoCollectRouteNAssertLocation 的 MapLocateAssertLocation 拿不到「可定位区域」
+#     （真机 53.7s 后 matched=false）→ 整条路线失败。
+#   Route4 用的是 ValleyIV 旧模板（SwipeToStep + Try1/2/3，阈值 0.9，真机只有 0.383），
+#   同一形态：PowerPlateau 进世界锚点的 next 耗尽 → 同样风暴 + 硬失败。
+#
+# 修法（补丁层，只改产物 JSON，不动子模块指针、不动 Kotlin）：
+#   给采集进世界链上每个锚点节点的 next **末位**追加既有退出节点
+#   __ScenePrivateAnyExit（ADB 覆盖层点 BACK 键 key=4；基础层 ESC key=27），
+#   并同时把它的 on_error 也指向同一节点作为二级兜底：
+#     - next 末位兜底：首轮 recognize_list 扫描到最后一个候选时 DirectHit 立刻命中，
+#       OnError 分支根本不会进入 → 既没有 20s 重扫风暴，也不会抛 PipelineNode.Failed /
+#       写 on_error 帧。真实候选（`__ScenePrivateMapTeleportSuccess`、MapFind 锚点等）
+#       排在前面，能命中时优先命中，所以对「传送真的成功」的场景无副作用。
+#     - on_error：MaaFramework 的 on_error 只有在本节点 next 整轮失败后才触发（且触发瞬间
+#       框架必先写一帧 on_error 并抛 PipelineNode.Failed）；作为二级兜底保留，
+#       万一 __ScenePrivateAnyExit 被某个覆盖层禁用也能收敛到安全收尾。
+#   安全收尾后角色回到大世界；采集路线本来「人已在目标 zone」时，随后的
+#   AutoCollectRouteNAssertLocation 直接命中，路线继续往下跑；不在目标 zone 时
+#   也只是正常判失败，不再空转刷屏。
+#
+# 覆盖范围（已核对 AutoCollect 全部路线的 SceneEnterWorld* → 锚点映射，见报告）：
+#   6 个武陵 WithPick 锚点 + 1 个谷地枢纽 WithPick 锚点（均为 MapFind 恒假）
+#   + 2 个谷地旧模板锚点（Route4 供能高地、Route13 矿脉源区）。
+AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE = "__ScenePrivateAnyExit"
+AUTOCOLLECT_ENTERWORLD_FALLBACK_FILE = (
+    ASSETS_ROOT / "resource" / "pipeline" / "SceneManager" / "SceneCommon.json"
+)
+AUTOCOLLECT_ENTERWORLD_ANCHORS = {
+    "resource/pipeline/SceneManager/SceneWuling.json": [
+        "__ScenePrivateMapWulingWulingCityEnterWorldAnchorWithPick",
+        "__ScenePrivateMapWulingJingyuValleyEnterWorldAnchorWithPick",
+        "__ScenePrivateMapWulingMarkerStoneEnterWorldAnchorWithPick",
+        "__ScenePrivateMapWulingTestAreaEnterWorldAnchorWithPick",
+        "__ScenePrivateMapWulingNorthWulingExclusionZoneEnterWorldAnchorWithPick",
+        "__ScenePrivateMapWulingSnowyForestEnterWorldAnchorWithPick",
+    ],
+    "resource/pipeline/SceneManager/SceneValleyIV.json": [
+        "__ScenePrivateMapValleyIVTheHubEnterWorldAnchorWithPick",
+        "__ScenePrivateMapValleyIVPowerPlateauEnterWorldAnchor",
+        "__ScenePrivateMapValleyIVOriginLodespringEnterWorldAnchor",
+    ],
+}
+
 
 def log(msg: str):
     print(f"[MAAend-Prep] {msg}", flush=True)
@@ -1533,6 +1588,101 @@ def verify_upstream_sync_patches():
     log("Asserted upstream #6076/#6100/#6054/#6085 sync patches are present.")
 
 
+def patch_autocollect_enterworld_fallback():
+    """
+    采集进世界/传送链安全收尾（见文件顶部 AUTOCOLLECT_ENTERWORLD_* 诊断）。
+
+    对每个采集进世界锚点节点：
+      1. next 末位追加既有退出节点 __ScenePrivateAnyExit —— 首轮扫描到它即命中，
+         MaaFramework 不会再进入 next 整轮失败分支（无 20s 重扫、无 PipelineNode.Failed、
+         无 on_error 帧）；真实候选排在它前面，能命中时不影响正常传送。
+      2. on_error 也指向同一节点作为二级兜底。
+    节点名/结构任一缺失直接抛错（不静默跳过）。
+    """
+    fallback_file = AUTOCOLLECT_ENTERWORLD_FALLBACK_FILE
+    if not fallback_file.is_file():
+        raise RuntimeError(f"采集进世界兜底失败：缺少兜底节点所在文件 {fallback_file}")
+    fallback_data = load_jsonc(fallback_file)
+    if AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE not in fallback_data:
+        raise RuntimeError(
+            f"采集进世界兜底失败：{fallback_file} 缺少节点 "
+            f"{AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE}（上游可能已改名/移除）"
+        )
+
+    patched = []
+    for rel, node_names in AUTOCOLLECT_ENTERWORLD_ANCHORS.items():
+        path = ASSETS_ROOT / rel
+        if not path.is_file():
+            raise RuntimeError(f"采集进世界兜底失败：缺少 {path}")
+        data = load_jsonc(path)
+        for name in node_names:
+            node = data.get(name)
+            if not isinstance(node, dict):
+                raise RuntimeError(
+                    f"{rel} 缺少采集进世界锚点 {name}（上游可能已改名/移除）；"
+                    "兜底无法应用，请同步更新 scripts/prepare_maaend.py"
+                )
+            nxt = node.get("next")
+            if not isinstance(nxt, list):
+                raise RuntimeError(f"{rel}::{name}.next 不是列表，无法追加兜底：{nxt}")
+            if AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE not in nxt:
+                nxt.append(AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE)
+            node["on_error"] = [AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE]
+            patched.append(f"{rel}::{name}")
+        write_json(path, data)
+
+    log(
+        f"Patched {len(patched)} AutoCollect enter-world anchors with "
+        f"next-tail + on_error fallback -> {AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE}."
+    )
+
+
+def verify_autocollect_enterworld_fallback():
+    """
+    构建期断言：核对采集进世界兜底确实落在最终产物里。
+
+    上游同步若改名/覆盖，补丁会「静默失效」——照样编得过、出得了包，只是真机又回到
+    「MapFind 21 连击 + on_error 帧 + 整条路线失败」。这里读回最终产物核对。
+    """
+    problems = []
+
+    fallback_file = AUTOCOLLECT_ENTERWORLD_FALLBACK_FILE
+    fallback_data = load_jsonc(fallback_file) if fallback_file.is_file() else {}
+    if AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE not in fallback_data:
+        problems.append(
+            f"{fallback_file} 缺少兜底节点 {AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE}"
+        )
+
+    for rel, node_names in AUTOCOLLECT_ENTERWORLD_ANCHORS.items():
+        path = ASSETS_ROOT / rel
+        data = load_jsonc(path) if path.is_file() else {}
+        for name in node_names:
+            node = data.get(name) or {}
+            on_error = node.get("on_error")
+            if not isinstance(on_error, list) or AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE not in on_error:
+                problems.append(
+                    f"{rel}::{name}.on_error 期望含 {AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE}，"
+                    f"实际 {on_error}"
+                )
+            nxt = node.get("next")
+            if not isinstance(nxt, list) or AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE not in nxt:
+                problems.append(
+                    f"{rel}::{name}.next 末位缺兜底 {AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE}，"
+                    f"实际 {nxt}"
+                )
+            elif nxt[-1] != AUTOCOLLECT_ENTERWORLD_FALLBACK_NODE:
+                problems.append(
+                    f"{rel}::{name}.next 兜底不在末位（会被后续候选抢先）：{nxt}"
+                )
+
+    if problems:
+        raise RuntimeError(
+            "构建期断言失败：采集进世界兜底不完整（上游同步可能覆盖/改名）：\n  "
+            + "\n  ".join(problems)
+        )
+    log("Asserted AutoCollect enter-world anchors carry next-tail + on_error fallback.")
+
+
 def main():
     log("Starting MAAend Android preparation...")
     ensure_maaend_submodule()
@@ -1558,6 +1708,8 @@ def main():
     patch_growth_chamber_extract_resilience()
     patch_growth_chamber_extract_close_recognition()
     patch_growth_chamber_growback_timing()
+    # 采集（AutoCollect）进世界/传送链安全收尾（真机 MapFind 恒假导致的风暴/硬失败）
+    patch_autocollect_enterworld_fallback()
     # 断言放最后：读回最终产物，确认没有后续步骤把值覆盖回去
     verify_adb_growth_chamber_status_rois()
     verify_upstream_sync_patches()
@@ -1565,6 +1717,7 @@ def main():
     verify_growth_chamber_extract_resilience()
     verify_growth_chamber_extract_close_recognition()
     verify_growth_chamber_growback_timing()
+    verify_autocollect_enterworld_fallback()
     log("Preparation complete!")
 
 
