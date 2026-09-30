@@ -8,6 +8,60 @@
 
 ---
 
+## 2026-09-30 · PathHeatmap 真机打通 + 追踪状态机移植（deepwork Phase 1/2）
+
+### 做了什么
+
+**① PathHeatmap 真机打通（关键突破）**
+真机世界帧上第一次拿到可用的定位结果：
+
+```
+result: PASS（热图路 score=0.8564690018963244）
+heatmap: override=ok coarse_hit=true coarse_score=0.555124 coarse_box=[66,124,98,99]
+         refine=(b) score=0.8564690018963244 box=[81,123,98,99]
+         tracking_valid=true global_accepted=0.8564690018963244
+```
+
+- **掩膜落地分工**：框架 `TemplateMatch` 不吃 mask → 粗排用"掩膜内**均值**填充"
+  （填均值时 `T-meanT` 在掩膜外恒 0，ZNCC 分子与模板范数退化为掩膜内统计，偏差只剩整窗 `meanI`）；
+  精排用 Kotlin `MapLocatorPathHeatmap.matchGlobal` 真掩膜 ZNCC；精排退化时回退粗排分。
+- 灰度路（Standard）对这类雷达小地图仍 FAIL，作为回退保留。
+- **顺带修了一个会误导人的口径**：`result:` 原实现只看灰度路，于是"热图路 ACCEPT"也会打印 FAIL。
+  现在改为合并裁决并标明路径（`PASS（灰度路）` / `PASS（热图路 score=…）` / `FAIL`），RunDiagnostics 同步。
+
+**② 追踪状态机移植（`MapLocatorTracking.kt` 296 行 + 248 行测试，17 场景）**
+- 冷启动共识（连续 3 帧紧簇才接受）、高置信直通（≥0.85 立即接受并重锚）、
+  远跳拒绝（低分 + 距离 >80）→ 记丢失 → 超上限 relocate（普通区 3 / 路径区 10）、
+  换区强制重冷启、歧义/边缘吸附保持、`None` 遮挡占位。
+- 新增 debug CLI `tracklocate <frame> [zone]` / `tracklocate reset`，跨命令保留状态，
+  输出 `action/reason/pos` + `zone/tracking/lost/cold_start`。
+
+**③ 提取弹窗修复的真机确认（fix-6 复盘）**
+- 关闭识别**已修好**：命中分从 0.2–0.4 提升到 **0.998**；任务 `任务完成: 🎁基建任务`（修复前必红）。
+- **残留瓦特**：坐标兜底仍被触发 2 次 → 失败点后移到 `GrowBack`（关闭弹窗后返回培养界面超时）。
+  兜底把任务救绿（单向 next、不成环），记为已知技术债。
+
+### 怎么验的
+
+- 纯逻辑：`scripts/verify_pure_logic.sh all` → **1127/1127**（基线 1102 + 新增 25）。
+- 真机（同一张保存的世界帧）：`coarselocate` 新口径正确；`tracklocate` 连喂 3 帧
+  `ACCEPT / zone=OMVBase01 / lost=0-10` 稳定，`reset` 可清空。
+
+### 教训
+
+- **"任意一路通过即成功"必须写进输出**：两条策略并存时，只看其中一条会把成功报成失败，
+  把调试者引向错误方向。
+- 真机上"任务绿"不等于"修好了"：`GrowBack` 仍在失败、只是被兜底接住。
+  兜底是保险，不是修复——要单独记账。
+
+### 未做
+
+- `GrowBack` 超时的根因（返回键模板 / 等待节点）。
+- PathHeatmap 的 native 加速（当前全图细搜在 Kotlin 侧是 O(W·H·w·h)）。
+- AutoSell 的真机复测（当日任务已被消耗）。
+
+---
+
 ## 2026-09-30 · PathHeatmap 纯逻辑移植 + 提取弹窗时序根治
 
 ### 做了什么
