@@ -8,6 +8,83 @@
 
 ---
 
+## 2026-09-30 · 真机验证日：CLI 开机即启/远程调试落地、提取链现场复现、MapLocator 粗定位撞到方法学上限
+
+### 做了什么
+
+**① 调试 CLI 三项能力（用户要的）+ 文档**（`1ef04b8`、`98012bd`）
+- **开机即启**：App 启动（debug + 调试模式）就拉起 CLI，不必先跑任务。做法：`MaaFwApp.postCreate` 起
+  DI 管理的 `DebugCliCoordinator`，服务连上后调 `RemoteService.configureDebugCli(...)`；特权侧**只做
+  CLI 需要的两件事**（`setProjectRoot` + `DebugCliServer.configure`），把 `applyGlobalOptions`/
+  `RunDiagnostics.start`/`disablePhantomProcessKiller` 留在开跑时（它们配 native 日志/改系统设置/写文件）。
+- **PI 就绪补触发**：冷启动时 PI 常没解压完，`installedDir()` 抛异常 → `project root` 会永远是"(未设置)"。
+  把 `PiInstallCoordinator.state` 映射成 Boolean 接进触发集合，`false→true` 那一下重跑 configure。
+- **远程调试**：设置页开关（默认关）+ ⚠高风险警告（写明"可远程操控/读截图日志/模拟点击"）+「不再提示」+
+  令牌（SecureRandom、可查看/复制/重置）+ **非回环必须 `auth <令牌>`** + 常量时间比较 + 5 次失败锁 30s +
+  **回环（含 adb forward）免令牌** + fail-closed。
+- **`start [task...]` / `stop`**：RunPlan 在 App 进程构建，所以特权侧走**反向 IPC**（`IAppCommandCallback`）
+  请 App 侧用与 UI 相同的 `RunLauncher → RunnerPort` 路径起停。
+- **文档**：`docs/reports/debug-cli-and-remote-debug.md`（给 AALC-meow 的复用指南，含协议/进程模型/安全模型/踩坑）。
+- **远程链路**：CLI 是裸 TCP，Cloudflare 免费隧道只走 HTTP → 本机加一个带令牌的 HTTP 桥
+  `scripts/debug_cli_bridge.py`。公网端到端验证通过。
+
+**② 培养舱提取链：真机现场复现 + 修复**（`c5045c9`）
+- 现场：`FindTargetBySeed → GrowConfirm×3 → FindTargetBySeed 20s 超时失败`，**失败帧停在「提取获得」弹窗**
+  （道具 + 底部 ✓）——材料已种下、基核已提取，纯误报。
+- 上游**未修**这条；我们补齐：`SeedExtractClose` 原本**没有** `on_error` → 补 `GrowBack`；
+  给 `GrowBack` 再挂一个**不依赖识别的坐标点击兜底**（防弹窗盖住返回键）；`ExtractSeedCloseText`/
+  `NoMaterials` 文案扩容。
+
+**③ 同步 4 个上游修复**（`c5045c9`，全部走补丁层，不动子模块指针）
+`489ff2fe`(#6076 确认框 box_index)、`d4ea8745`(#6100 —— **注意：宽度 120→180 是 `ClueItem` 不是
+`GrowthChamberCheckSeedNotEmpty`**，简报里的归属是错的，按真实 diff 落值)、`6af0f43c`(#6054 AutoSell
+交互键 + ADB 覆盖)、`27507ad4`(#6085 折扣 ROI)。另把 AutoSell 页签改成按坐标点击（原来 720p 模板失配
+→ 静默 0 物资不卖）。
+
+**④ AutoSell 失败传播**（`c80be82`）
+移植时丢了上游的 `!Status.Success() → return false`，导致"没卖出去却成功"。改为查子任务状态、
+失败即动作失败；扫描缓存**键不存在**（扫描没生效）判失败、**空列表**（本区确实没有）按上游跳过。
+
+### 怎么验的
+
+- CLI/远程调试：真机逐步验证——开机即启 ✓、`start` ✓、警告弹窗 ✓、令牌 ✓、
+  **未鉴权被拒** ✓、`auth` 后正常 ✓、**公网 HTTPS 端到端** ✓。
+- 提取链：真机复现 + 修复后重跑（本次）。
+- 上游修复：`prepare_maaend.py` 幂等 + 3 组构建期断言读回产物核对；1062 测试全过。
+
+### 教训（重要）
+
+**MapLocator 粗定位撞到方法学上限（负面结论，但很值钱）**：
+
+真机世界帧上，整条链路前半段**全部打通**：裁小地图 ✓ → YOLO 正确识别真实 zone（`OMVBase01`）✓ →
+找到地图资产 ✓ → 运行时覆盖模板 ✓ → 全图搜索 ✓。但**匹配不命中**。
+
+本地用真帧 + 真资产做了穷举诊断（numpy FFT 归一化互相关）：
+
+| 变量 | 扫的范围 | 结论 |
+|---|---|---|
+| 尺度 | 0.3–2.0（步长 0.1） | 无强峰，最好 ~0.63 |
+| 旋转 | 0–355°（步长 5°） | 无强峰；最佳角多在 0–20° |
+| 裁剪 ROI | 4 种候选（含放大版） | **上游默认 (49,51,118,120) 反而最好**；放大更差 |
+| alpha 合成 | 黑/白/浅灰蓝/小地图底色 | 黑底（现状）最好 → **不是 alpha 问题** |
+| 掩膜（去白/去暗/中心遮蔽） | 上游 `GenerateMinimapMask` 思路 | 仍 ~0.64 |
+| **换资产** | **全部 5 张地图（Dung/IndieDg005/007/OMVBase/ValleyIV）** | **全都 ~0.55–0.67 → 不是分类错** |
+
+→ 结论：**小地图是"随镜头旋转的雷达式示意渲染"，地图资产是仅 11% 像素不透明的稀疏线稿；
+两者直接做归一化互相关拿不出有辨识度的峰**。上游有两条策略，我们只移植了 `Standard`（模板匹配）这条；
+上游另一条（`PathHeatmap`，按**路径线**与预计算热图匹配）大概率才是能用的那条。
+
+→ 下一步不是调参，而是**移植 PathHeatmap 策略**（或等价的路网匹配）。在那之前，
+`coarselocate` 的"能跑通但命不中"要如实标注，别当成"接近可用"。
+
+### 未做 / 待办
+
+- MapLocator：PathHeatmap 策略移植；朝向/尺度补偿等它落地后再谈。
+- 信用点购物：上游正在大重构（draft PR #6055），等合并再整体更新，不要拆挑。
+- 真机复测清单（提取链 + AutoSell）见本次运行日志。
+
+---
+
 ## 2026-09-30 · 三个真机 bug 的根因修复 + 本地构建链路打通（准备最后一次真机验证）
 
 ### 做了什么
