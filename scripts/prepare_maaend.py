@@ -107,6 +107,40 @@ UPSTREAM_6085_DISCOUNT_NODES = (
 # AutoSell 页签按坐标点击复用 AutoStockpile「弹性需求物资」页签 ROI（1280×720 真机截图）。
 ELASTIC_TAB_ROI = [445, 80, 350, 66]
 
+# 培养舱「提取获得」结算弹窗关闭识别（像素级诊断 + 真机框架日志，2026-09-30）。
+#
+# 失败现场帧：fail_frame.png（1280×720）。诊断结论（非猜测）：
+#   1. 标题「提取获得」bbox x∈[597,682]、y∈[108,134]，而 ExtractSeedCloseText 的
+#      OCR roi [537,21,209,149] 完整覆盖它 —— roi 正确、expected 已含「提取获得」，
+#      真机 OCR 实测 0.999510（maafw.bak.2026.09.30-08.22 日志）。OCR 不是问题。
+#   2. 关闭键 bbox x∈[620,659]、y∈[588,627]（≈40×40）。ADB 覆盖图
+#      resource_adb/image/Common/Button/CloseRewardButton.png（44×45）与它 NCC=0.9998，
+#      而基础图 resource/image/.../CloseRewardButton.png（33×31）只有 0.546。
+#      MaaFramework 会把「同名模板」在两个 bundle 下的图都装进同一 vector 一起匹配
+#      （真机 reco_details 同一次识别里同时出现 44×45 与 33×31 两个候选）：ADB 图 0.9998
+#      命中，基础旧图是 0.4~0.8 的低分噪声候选。
+#   3. 真正致命的是时序：「确认提取」点击后约 0.3s 就评估关闭节点，而弹窗约 1.5s 后才
+#      渲染完成 → 首次识别模板只有 <0.4（真机三处均为 0.219/0.396），OCR 也随之为空；
+#      上一轮加的 on_error 会把这次「瞬时落空」立刻转成 GrowBack（返回键被弹窗遮挡）→
+#      坐标兜底。真机日志里首次落空后约 0.8~1.5s 再识别即 0.9998 命中（旧链路靠 next
+#      轮询自愈，on_error 抢掉了这个重试）。
+#
+# 修法（都在补丁层、按文件路径定位、缺了 raise）：
+#   ① 用 ADB 图覆盖基础图：消除 33×31 旧尺度候选，保证任一层解析到的都是同一物；
+#   ② 给 GrowthChamberSeedExtractClose 加 pre_delay，让首次识别发生在弹窗渲染之后。
+GROWTH_CHAMBER_CLOSE_TEMPLATE = "Common/Button/CloseRewardButton.png"
+GROWTH_CHAMBER_CLOSE_BASE_IMAGE = (
+    ASSETS_ROOT / "resource" / "image" / "Common" / "Button" / "CloseRewardButton.png"
+)
+GROWTH_CHAMBER_CLOSE_ADB_IMAGE = (
+    ASSETS_ROOT / "resource_adb" / "image" / "Common" / "Button" / "CloseRewardButton.png"
+)
+GROWTH_CHAMBER_CLOSE_BUTTON_FILE = (
+    ASSETS_ROOT / "resource" / "pipeline" / "Common" / "Button" / "CloseRewardsButton.json"
+)
+# 真机实测「确认提取」→弹窗可识别约 1.4~1.6s，取 1.5s 等待，让首次识别就落在弹窗就绪后。
+GROWTH_CHAMBER_CLOSE_PRE_DELAY = 1500
+
 
 def log(msg: str):
     print(f"[MAAend-Prep] {msg}", flush=True)
@@ -1026,6 +1060,96 @@ def verify_growth_chamber_extract_resilience():
     log("Asserted GrowthChamber extraction chain has on_error fallbacks.")
 
 
+def patch_growth_chamber_extract_close_recognition():
+    """
+    修复 ③（根治）：培养舱「提取获得」结算弹窗关闭按钮的原路识别。
+
+    见文件顶部 GROWTH_CHAMBER_CLOSE_* 常量上的像素级诊断。这里落两件事：
+
+    1. 用 resource_adb 的正确图覆盖 resource 里 33×31 的旧尺度图。
+       真机同一模板名下两张图会一起参与匹配：44×45 命中 0.9998、33×31 只是低分候选。
+       覆盖后任一层解析到的都是同一物，也不再给匹配引入误导性候选。
+    2. 给 GrowthChamberSeedExtractClose 加 pre_delay：真机在「确认提取」点击后约 0.3s
+       就评估关闭节点，但弹窗约 1.5s 才渲染完成，首次识别必然落空；补一个等待，让首次
+       识别就发生在弹窗就绪之后。
+
+    两条都按文件路径/节点名精确定位，任一缺失直接抛错（不静默跳过）。
+    """
+    for path in (GROWTH_CHAMBER_CLOSE_BASE_IMAGE, GROWTH_CHAMBER_CLOSE_ADB_IMAGE):
+        if not path.is_file():
+            raise RuntimeError(
+                f"培养舱关闭按钮修复失败：缺少模板图 {path}；无法校正旧尺度模板"
+            )
+
+    adb_bytes = GROWTH_CHAMBER_CLOSE_ADB_IMAGE.read_bytes()
+    if GROWTH_CHAMBER_CLOSE_BASE_IMAGE.read_bytes() != adb_bytes:
+        GROWTH_CHAMBER_CLOSE_BASE_IMAGE.write_bytes(adb_bytes)
+        log("Overrode stale base CloseRewardButton.png with the ADB-sized template.")
+    else:
+        log("Base CloseRewardButton.png already matches the ADB template.")
+
+    growth_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "GrowthChamber.json"
+    if not growth_file.is_file():
+        raise RuntimeError(f"培养舱关闭按钮修复失败：缺少 {growth_file}")
+    growth = load_jsonc(growth_file)
+    node = growth.get("GrowthChamberSeedExtractClose")
+    if not isinstance(node, dict):
+        raise RuntimeError(
+            "GrowthChamber.json 缺少节点 GrowthChamberSeedExtractClose（上游可能已改名/移除）；"
+            "关闭按钮时序修复无法应用，请同步更新 scripts/prepare_maaend.py"
+        )
+    node["pre_delay"] = GROWTH_CHAMBER_CLOSE_PRE_DELAY
+    write_json(growth_file, growth)
+    log(
+        "Patched GrowthChamberSeedExtractClose.pre_delay = "
+        f"{GROWTH_CHAMBER_CLOSE_PRE_DELAY}ms (wait for reward popup to render)."
+    )
+
+
+def verify_growth_chamber_extract_close_recognition():
+    """
+    构建期断言：核对关闭按钮原路识别的两处修复确实落在最终产物里。
+
+    若上游同步换回旧尺度图、删除 ADB 图、或后续步骤把 pre_delay 抹掉，真机就会再次
+    「弹窗在、关闭键识别不到」，且照样编得过、出得了包。这里读回最终产物核对。
+    """
+    problems = []
+    for path in (GROWTH_CHAMBER_CLOSE_BASE_IMAGE, GROWTH_CHAMBER_CLOSE_ADB_IMAGE):
+        if not path.is_file():
+            raise RuntimeError(f"构建期断言失败：缺少模板图 {path}")
+    if GROWTH_CHAMBER_CLOSE_BASE_IMAGE.read_bytes() != GROWTH_CHAMBER_CLOSE_ADB_IMAGE.read_bytes():
+        problems.append(
+            "resource 基础 CloseRewardButton.png 与 resource_adb 版本不一致（旧尺度图未校正）"
+        )
+
+    growth_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "GrowthChamber.json"
+    if not growth_file.is_file():
+        raise RuntimeError(f"构建期断言失败：缺少 {growth_file}")
+    close_node = load_jsonc(growth_file).get("GrowthChamberSeedExtractClose") or {}
+    if close_node.get("pre_delay") != GROWTH_CHAMBER_CLOSE_PRE_DELAY:
+        problems.append(
+            "GrowthChamberSeedExtractClose.pre_delay: 期望 "
+            f"{GROWTH_CHAMBER_CLOSE_PRE_DELAY}，实际 {close_node.get('pre_delay')}"
+        )
+
+    if not GROWTH_CHAMBER_CLOSE_BUTTON_FILE.is_file():
+        raise RuntimeError(f"构建期断言失败：缺少 {GROWTH_CHAMBER_CLOSE_BUTTON_FILE}")
+    stable = (load_jsonc(GROWTH_CHAMBER_CLOSE_BUTTON_FILE).get("__CloseRewardsButtonStable") or {})
+    template = (((stable.get("recognition") or {}).get("param") or {}).get("template"))
+    templates = template if isinstance(template, list) else [template]
+    if GROWTH_CHAMBER_CLOSE_TEMPLATE not in templates:
+        problems.append(
+            f"__CloseRewardsButtonStable.template 未引用 {GROWTH_CHAMBER_CLOSE_TEMPLATE}：{template}"
+        )
+
+    if problems:
+        raise RuntimeError(
+            "构建期断言失败：培养舱「提取获得」关闭按钮识别修复不完整"
+            "（上游同步可能覆盖/改名）：\n  " + "\n  ".join(problems)
+        )
+    log("Asserted GrowthChamber extract-close template and settle delay.")
+
+
 def patch_upstream_6076_confirm_box_index():
     """
     同步上游 489ff2fe（#6076 偶现基建任务点击使用助力失效）。
@@ -1303,11 +1427,13 @@ def main():
     patch_upstream_6085_staple_discount_roi()
     patch_adb_growth_chamber_status_rois()
     patch_growth_chamber_extract_resilience()
+    patch_growth_chamber_extract_close_recognition()
     # 断言放最后：读回最终产物，确认没有后续步骤把值覆盖回去
     verify_adb_growth_chamber_status_rois()
     verify_upstream_sync_patches()
     verify_rigid_template_overrides()
     verify_growth_chamber_extract_resilience()
+    verify_growth_chamber_extract_close_recognition()
     log("Preparation complete!")
 
 
