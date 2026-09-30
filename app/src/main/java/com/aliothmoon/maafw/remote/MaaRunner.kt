@@ -1550,6 +1550,12 @@ class MaaRunner(private val agentHost: AgentHost) {
 
         // 开环朝向估计：读不到镜头角，HEADING 只能按累计转向推算
         var assumedYaw = 0.0
+        // 最近一次 ZONE 声明的区域，作为闭环定位的 zone 先验（空则让 YOLO 自选）。
+        var currentZone = ""
+
+        if (MAP_NAV_REAL_WALK) {
+            synchronized(mapNavWalkLock) { mapNavTracking.reset() }
+        }
 
         for ((index, wp) in param.path.withIndex()) {
             when (wp.action) {
@@ -1557,6 +1563,7 @@ class MaaRunner(private val agentHost: AgentHost) {
                     // 声明节点：等画面稳定（无定位，不做区域校验）
                     MotionSupport.screencapFresh()
                     Thread.sleep(600)
+                    if (wp.zoneId.isNotEmpty()) currentZone = wp.zoneId
                     Ln.i("MaaRunner: MapNavigate [$nodeName] #$index ZONE=${wp.zoneId}")
                 }
 
@@ -1609,8 +1616,14 @@ class MaaRunner(private val agentHost: AgentHost) {
                     return false
                 }
 
-                // RUN / NAVMESH：真寻路待 MapLocator 移植，先用前进近似
-                MapNaviParam.ActionType.RUN, MapNaviParam.ActionType.NAVMESH -> MotionSupport.pulseForward(400)
+                // RUN / NAVMESH：真闭环走路（截图→定位→转向→推杆）；缺失资产时失败上报。
+                MapNaviParam.ActionType.RUN, MapNaviParam.ActionType.NAVMESH -> {
+                    if (MAP_NAV_REAL_WALK) {
+                        if (!runMapNavWalkTo(context, nodeName, index, wp, currentZone)) return false
+                    } else {
+                        MotionSupport.pulseForward(400)
+                    }
+                }
             }
         }
 
@@ -1618,6 +1631,130 @@ class MaaRunner(private val agentHost: AgentHost) {
         MotionSupport.resetSprintState()
         Ln.i("MaaRunner: MapNavigate [$nodeName] path done (${param.path.size} steps)")
         return true
+    }
+
+    /**
+     * 走一个 RUN/NAVMESH 路点：闭环（截图 → 定位 → 算方位 → 转视角/推杆 → 到达判定）。
+     *
+     * 定位与朝向来自 [locateMinimapFrame]/[MapNavHeading]，状态推进在纯逻辑
+     * [MapNavRuntime] + [MapNavWalkSession]。返回 false 表示该点超时/持续丢定位，整条路线判失败
+     * （上游 fail-fast，交给上层重试）。资产未就绪同样判失败，不静默空走。
+     */
+    private fun runMapNavWalkTo(
+        context: Pointer,
+        nodeName: String,
+        index: Int,
+        wp: MapNaviParam.Waypoint,
+        zoneId: String,
+    ): Boolean {
+        val lib = MaaFrameworkLoader.library ?: return false
+        if (!wp.hasPosition) {
+            Ln.w("MaaRunner: MapNavigate [$nodeName] #$index ${wp.action} 无坐标，跳过走路")
+            return true
+        }
+        val res = synchronized(lifecycleLock) { resource } ?: return false
+        val assets = ensureMapLocateAssets(lib, res) ?: run {
+            Ln.w("MaaRunner: MapNavigate [$nodeName] #$index 定位资产未就绪，闭环走路失败")
+            RunDiagnostics.note(
+                "mapnavi",
+                "闭环走路资产未就绪 #$index",
+                mapOf("node" to nodeName, "waypoint" to index, "stage" to "walk"),
+            )
+            return false
+        }
+        val options = LocateOptions(expectedZoneId = zoneId)
+        val waypoint = NavWaypoint(wp.x, wp.y, index = index, label = wp.action.name)
+
+        val outcome = synchronized(mapNavWalkLock) {
+            MapNavRuntime.walkTo(
+                waypoint = waypoint,
+                config = NavWalkConfig(),
+                locator = MapNavRuntime.FrameLocator {
+                    navObserveFrame(lib, context, assets, options)
+                },
+            ) { tick, fix ->
+                RunDiagnostics.note(
+                    "mapnavi",
+                    MapNavRuntime.describeTick(tick, fix),
+                    mapOf(
+                        "stage" to "walk_tick",
+                        "node" to nodeName,
+                        "waypoint" to index,
+                        "action" to tick.action.name,
+                        "pos" to listOf(fix.x, fix.y),
+                        "yaw" to fix.yawDeg,
+                        "distance" to tick.distance,
+                        "yaw_error" to tick.yawErrorDeg,
+                        "turn_px" to tick.turnSwipePx,
+                        "lost_streak" to tick.lostStreak,
+                        "relocate" to tick.relocateAttempts,
+                        "elapsed_ms" to tick.elapsedMs,
+                        "message" to tick.reason,
+                    ),
+                )
+            }
+        }
+
+        Ln.i(
+            "MaaRunner: MapNavigate [$nodeName] #$index ${wp.action} " +
+                "closed-loop ${if (outcome.success) "到点" else "失败"} " +
+                "ticks=${outcome.ticks} cost=${outcome.elapsedMs}ms dist=${"%.1f".format(outcome.finalDistance)} " +
+                "reason=${outcome.reason}",
+        )
+        if (!outcome.success) {
+            RunDiagnostics.note(
+                "mapnavi",
+                "闭环走路失败 #$index：${outcome.reason}",
+                mapOf(
+                    "stage" to "walk_failed",
+                    "node" to nodeName,
+                    "waypoint" to index,
+                    "ticks" to outcome.ticks,
+                    "elapsed_ms" to outcome.elapsedMs,
+                    "final_distance" to outcome.finalDistance,
+                ),
+            )
+        }
+        return outcome.success
+    }
+
+    /** 一拍闭环观测：截帧 → [locateMinimapFrame] → 喂追踪 → 估朝向。 */
+    private fun navObserveFrame(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        assets: MapLocateAssets,
+        options: LocateOptions,
+    ): MapNavRuntime.FrameFix {
+        val frame = captureArgbFrame(lib)
+            ?: return MapNavRuntime.FrameFix(false, reason = "取帧失败")
+        val located = runCatching {
+            locateMinimapFrame(lib, context, frame, options, assets, mapNavHeatmapCache)
+        }.getOrElse {
+            MinimapLocateFrame(LocateStatus.TRACKING_LOST, null, "${it.javaClass.simpleName}: ${it.message}")
+        }
+        val decision = located.observation?.let {
+            mapNavTracking.feed(it, System.nanoTime() / 1_000_000_000.0)
+        }
+        val accepted = decision?.action == TrackingAction.ACCEPT && decision.position != null
+        val pos = decision?.position
+        val yaw = estimateMapNavYaw(frame)
+        return MapNavRuntime.FrameFix(
+            accepted = accepted,
+            x = pos?.x ?: 0.0,
+            y = pos?.y ?: 0.0,
+            yawDeg = yaw,
+            reason = located.debugMessage,
+        )
+    }
+
+    /** 从小地图裁剪估玩家朝向（0=北、顺时针），失败 null。 */
+    private fun estimateMapNavYaw(frame: ArgbImage): Double? {
+        val plan = MapLocatorCoarsePure.minimapExtractPlan(frame.width, frame.height, useAdbRoi = false)
+            ?: return null
+        val argb = MapLocatorCoarsePure.extractMinimapArgb(frame.pixels, frame.width, frame.height, useAdbRoi = false)
+            ?: return null
+        val bgr = YoloPreprocess.argbToBgr(argb)
+        return MapNavHeading.estimateFromBgr(bgr, plan.roi.width, plan.roi.height)
     }
 
     /** 归一化到 (-180, 180]，用于把绝对朝向换算成相对转向量。 */
@@ -5028,6 +5165,18 @@ class MaaRunner(private val agentHost: AgentHost) {
     /** 单次 assert 操作独占状态机与缓存。 */
     private val mapLocateAssertLock = Any()
 
+    // ── MapNavigate 闭环走路（MapNavRuntime）──
+    // 与 assert 操作分开的状态机/热图缓存，避免并行走不同识别时串味。进路点前 reset 一次。
+
+    /** 闭环走路的追踪状态机；整条路线开始时 reset。 */
+    private val mapNavTracking = MapLocatorTracking()
+
+    /** 闭环走路的搜索热图两槽缓存（与 assert 探针分开）。 */
+    private val mapNavHeatmapCache = MapLocatorHeatmapPipeline.SearchFeatureCache()
+
+    /** 闭环走路独占状态机与触摸下发。 */
+    private val mapNavWalkLock = Any()
+
     /**
      * 惰性加载真实实现所需的资源（地图资产索引 + YOLO sidecar + cls.onnx bundle）。
      *
@@ -8009,6 +8158,14 @@ class MaaRunner(private val agentHost: AgentHost) {
          * 默认开；真机失败时会如实返回 0，不会伪造命中。
          */
         const val MAP_LOCATE_ASSERT_REAL_ENABLED = true
+
+        /**
+         * `MapNavigateAction` 的 RUN/NAVMESH 是否走**真闭环走路**（截图→定位→转向→推杆）。
+         *
+         * `false` 时退回改造前的开环 `pulseForward(400)`，用于真机出现回归时一键回退。
+         * 默认开；缺定位资产 / 超时 / 持续丢定位会如实返回失败，不伪造到达。
+         */
+        const val MAP_NAV_REAL_WALK = true
 
         /** 真实实现用的临时 TemplateMatch 节点/运行时模板名（与 debug 探针分开，避免覆盖表串味）。 */
         const val MAP_LOCATE_ASSERT_TM_NODE = "__MapLocateAssertTemplateMatch"

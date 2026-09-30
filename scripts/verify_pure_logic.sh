@@ -84,6 +84,9 @@ MAIN_FILES=(
   "$SRC/OperatorRecognitions.kt"
   "$SRC/OperatorRuntime.kt"
   "$SRC/MapNaviParam.kt"
+  "$SRC/MapNavHeading.kt"
+  "$SRC/MapNavControlPure.kt"
+  "$SRC/MapNavWalkPure.kt"
   "$SRC/PipelineOverrideSupport.kt"
   "$SRC/ReceptionRoomSupport.kt"
   "$SRC/ItemTransferSupport.kt"
@@ -151,6 +154,9 @@ TEST_FILES=(
   "$TST/OperatorRecognitionsTest.kt"
   "$TST/OperatorRuntimeTest.kt"
   "$TST/MapNaviParamTest.kt"
+  "$TST/MapNavHeadingTest.kt"
+  "$TST/MapNavControlPureTest.kt"
+  "$TST/MapNavWalkPureTest.kt"
   "$TST/PipelineOverrideSupportTest.kt"
   "$TST/ReceptionRoomSupportTest.kt"
   "$TST/ItemTransferSupportTest.kt"
@@ -217,6 +223,9 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.OperatorRecognitionsTest
   com.aliothmoon.maafw.remote.OperatorRuntimeTest
   com.aliothmoon.maafw.remote.MapNaviParamTest
+  com.aliothmoon.maafw.remote.MapNavHeadingTest
+  com.aliothmoon.maafw.remote.MapNavControlPureTest
+  com.aliothmoon.maafw.remote.MapNavWalkPureTest
   com.aliothmoon.maafw.remote.PipelineOverrideSupportTest
   com.aliothmoon.maafw.remote.ReceptionRoomSupportTest
   com.aliothmoon.maafw.remote.ItemTransferSupportTest
@@ -382,6 +391,9 @@ fun main() {
         "com.aliothmoon.maafw.remote.OperatorRecognitionsTest",
         "com.aliothmoon.maafw.remote.OperatorRuntimeTest",
         "com.aliothmoon.maafw.remote.MapNaviParamTest",
+        "com.aliothmoon.maafw.remote.MapNavHeadingTest",
+        "com.aliothmoon.maafw.remote.MapNavControlPureTest",
+        "com.aliothmoon.maafw.remote.MapNavWalkPureTest",
         "com.aliothmoon.maafw.remote.PipelineOverrideSupportTest",
         "com.aliothmoon.maafw.remote.ReceptionRoomSupportTest",
         "com.aliothmoon.maafw.remote.ItemTransferSupportTest",
