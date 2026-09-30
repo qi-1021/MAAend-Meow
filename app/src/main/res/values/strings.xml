@@ -563,7 +563,7 @@
 
     <!-- 远程调试（仅 debug 构建） -->
     <string name="settings_remote_debug">远程调试</string>
-    <string name="settings_remote_debug_desc">开启后调试 CLI 会监听局域网地址；远程连接必须输入令牌。默认关闭</string>
+    <string name="settings_remote_debug_desc">开启后调试 CLI 监听本机所有地址：局域网可直连，公网可经隧道（如 Cloudflare）访问；远程连接必须输入令牌。默认关闭</string>
     <string name="settings_remote_debug_port">端口 %1$d；本机回环（adb forward）仍免令牌</string>
     <string name="dialog_remote_debug_title">⚠ 高风险操作</string>
     <string name="dialog_remote_debug_message">开启后，任何拿到访问地址与令牌的人都可以远程操控本机与本应用，包括启动/停止任务、读取屏幕截图与日志、模拟点击。\n\n请仅在你能信任当前网络环境时开启，并在不使用时关闭。令牌请勿外泄；一旦怀疑泄露，立即重置。</string>

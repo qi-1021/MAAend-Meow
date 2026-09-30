@@ -96,9 +96,29 @@ object SupplementPack {
         return parseManifest(MaaJsonTree.parse(jsonText))
     }
 
-    /** 下载地址：baseUrl 已带尾斜杠，这里只做拼接。 */
+    /** 下载地址：baseUrl 已带尾斜杠，这里只做拼接。等价于 [candidateUrlsFor] 的第一条。 */
     fun urlFor(manifest: Manifest, file: FileSpec): String =
-        manifest.source.baseUrl.trimEnd('/') + "/" + file.path.trimStart('/')
+        candidateUrlsFor(manifest, file).first()
+
+    /**
+     * 候选下载地址，**按顺序尝试**；[urlFor] 是第一条。
+     *
+     * 为什么需要多条：清单的 `baseUrl` 指向 `raw.githubusercontent.com`，它在国内网络下经常被重置
+     * （实测 `Connection reset by peer`，连本机都拿不到），而补充包是用户按需下载的，必须能下到。
+     * 这里给出镜像回退；三条都指向**同一个 commit 的同一份文件**，下载后一律按清单里的
+     * git blob SHA-1 校验（见安装器），因此镜像只是传输通道，**不构成信任边界**——
+     * 镜像服务给了坏字节只会校验失败然后换下一家。
+     */
+    fun candidateUrlsFor(manifest: Manifest, file: FileSpec): List<String> {
+        val path = file.path.trimStart('/')
+        val repo = manifest.source.repo
+        val commit = manifest.source.commit
+        return listOf(
+            manifest.source.baseUrl.trimEnd('/') + "/" + path,
+            "https://cdn.jsdelivr.net/gh/$repo@$commit/$path",
+            "https://ghproxy.net/https://raw.githubusercontent.com/$repo/$commit/$path",
+        ).distinct()
+    }
 
     // ───────────────────────── 状态与依赖 ─────────────────────────
 

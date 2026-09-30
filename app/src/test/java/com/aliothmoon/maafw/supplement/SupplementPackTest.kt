@@ -103,6 +103,22 @@ class SupplementPackTest {
         assertEquals("https://example.com/base/map/cls.onnx", SupplementPack.urlFor(m, file))
     }
 
+    @Test
+    fun `下载地址带镜像回退`() {
+        val m = SupplementPack.parseManifest(manifestJson())!!
+        val file = m.packs.first { it.id == "map-locate" }.files.first()
+        val urls = SupplementPack.candidateUrlsFor(m, file)
+        // 主源（清单里的 baseUrl，raw.githubusercontent 在国内常被重置）+ 两家镜像；
+        // 每一条都指向同一 commit 的同一文件，下载后按 blob SHA-1 校验，所以换源不改变可信度。
+        assertEquals(3, urls.size)
+        assertEquals("https://example.com/base/map/cls.onnx", urls[0])
+        assertEquals("https://cdn.jsdelivr.net/gh/MaaEnd/MaaEnd-AI@abc123/map/cls.onnx", urls[1])
+        assertEquals(
+            "https://ghproxy.net/https://raw.githubusercontent.com/MaaEnd/MaaEnd-AI/abc123/map/cls.onnx",
+            urls[2],
+        )
+    }
+
     // ───────────────────── 安装状态 ─────────────────────
 
     @Test

@@ -572,7 +572,7 @@
 
     <!-- Remote debug (debug builds only) -->
     <string name="settings_remote_debug">Remote debug</string>
-    <string name="settings_remote_debug_desc">When enabled, the debug CLI also listens on the LAN; remote connections must enter a token. Off by default</string>
+    <string name="settings_remote_debug_desc">When enabled the debug CLI listens on every local address: LAN clients connect directly, and the public internet can reach it through a tunnel (e.g. Cloudflare); remote connections must enter a token. Off by default</string>
     <string name="settings_remote_debug_port">Port %1$d; loopback (adb forward) still needs no token</string>
     <string name="dialog_remote_debug_title">⚠ High-risk action</string>
     <string name="dialog_remote_debug_message">Once enabled, anyone who obtains the access address and token can remotely control this device and app, including starting/stopping tasks, reading screenshots and logs, and simulating taps.\n\nEnable it only on a network you trust, and turn it off when not in use. Keep the token secret; if you suspect a leak, reset it immediately.</string>

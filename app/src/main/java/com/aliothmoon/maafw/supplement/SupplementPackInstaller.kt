@@ -265,53 +265,69 @@ class SupplementPackInstaller(
                     part = partFile
                     target.parentFile?.mkdirs()
 
-                    val url = SupplementPack.urlFor(loaded, spec).toHttpUrl()
-                    val request = Request.Builder()
-                        .url(url)
-                        .header("User-Agent", MiscConstants.BROWSER_UA)
-                        // 校验和对的是原始字节，绝不能让传输层 gzip 改写
-                        .header("Accept-Encoding", "identity")
-                        .get()
-                        .build()
+                    // 主源 + 镜像依次尝试（同一 commit 的同一文件，下载后按 blob SHA-1 校验，
+                    // 所以换源不改变可信度；主源在国内常被重置，见 SupplementPack.candidateUrlsFor）。
+                    var lastError: Throwable? = null
+                    var done = false
+                    for (candidate in SupplementPack.candidateUrlsFor(loaded, spec)) {
+                        ctx.ensureActive()
+                        val request = Request.Builder()
+                            .url(candidate.toHttpUrl())
+                            .header("User-Agent", MiscConstants.BROWSER_UA)
+                            // 校验和对的是原始字节，绝不能让传输层 gzip 改写
+                            .header("Accept-Encoding", "identity")
+                            .get()
+                            .build()
 
-                    val call = client.newCall(request).also { activeCall = it }
-                    try {
-                        call.await().use { response ->
-                            if (response.code != HTTP_OK) {
-                                throw IOException("HTTP ${response.code}")
-                            }
-                            var inFile = 0L
-                            response.body.byteStream().use { raw ->
-                                FileOutputStream(partFile).use { out ->
-                                    val (sha1, bytes) = SupplementPack.gitBlobSha1OfStream(
-                                        spec.size,
-                                        TeeInputStream(raw, out) { delta ->
-                                            inFile += delta
-                                            publishProgress(
-                                                pack.id,
-                                                token,
-                                                completed + inFile,
-                                                pack.totalBytes,
-                                                Progress.Phase.DOWNLOADING,
-                                            )
-                                        },
-                                    )
-                                    // 字节拿全了才谈校验：之前是「下载中」，这一刻起是「校验中」
-                                    publishProgress(
-                                        pack.id,
-                                        token,
-                                        completed + bytes,
-                                        pack.totalBytes,
-                                        Progress.Phase.VERIFYING,
-                                    )
-                                    if (bytes != spec.size || !sha1.equals(spec.blob, ignoreCase = true)) {
-                                        throw VerifyFailedException()
+                        val call = client.newCall(request).also { activeCall = it }
+                        try {
+                            call.await().use { response ->
+                                if (response.code != HTTP_OK) {
+                                    throw IOException("HTTP ${response.code}")
+                                }
+                                var inFile = 0L
+                                response.body.byteStream().use { raw ->
+                                    FileOutputStream(partFile).use { out ->
+                                        val (sha1, bytes) = SupplementPack.gitBlobSha1OfStream(
+                                            spec.size,
+                                            TeeInputStream(raw, out) { delta ->
+                                                inFile += delta
+                                                publishProgress(
+                                                    pack.id,
+                                                    token,
+                                                    completed + inFile,
+                                                    pack.totalBytes,
+                                                    Progress.Phase.DOWNLOADING,
+                                                )
+                                            },
+                                        )
+                                        // 字节拿全了才谈校验：之前是「下载中」，这一刻起是「校验中」
+                                        publishProgress(
+                                            pack.id,
+                                            token,
+                                            completed + bytes,
+                                            pack.totalBytes,
+                                            Progress.Phase.VERIFYING,
+                                        )
+                                        if (bytes != spec.size || !sha1.equals(spec.blob, ignoreCase = true)) {
+                                            throw VerifyFailedException()
+                                        }
                                     }
                                 }
                             }
+                            done = true
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failed: Exception) {
+                            // 这一面源不通（网络/HTTP/校验失败）→ 换下一面；全都不行才报错
+                            lastError = failed
+                        } finally {
+                            if (activeCall === call) activeCall = null
                         }
-                    } finally {
-                        if (activeCall === call) activeCall = null
+                        if (done) break
+                    }
+                    if (!done) {
+                        throw (lastError ?: IOException("no download source available"))
                     }
 
                     // 校验通过才到位；同目录 rename，掉电也不会留下半个文件冒充成品
