@@ -321,4 +321,22 @@ class MapLocatorPureTest {
         assertTrue(c.yoloValidated)
         assertEquals(MapRect(), c.roi)
     }
+
+    @Test
+    fun `zone 校验失败消息带出实际识别结果且保留前缀`() {
+        val coarseResult = YoloCoarseResult(
+            valid = true,
+            rawClass = "Map01Base__r05_c01",
+            baseClass = "Map01Base",
+            zoneId = "ValleyIV_Base",
+            confidence = 0.98f,
+        )
+        val msg = MapLocatorPure.describeZoneValidationFailure("Wuling_Base", coarseResult)
+        // 前缀必须保持，供 MapLocateAssertPure 的确定性失败判定匹配
+        assertTrue(msg.startsWith("YOLO 约束未通过"))
+        assertTrue(msg.contains("expected=Wuling_Base"))
+        assertTrue(msg.contains("actual=ValleyIV_Base"))
+        assertTrue(msg.contains("class=Map01Base__r05_c01"))
+        assertTrue(msg.contains("base=Map01Base"))
+    }
 }

@@ -5146,13 +5146,29 @@ class MaaRunner(private val agentHost: AgentHost) {
                 constraint, map.width, map.height, plan.roi.width, plan.roi.height,
             ) ?: return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "搜索 ROI 裁到边界后为空")
             if (!constraint.yoloValidated) {
-                return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "YOLO 约束未通过（zone 不匹配 selector）")
+                return MinimapLocateFrame(
+                    LocateStatus.YOLO_FAILED,
+                    null,
+                    MapLocatorPure.describeZoneValidationFailure(targetZoneId, coarse),
+                )
             }
 
-            // 4) 灰度路：地图资产作 image、小地图裁剪作运行时模板
+            // 模板缩放：上游 `GlobalSearchBatch(tmplFeat, ..., ZoneTemplateScale(targetZoneId), ...)`
+            // （`MapLocator.cpp:1326/1363`）在 computeMatch 里对模板做 resize。只有
+            // `ValleyIV_Base` 是 15/16，其余 1.0，故对 Wuling/OMV 等 zone 是恒等变换。
+            val templateScale = zoneTemplateScale(targetZoneId)
+
+            // 4) 灰度路：地图资产作 image、小地图裁剪作运行时模板（按 zone 缩放）
+            val grayTemplateBgr = MapLocatorCalibration.scaleBgr(
+                templateBgr, plan.roi.width, plan.roi.height, templateScale,
+            ) ?: templateBgr
+            val grayTemplateW = MapLocatorCalibration.scaledSize(plan.roi.width, templateScale)
+                .takeIf { it > 0 } ?: plan.roi.width
+            val grayTemplateH = MapLocatorCalibration.scaledSize(plan.roi.height, templateScale)
+                .takeIf { it > 0 } ?: plan.roi.height
             templateBuf = lib.MaaImageBufferCreate()
             if (templateBuf == null ||
-                !setRawBgr(lib, templateBuf, templateBgr, plan.roi.width, plan.roi.height, keepAlive)
+                !setRawBgr(lib, templateBuf, grayTemplateBgr, grayTemplateW, grayTemplateH, keepAlive)
             ) {
                 return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "MaaImageBufferSetRawData(template) 失败")
             }
@@ -5195,16 +5211,20 @@ class MaaRunner(private val agentHost: AgentHost) {
             // 热图路的局部精排（0.55）盖掉，位置反而更差。故非路径区灰度路命中时优先它；
             // 灰度路没命中（Wuling 常态）才回退热图路。上游 `locate` 在裸峰 > 0.0 时照样放行，
             // 低分由追踪状态机的冷启动共识 / 远跳拒绝兜底，这里保持一致。
-            // box 是地图坐标下模板左上角，MapPosition 取中心。
+            // box 是地图坐标下模板左上角，MapPosition 取中心，再用 [MapLocatorCalibration] 把
+            // 「模板中心」修正到「玩家箭头中心」（上游隐含箭头在 ROI 正中心，本设备实测偏 +25/+19）。
             val observation = run {
                 val grayObservation = if (grayHit && grayBox != null && grayBox.size >= 4 &&
                     grayScore != null && grayScore > SEAM_FALLBACK_MIN_PEAK_SCORE
                 ) {
-                    MapPosition(
-                        zoneId = targetZoneId,
-                        x = grayBox[0] + grayBox[2] / 2.0,
-                        y = grayBox[1] + grayBox[3] / 2.0,
-                        score = grayScore,
+                    MapLocatorCalibration.toPlayerPosition(
+                        MapPosition(
+                            zoneId = targetZoneId,
+                            x = grayBox[0] + grayBox[2] / 2.0,
+                            y = grayBox[1] + grayBox[3] / 2.0,
+                            score = grayScore,
+                        ),
+                        templateScale,
                     )
                 } else {
                     null
@@ -5214,11 +5234,14 @@ class MaaRunner(private val agentHost: AgentHost) {
                 val heatmapObservation = if (hmScore != null && hmBox != null && hmBox.size >= 4 &&
                     hmScore > SEAM_FALLBACK_MIN_PEAK_SCORE
                 ) {
-                    MapPosition(
-                        zoneId = targetZoneId,
-                        x = hmBox[0] + hmBox[2] / 2.0,
-                        y = hmBox[1] + hmBox[3] / 2.0,
-                        score = hmScore,
+                    MapLocatorCalibration.toPlayerPosition(
+                        MapPosition(
+                            zoneId = targetZoneId,
+                            x = hmBox[0] + hmBox[2] / 2.0,
+                            y = hmBox[1] + hmBox[3] / 2.0,
+                            score = hmScore,
+                        ),
+                        templateScale,
                     )
                 } else {
                     null
@@ -6248,11 +6271,20 @@ class MaaRunner(private val agentHost: AgentHost) {
         // 2) 模板热图 + 掩膜，并按掩膜外接框裁剪（MapLocator.cpp:413-419）
         val tmpl = MapLocatorPathHeatmap.extractTemplatePathFeature(minimapBgr, minimapW, minimapH, cfg)
             ?: return heatmapFailure("模板热图/掩膜提取失败")
-        val bbox = MapLocatorHeatmapPipeline.maskBoundingBox(tmpl.mask, minimapW, minimapH)
+        // 模板按 ZoneTemplateScale 缩放（上游 computeMatch `MapLocator.cpp:402-404` 同款；
+        // 仅 ValleyIV_Base=15/16，其余 1.0）。缩放用双线性 / 掩膜用最近邻。
+        val templateScale = zoneTemplateScale(targetZoneId)
+        val scaledFeature = MapLocatorCalibration.scaleGray(tmpl.feature, minimapW, minimapH, templateScale)
+            ?: return heatmapFailure("模板热图缩放失败")
+        val scaledMask = MapLocatorCalibration.scaleMask(tmpl.mask, minimapW, minimapH, templateScale)
+            ?: return heatmapFailure("模板掩膜缩放失败")
+        val scaledW = MapLocatorCalibration.scaledSize(minimapW, templateScale).takeIf { it > 0 } ?: minimapW
+        val scaledH = MapLocatorCalibration.scaledSize(minimapH, templateScale).takeIf { it > 0 } ?: minimapH
+        val bbox = MapLocatorHeatmapPipeline.maskBoundingBox(scaledMask, scaledW, scaledH)
         if (bbox.isEmpty) return heatmapFailure("模板掩膜为空")
-        val croppedFeature = MapLocatorHeatmapPipeline.cropGray(tmpl.feature, minimapW, minimapH, bbox)
+        val croppedFeature = MapLocatorHeatmapPipeline.cropGray(scaledFeature, scaledW, scaledH, bbox)
             ?: return heatmapFailure("模板热图裁剪失败")
-        val croppedMask = MapLocatorHeatmapPipeline.cropMask(tmpl.mask, minimapW, minimapH, bbox)
+        val croppedMask = MapLocatorHeatmapPipeline.cropMask(scaledMask, scaledW, scaledH, bbox)
             ?: return heatmapFailure("模板掩膜裁剪失败")
         val tw = bbox.width
         val th = bbox.height
@@ -6465,16 +6497,24 @@ class MaaRunner(private val agentHost: AgentHost) {
             if (!constraint.yoloValidated) {
                 debugCoarseResult = listOf(
                     "zone: $targetZoneId",
-                    "yolo: class=${coarse.rawClass} zone=${coarse.zoneId} conf=${coarse.confidence}",
-                    "error: YOLO 约束未通过（zone 不匹配 selector，或 ROI 缺失）",
+                    "yolo: class=${coarse.rawClass} zone=${coarse.zoneId} base=${coarse.baseClass} conf=${coarse.confidence}",
+                    "error: " + MapLocatorPure.describeZoneValidationFailure(targetZoneId, coarse),
                 )
                 return@MaaCustomRecognitionCallback 0
             }
 
-            // 3) 地图资产作 image、小地图裁剪作运行时模板、ROI 约束搜索窗
+            // 3) 地图资产作 image、小地图裁剪作运行时模板（按 ZoneTemplateScale 缩放）、ROI 约束搜索窗
+            val scale = zoneTemplateScale(targetZoneId)
+            val grayTemplateBgr = MapLocatorCalibration.scaleBgr(
+                templateBgr, debugCoarseTemplateW, debugCoarseTemplateH, scale,
+            ) ?: templateBgr
+            val grayTemplateW = MapLocatorCalibration.scaledSize(debugCoarseTemplateW, scale)
+                .takeIf { it > 0 } ?: debugCoarseTemplateW
+            val grayTemplateH = MapLocatorCalibration.scaledSize(debugCoarseTemplateH, scale)
+                .takeIf { it > 0 } ?: debugCoarseTemplateH
             templateBuf = lib.MaaImageBufferCreate()
             if (templateBuf == null || !setRawBgr(
-                    lib, templateBuf, templateBgr, debugCoarseTemplateW, debugCoarseTemplateH, keepAlive,
+                    lib, templateBuf, grayTemplateBgr, grayTemplateW, grayTemplateH, keepAlive,
                 )
             ) {
                 debugCoarseResult = listOf("error: MaaImageBufferSetRawData(template) 失败")
@@ -6501,7 +6541,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             val hit = tmRes?.hit == true
             val score = MapLocatorCoarsePure.bestMatchScore(tmRes?.detailJson)
             val outcome = MapLocatorCoarsePure.evaluateCoarseOutcome(hit, box, map.width, map.height, searchRoi)
-            val scale = zoneTemplateScale(targetZoneId)
             val boxText = box?.let { "[${it.joinToString(",")}]" } ?: "null"
 
             // PathHeatmap 并行路（与灰度路并列，不替换灰度路——灰度路留作回退）。
@@ -6535,11 +6574,14 @@ class MaaRunner(private val agentHost: AgentHost) {
             // 非路径热图区灰度路命中优先灰度，否则热图路。box 是地图坐标下模板左上角，取中心。
             debugCoarseObservation = run {
                 val grayObservation = if (hit && box != null && box.size >= 4 && score != null) {
-                    MapPosition(
-                        zoneId = targetZoneId,
-                        x = box[0] + box[2] / 2.0,
-                        y = box[1] + box[3] / 2.0,
-                        score = score,
+                    MapLocatorCalibration.toPlayerPosition(
+                        MapPosition(
+                            zoneId = targetZoneId,
+                            x = box[0] + box[2] / 2.0,
+                            y = box[1] + box[3] / 2.0,
+                            score = score,
+                        ),
+                        scale,
                     )
                 } else {
                     null
@@ -6547,11 +6589,14 @@ class MaaRunner(private val agentHost: AgentHost) {
                 val hmBox = heatmap.box
                 val hmScore = heatmap.score
                 val heatmapObservation = if (hmScore != null && hmBox != null && hmBox.size >= 4) {
-                    MapPosition(
-                        zoneId = targetZoneId,
-                        x = hmBox[0] + hmBox[2] / 2.0,
-                        y = hmBox[1] + hmBox[3] / 2.0,
-                        score = hmScore,
+                    MapLocatorCalibration.toPlayerPosition(
+                        MapPosition(
+                            zoneId = targetZoneId,
+                            x = hmBox[0] + hmBox[2] / 2.0,
+                            y = hmBox[1] + hmBox[3] / 2.0,
+                            score = hmScore,
+                        ),
+                        scale,
                     )
                 } else {
                     null

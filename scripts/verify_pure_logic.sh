@@ -111,6 +111,7 @@ MAIN_FILES=(
   "$SRC/YoloPreprocess.kt"
   "$SRC/YoloClassifySupport.kt"
   "$SRC/MapLocatorCoarsePure.kt"
+  "$SRC/MapLocatorCalibration.kt"
   "$SRC/MapLocatorRefinePure.kt"
   "$SRC/MapLocatorPathHeatmap.kt"
   "$SRC/MapLocatorHeatmapPipeline.kt"
@@ -176,6 +177,7 @@ TEST_FILES=(
   "$TST/YoloPreprocessTest.kt"
   "$TST/YoloClassifySupportTest.kt"
   "$TST/MapLocatorCoarsePureTest.kt"
+  "$TST/MapLocatorCalibrationTest.kt"
   "$TST/MapLocatorRefinePureTest.kt"
   "$TST/MapLocatorPathHeatmapTest.kt"
   "$TST/MapLocatorHeatmapPipelineTest.kt"
@@ -241,6 +243,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.YoloPreprocessTest
   com.aliothmoon.maafw.remote.YoloClassifySupportTest
   com.aliothmoon.maafw.remote.MapLocatorCoarsePureTest
+  com.aliothmoon.maafw.remote.MapLocatorCalibrationTest
   com.aliothmoon.maafw.remote.MapLocatorRefinePureTest
   com.aliothmoon.maafw.remote.MapLocatorPathHeatmapTest
   com.aliothmoon.maafw.remote.MapLocatorHeatmapPipelineTest
@@ -405,6 +408,7 @@ fun main() {
         "com.aliothmoon.maafw.remote.YoloPreprocessTest",
         "com.aliothmoon.maafw.remote.YoloClassifySupportTest",
         "com.aliothmoon.maafw.remote.MapLocatorCoarsePureTest",
+        "com.aliothmoon.maafw.remote.MapLocatorCalibrationTest",
         "com.aliothmoon.maafw.remote.MapLocatorRefinePureTest",
         "com.aliothmoon.maafw.remote.MapLocatorPathHeatmapTest",
         "com.aliothmoon.maafw.remote.MapLocatorHeatmapPipelineTest",

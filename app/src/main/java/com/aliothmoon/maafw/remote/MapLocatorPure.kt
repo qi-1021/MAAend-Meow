@@ -50,6 +50,21 @@ object MapLocatorPure {
     }
 
     /**
+     * `YOLO 约束未通过` 的**可诊断消息**。
+     *
+     * 上游这条失败只记 `"YOLO is confident but zone validation failed"`（`MapLocator.cpp:2010`），
+     * 不带实际识别到的 zone。真机排查时「期望 base、画面却是另一个 region」与「期望 base、
+     * 画面是同一 base 的 tier」都落进同一条消息，无法区分，只能回头翻帧。
+     *
+     * 这里把 `expected` / `actual`（`coarse.zoneId`）/ `class`（`coarse.rawClass`）/
+     * `base`（`coarse.baseClass`）一并写进消息。**前缀保持 `YOLO 约束未通过`**，
+     * 以对齐 [MapLocateAssertPure] 的确定性失败前缀判定与既有测试。
+     */
+    fun describeZoneValidationFailure(targetZoneId: String, coarse: YoloCoarseResult): String =
+        "YOLO 约束未通过（zone 不匹配 selector: expected=$targetZoneId actual=${coarse.zoneId} " +
+            "class=${coarse.rawClass} base=${coarse.baseClass}）"
+
+    /**
      * 上游 `NormalizeExpectedZoneId`（`MapLocator.cpp:68-74`）。
      *
      * selector 为空或转换器缺失时原样返回，否则走 YOLO 名字→zoneId 的转换。
