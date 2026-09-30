@@ -560,6 +560,9 @@ class RemoteServiceImpl : RemoteService.Stub() {
         override fun mapFind(zone: String, atX: Double, atY: Double, icon: String?): List<String> =
             runner.debugMapFind(zone, atX, atY, icon)
 
+        override fun walk(x: Double, y: Double, zone: String?): List<String> =
+            runner.debugWalk(x, y, zone)
+
         /**
          * 特权进程内递归复制：源路径限定在常用数据根下，目标必须落在本 App 自己的外部
          * files 目录，避免调试接口被用来乱写别处。root 授权后即可读 `/data/data/<pkg>`。

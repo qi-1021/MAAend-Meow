@@ -140,6 +140,12 @@ sealed interface DebugCliIntent {
     ) : DebugCliIntent
 
     /**
+     * 闭环走路探针：把自动走路（`MapNavRuntime`）直接对着**地图坐标** (x, y) 跑一遍，
+     * 逐拍返回诊断，用于真机快速迭代朝向/转向/到达判据（不必等整条 AutoCollect 跑到该路点）。
+     */
+    data class Walk(val x: Double, val y: Double, val zone: String?) : DebugCliIntent
+
+    /**
      * 调试用「拷出来」：在**特权进程**里把设备上的 [srcPath] 递归复制到 [dstDir] 之下。
      *
      * 用途：拿到 root 授权后，把 `/data/data/<pkg>` 这类只有特权身份才读得到的目录
@@ -269,6 +275,22 @@ object DebugCliSupport {
             }
 
             // 特权进程内的「拷出来」；不依赖 controller，只做形态校验，能否读由实现判定
+            "walk" -> when {
+                args.size < 2 -> DebugCliParse.Failure("walk 需要 <x> <y>，可选 [zone]")
+                args.size > 3 -> DebugCliParse.Failure("walk 接受 <x> <y> [zone]")
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> {
+                    val wx = args[0].toDoubleOrNull()
+                    val wy = args[1].toDoubleOrNull()
+                    if (wx == null || wy == null) {
+                        DebugCliParse.Failure("walk 的 x/y 必须是数字：${args[0]} ${args[1]}")
+                    } else {
+                        DebugCliParse.Ok(DebugCliIntent.Walk(wx, wy, args.getOrNull(2)))
+                    }
+                }
+            }
+
+            // 特权进程内的「拷出来」；不依赖 controller，只做形态校验，能否读由实现判定
             "copyout" -> when {
                 args.size < 2 -> DebugCliParse.Failure("copyout 需要 <srcPath> <dstDir>")
                 args.size > 2 -> DebugCliParse.Failure("copyout 只接受 <srcPath> <dstDir>（路径不要带空格）")
@@ -318,6 +340,7 @@ object DebugCliSupport {
         appendLine("coarselocate <frame> [zone]  全帧裁小地图 → YOLO → 地图资产上 TemplateMatch 粗定位")
         appendLine("tracklocate <frame> [zone] | reset  粗定位观测喂追踪状态机，打印 accept/reject/hold/relocate 与累计状态")
         appendLine("mapfind <zone> <at_x> <at_y> [icon]  在当前全屏大地图上解 viewport → 目标投屏 → 图标确认（只读）")
+        appendLine("walk <x> <y> [zone]  闭环走路到地图坐标（逐拍诊断；仅任务空闲时可用）")
         appendLine("copyout <srcPath> <dstDir>  特权进程内递归复制到 dstDir 下（root 后用于抢救 /data/data）")
         appendLine("rootcmd <cmd...>    以 root 跑一条 shell 命令，回显 stdout/stderr/退出码（抢救 /data/data 用）")
     }.trimEnd()

@@ -254,6 +254,7 @@ object DebugCliServer {
             is DebugCliIntent.TrackLocate -> host.trackLocate(intent.imagePath, intent.zone)
 
             is DebugCliIntent.MapFind -> host.mapFind(intent.zone, intent.atX, intent.atY, intent.icon)
+            is DebugCliIntent.Walk -> host.walk(intent.x, intent.y, intent.zone)
 
             is DebugCliIntent.CopyOut -> host.copyOut(intent.srcPath, intent.dstDir)
 
@@ -414,6 +415,9 @@ interface DebugCliHost {
      * 目标屏幕框 / 是否命中 / 耗时），解不出时如实说明。
      */
     fun mapFind(zone: String, atX: Double, atY: Double, icon: String?): List<String>
+
+    /** 闭环走路到地图坐标（逐拍诊断）。 */
+    fun walk(x: Double, y: Double, zone: String?): List<String>
 
     /**
      * 特权进程内递归复制：把设备上的 [srcPath]（文件或目录）复制到 [dstDir] 之下。

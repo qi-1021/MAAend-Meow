@@ -6557,6 +6557,94 @@ class MaaRunner(private val agentHost: AgentHost) {
      *
      * 任一步失败都如实写进 [debugCoarseResult]，绝不伪造成功。
      */
+    // ───────────────────── debug CLI: walk（闭环走路直连探针）─────────────────────
+    //
+    // 目的：走路的迭代很慢（要等整条 AutoCollect 跑到某个路点），这里提供一条
+    // `walk <x> <y> [zone]`，把闭环直接对着**地图坐标**跑一遍并逐拍返回诊断，
+    // 让真机调参从"分钟级"降到"十几秒级"。用的是与 pipeline 里 MapNavigateAction
+    // 完全同一套（MapNavRuntime.walkTo + navObserveFrame）。
+
+    /** `walk` 的目标参数：入口写、回调读。 */
+    @Volatile
+    private var debugWalkRequest: DebugWalkRequest? = null
+
+    @Volatile
+    private var debugWalkResult: List<String>? = null
+
+    private data class DebugWalkRequest(
+        val assets: MapLocateAssets,
+        val x: Double,
+        val y: Double,
+        val zone: String,
+    )
+
+    /** 与其它探针共用同一把锁：同一时刻只允许一个调试探针跑。 */
+    private val debugWalkLock = Any()
+
+    /** debug CLI `walk <x> <y> [zone]`。 */
+    fun debugWalk(x: Double, y: Double, zone: String?): List<String> {
+        if (!BuildConfig.DEBUG) return listOf("error: walk 仅在 debug 构建可用")
+        val lib = MaaFrameworkLoader.library ?: return listOf("error: MaaFramework 未加载")
+        val res = synchronized(lifecycleLock) { resource }
+            ?: return listOf("error: resource 未初始化（先跑一次任务）")
+        if (isRunning()) return listOf("error: 任务运行中，walk 探针暂不与任务并行")
+        val assets = ensureMapLocateAssets(lib, res)
+            ?: return listOf("error: 定位资产未就绪（先安装 map-locate 补充包）")
+        synchronized(debugWalkLock) {
+            debugWalkResult = null
+            debugWalkRequest = DebugWalkRequest(assets, x, y, zone.orEmpty())
+            val error = postProbeAndWait(lib, DEBUG_WALK_NODE, DEBUG_WALK_RECO, null, requireFrame = false)
+            if (error != null) return listOf("error: $error")
+            return debugWalkResult ?: listOf("error: walk 探针未返回结果")
+        }
+    }
+
+    /** walk 探针回调：拿到 context 就跑闭环，逐拍收集诊断（末 20 拍返回给 CLI）。 */
+    private val debugCliWalkCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, _, _, _, _, _, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        val req = debugWalkRequest
+        if (context == null || req == null) {
+            debugWalkResult = listOf("error: walk 探针缺少 context/请求参数")
+            return@MaaCustomRecognitionCallback 0
+        }
+        val lines = mutableListOf<String>()
+        val options = LocateOptions(expectedZoneId = req.zone)
+        val waypoint = NavWaypoint(req.x, req.y, index = 0, label = "walk")
+        val outcome = synchronized(mapNavWalkLock) {
+            MapNavRuntime.walkTo(
+                waypoint = waypoint,
+                config = NavWalkConfig(),
+                locator = MapNavRuntime.FrameLocator { navObserveFrame(lib, context, req.assets, options) },
+            ) { tick, fix ->
+                val line = MapNavRuntime.describeTick(tick, fix)
+                lines += line
+                RunDiagnostics.note(
+                    "mapnavi",
+                    line,
+                    mapOf(
+                        "stage" to "walk_tick",
+                        "node" to DEBUG_WALK_NODE,
+                        "waypoint" to 0,
+                        "action" to tick.action.name,
+                        "pos" to listOf(fix.x, fix.y),
+                        "yaw" to fix.yawDeg,
+                        "distance" to tick.distance,
+                        "yaw_error" to tick.yawErrorDeg,
+                        "turn_px" to tick.turnSwipePx,
+                        "lost_streak" to tick.lostStreak,
+                        "relocate" to tick.relocateAttempts,
+                        "elapsed_ms" to tick.elapsedMs,
+                        "message" to tick.reason,
+                    ),
+                )
+            }
+        }
+        lines += "walk: success=${outcome.success} ticks=${outcome.ticks} cost=${outcome.elapsedMs}ms " +
+            "final_dist=${"%.1f".format(outcome.finalDistance)} reason=${outcome.reason}"
+        debugWalkResult = lines.takeLast(20)
+        return@MaaCustomRecognitionCallback if (outcome.success) 1 else 0
+    }
+
     private val debugCliCoarseCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, _, _, _, _, _, _, _, _ ->
         val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
         if (context == null) {
@@ -7994,6 +8082,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             regReco(DEBUG_COARSE_RECO, debugCliCoarseCallback)
             // 世界地图找图标探针（mapfind）：全屏大地图上 SolveViewport → 投屏 → ConfirmSpot
             regReco(DEBUG_MAPFIND_RECO, debugCliMapFindCallback)
+            // 闭环走路探针（walk）：直接对着地图坐标跑 MapNavRuntime 闭环
+            regReco(DEBUG_WALK_RECO, debugCliWalkCallback)
         }
         // ItemQuantitySatisfied 不再是恒真：恒真会让采集「目标库存模式」的所有 SubSkipped
         // 直接命中，任务成功结束却什么都没采（见 ItemQuantitySupport 注释）。
@@ -8148,6 +8238,10 @@ class MaaRunner(private val agentHost: AgentHost) {
         /** 世界地图找图标探针（mapfind）：临时 Custom 包装节点名与注册识别名 */
         const val DEBUG_MAPFIND_NODE = "__DebugCliMapFind__"
         const val DEBUG_MAPFIND_RECO = "DebugCliMapFind"
+
+        /** 闭环走路探针（walk）：临时 Custom 包装节点名与注册识别名 */
+        const val DEBUG_WALK_NODE = "__DebugCliWalk__"
+        const val DEBUG_WALK_RECO = "DebugCliWalk"
 
         /**
          * PathHeatmap 并行路的临时 TemplateMatch 节点与运行时模板名（与灰度路分开，

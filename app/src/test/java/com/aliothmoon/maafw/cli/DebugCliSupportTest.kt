@@ -363,6 +363,27 @@ class DebugCliSupportTest {
     // ───────────────────── mapfind ─────────────────────
 
     @Test
+    fun `walk 两参数走到坐标`() {
+        assertEquals(DebugCliIntent.Walk(706.0, 1893.0, null), ok("walk 706 1893"))
+    }
+
+    @Test
+    fun `walk 可带 zone`() {
+        assertEquals(DebugCliIntent.Walk(706.5, 1893.5, "Wuling_Base"), ok("walk 706.5 1893.5 Wuling_Base"))
+    }
+
+    @Test
+    fun `walk 坐标必须是数字`() {
+        assertTrue(failure("walk abc 1").contains("必须是数字"))
+    }
+
+    @Test
+    fun `walk 参数个数校验`() {
+        assertTrue(failure("walk 1").isNotEmpty())
+        assertTrue(failure("walk 1 2 3 4").isNotEmpty())
+    }
+
+    @Test
     fun `mapfind 三参数只解坐标`() {
         assertEquals(
             DebugCliIntent.MapFind("Wuling", 942.6, 1781.2, null),
