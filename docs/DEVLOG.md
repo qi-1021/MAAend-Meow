@@ -28,12 +28,20 @@
 - **远程链路**：CLI 是裸 TCP，Cloudflare 免费隧道只走 HTTP → 本机加一个带令牌的 HTTP 桥
   `scripts/debug_cli_bridge.py`。公网端到端验证通过。
 
-**② 培养舱提取链：真机现场复现 + 修复**（`c5045c9`）
+**② 培养舱提取链：真机现场复现 + 修复 + 修复后真机通过**（`c5045c9`）
 - 现场：`FindTargetBySeed → GrowConfirm×3 → FindTargetBySeed 20s 超时失败`，**失败帧停在「提取获得」弹窗**
   （道具 + 底部 ✓）——材料已种下、基核已提取，纯误报。
 - 上游**未修**这条；我们补齐：`SeedExtractClose` 原本**没有** `on_error` → 补 `GrowBack`；
   给 `GrowBack` 再挂一个**不依赖识别的坐标点击兜底**（防弹窗盖住返回键）；`ExtractSeedCloseText`/
   `NoMaterials` 文案扩容。
+- **修复后真机复跑（同一次运行用新 CLI 的 `start AndroidOpenGame DijiangRewards` 直接起）：**
+  ```
+  SeedExtractConfirm / SeedExtractClose        ← 修复前这两个节点从未触达
+  SeedExtractCloseByCoord                      ← 新增的坐标兜底被触发（识别路仍认不出关闭按钮）
+  GrowBack                                     ← 被兜底救回，回到培养界面
+  任务完成: 🎁基建任务                          ← 修复前必红，现在通过 ✓
+  ```
+  `on_error/` 没有新增失败帧。**结论：识别路仍需修（关闭按钮认不出），但兜底已经做到"任何断法都不拖红"。**
 
 **③ 同步 4 个上游修复**（`c5045c9`，全部走补丁层，不动子模块指针）
 `489ff2fe`(#6076 确认框 box_index)、`d4ea8745`(#6100 —— **注意：宽度 120→180 是 `ClueItem` 不是
