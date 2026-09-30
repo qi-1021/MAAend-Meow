@@ -219,6 +219,10 @@ class SupplementPackInstaller(
         }
 
         val required = pack.totalBytes + DISK_MARGIN_BYTES
+        // 先建目录再判空间：`File.getUsableSpace()` 对**不存在的路径**返回 0，于是首次下载
+        // （或目录被清理工具删掉后）会把"空间充足"误判成"空间不足"并永久拒绝下载——
+        // 真机实测就卡在这里（提示"还需要 22 MiB"，而实际可用 600+ GB）。
+        supplementsDir.mkdirs()
         if (supplementsDir.usableSpace < required) {
             updatePack(pack.id, token) {
                 it.copy(
