@@ -98,6 +98,7 @@ MAIN_FILES=(
   "$SRC/AutoEcoFarmSleep.kt"
   "$SRC/AutoDeliverySupport.kt"
   "$SRC/OngoingDeliverySupport.kt"
+  "$SRC/SeizeDeliverySupport.kt"
   "$SRC/CameraScanSupport.kt"
   "$SRC/MapLocatorTypes.kt"
   "$SRC/MotionTracker.kt"
@@ -114,6 +115,7 @@ MAIN_FILES=(
   "$SRC/MapLocatorPathHeatmap.kt"
   "$SRC/MapLocatorHeatmapPipeline.kt"
   "$SRC/MapLocatorTracking.kt"
+  "$SRC/MapLocateAssertPure.kt"
   "$SUP/SupplementPack.kt"
   "$SUP/SupplementPackLocal.kt"
   "$DIAG/RunDiagnosticsPolicy.kt"
@@ -157,6 +159,7 @@ TEST_FILES=(
   "$TST/AutoEcoFarmOverrideTest.kt"
   "$TST/AutoEcoFarmSleepTest.kt"
   "$TST/OngoingDeliverySupportTest.kt"
+  "$TST/SeizeDeliverySupportTest.kt"
   "$TST/CameraScanSupportTest.kt"
   "$TST/MapLocatorTypesTest.kt"
   "$TST/MotionTrackerPureTest.kt"
@@ -173,6 +176,7 @@ TEST_FILES=(
   "$TST/MapLocatorPathHeatmapTest.kt"
   "$TST/MapLocatorHeatmapPipelineTest.kt"
   "$TST/MapLocatorTrackingTest.kt"
+  "$TST/MapLocateAssertPureTest.kt"
   "$TSUP/SupplementPackTest.kt"
   "$TSUP/SupplementPackLocalTest.kt"
   "$TDIAG/RunDiagnosticsPolicyTest.kt"
@@ -216,6 +220,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.AutoEcoFarmOverrideTest
   com.aliothmoon.maafw.remote.AutoEcoFarmSleepTest
   com.aliothmoon.maafw.remote.OngoingDeliverySupportTest
+  com.aliothmoon.maafw.remote.SeizeDeliverySupportTest
   com.aliothmoon.maafw.remote.CameraScanSupportTest
   com.aliothmoon.maafw.remote.MapLocatorTypesTest
   com.aliothmoon.maafw.remote.MotionTrackerPureTest
@@ -232,6 +237,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.MapLocatorPathHeatmapTest
   com.aliothmoon.maafw.remote.MapLocatorHeatmapPipelineTest
   com.aliothmoon.maafw.remote.MapLocatorTrackingTest
+  com.aliothmoon.maafw.remote.MapLocateAssertPureTest
   com.aliothmoon.maafw.supplement.SupplementPackTest
   com.aliothmoon.maafw.supplement.SupplementPackLocalTest
   com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest
@@ -374,6 +380,7 @@ fun main() {
         "com.aliothmoon.maafw.remote.AutoEcoFarmOverrideTest",
         "com.aliothmoon.maafw.remote.AutoEcoFarmSleepTest",
         "com.aliothmoon.maafw.remote.OngoingDeliverySupportTest",
+        "com.aliothmoon.maafw.remote.SeizeDeliverySupportTest",
         "com.aliothmoon.maafw.remote.CameraScanSupportTest",
         "com.aliothmoon.maafw.remote.MapLocatorTypesTest",
         "com.aliothmoon.maafw.remote.MotionTrackerPureTest",
@@ -390,6 +397,7 @@ fun main() {
         "com.aliothmoon.maafw.remote.MapLocatorPathHeatmapTest",
         "com.aliothmoon.maafw.remote.MapLocatorHeatmapPipelineTest",
         "com.aliothmoon.maafw.remote.MapLocatorTrackingTest",
+        "com.aliothmoon.maafw.remote.MapLocateAssertPureTest",
         "com.aliothmoon.maafw.supplement.SupplementPackTest",
         "com.aliothmoon.maafw.supplement.SupplementPackLocalTest",
         "com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest",

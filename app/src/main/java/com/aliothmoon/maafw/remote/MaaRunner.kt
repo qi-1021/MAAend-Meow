@@ -2603,6 +2603,14 @@ class MaaRunner(private val agentHost: AgentHost) {
     private val failureCollectorSession = FailureCollectorSupport.Session()
 
     /**
+     * 抢占送货任务「扫描目标」路径的进程内状态（对齐上游 `scan_target.go:L27-30` 的包级
+     * `scannedJobItems` / `currentIndex`）。默认路径（价格筛选）不用它；指定送达点时才缓存整列
+     * 达标委托，由 `SeizeDeliveryJobsScanTargetAction` 逐项点开查看，用尽/匹配后由
+     * `SeizeDeliveryJobsResetScanStateAction` 清空。
+     */
+    private val seizeDeliveryScanSession = SeizeDeliverySupport.ScanSession()
+
+    /**
      * `OutpostTradingCurrentGoods` 识别到的当前货品名，按 location 暂存，
      * 供同节点的 `adopt` 动作读取（动作回调拿不到商品名，只有识别回调能 OCR）。
      */
@@ -4833,6 +4841,386 @@ class MaaRunner(private val agentHost: AgentHost) {
         return coarseLines + trackLines
     }
 
+    // ───────────────────── MapLocateAssertLocation 真实实现 ─────────────────────
+    //
+    // 上游 `MapLocateAction.cpp:404-471`：`resetTrackingState` → 最多 60 帧、每帧 250ms
+    // 轮询 `locate(force_global_search=true, expected_zone_id=zone_id)` → 定位成功且落在
+    // `target` 矩形内即 matched，命中时把 `target` 当 box 交回框架。
+    //
+    // 这里复用 debug 探针已打通的同一条原语链：小地图裁剪（MapLocatorCoarsePure）→
+    // YOLO 分区（NeuralNetworkClassify）→ 约束 ROI → 灰度 TemplateMatch + PathHeatmap
+    // 精排（runHeatmapCoarsePath，内部走 MatchValidation 裁决）→ 追踪状态机
+    // （MapLocatorTracking.feed）稳定化 → 与 target 比较。裁决纯逻辑在 [MapLocateAssertPure]。
+
+    // 回退开关 / 临时节点与模板名见 companion 的 MAP_LOCATE_ASSERT_*。
+
+    /** 真实实现惰性加载的地图资产/YOLO sidecar，按 resource 生命周期缓存。 */
+    private class MapLocateAssets(
+        val mapIndex: Map<String, File>,
+        val config: YoloConfig,
+        val mapping: YoloMapping,
+        val supplementDir: File,
+    )
+
+    private val mapLocateAssetsLock = Any()
+
+    @Volatile
+    private var mapLocateAssetsFor: Pointer? = null
+
+    @Volatile
+    private var mapLocateAssets: MapLocateAssets? = null
+
+    /** 真实实现的搜索热图两槽缓存（与 debug 探针分开，避免并发串味）。 */
+    private val mapLocateAssertHeatmapCache = MapLocatorHeatmapPipeline.SearchFeatureCache()
+
+    /** 真实实现的追踪状态机；单次 assert 操作开始时 reset（对齐上游）。 */
+    private val mapLocateAssertTracking = MapLocatorTracking()
+
+    /** 单次 assert 操作独占状态机与缓存。 */
+    private val mapLocateAssertLock = Any()
+
+    /**
+     * 惰性加载真实实现所需的资源（地图资产索引 + YOLO sidecar + cls.onnx bundle）。
+     *
+     * 与 [debugCoarseLocate] 的加载逻辑同源，但按 resource 指针缓存，避免每次识别都重扫盘。
+     * 任务运行中不允许 `MaaResourcePostBundle`（框架 res manager 无锁），故 cls.onnx 必须由
+     * [prepare] 的空闲预加载登记好；未就绪时返回 null，让识别如实失败。
+     */
+    private fun ensureMapLocateAssets(lib: MaaFrameworkLibrary, res: Pointer): MapLocateAssets? {
+        mapLocateAssets?.let { if (mapLocateAssetsFor == res) return it }
+        synchronized(mapLocateAssetsLock) {
+            mapLocateAssets?.let { if (mapLocateAssetsFor == res) return it }
+            val root = projectRoot ?: return null
+            val mapRoot = File(root, "resource/image/MapLocator")
+            if (!mapRoot.isDirectory) return null
+            val mapIndex = buildMapZoneIndex(mapRoot)
+            if (mapIndex.isEmpty()) return null
+            val base = File(root).parentFile ?: return null
+            val supplementDir = File(base, "supplements/map-locate/map")
+            val config = runCatching {
+                YoloConfigParser.parseConfig(File(supplementDir, "cls.json").takeIf { it.isFile }?.readText())
+            }.getOrDefault(YoloConfig())
+            val tileRegions = runCatching {
+                YoloConfigParser.parseTileMapping(
+                    File(supplementDir, "tile_mapping.json").takeIf { it.isFile }?.readText(),
+                )
+            }.getOrDefault(emptyMap())
+            val mapping = YoloMapping(config.regionMapping, tileRegions)
+            ensureYoloClassifyBundle(lib, res, base, supplementDir, allowResourceWrite = !isRunning())?.let {
+                Ln.w("MaaRunner: MapLocateAssertLocation 资源未就绪：$it")
+                return null
+            }
+            val assets = MapLocateAssets(mapIndex, config, mapping, supplementDir)
+            mapLocateAssets = assets
+            mapLocateAssetsFor = res
+            return assets
+        }
+    }
+
+    /** 单帧定位观测：与上游 `LocateResult` 同形（status + 可选位置 + 调试串）。 */
+    private data class MinimapLocateFrame(
+        val status: LocateStatus,
+        val observation: MapPosition?,
+        val debugMessage: String,
+    )
+
+    /**
+     * 对一整帧做一次「小地图 → YOLO → 粗定位 + 热图精排」，返回本帧的全局观测。
+     *
+     * 只做**单帧**；追踪状态机与多帧轮询在调用方（[mapLocateAssertLocationCallback]）。
+     * 任一环节失败都如实返回非 Success，不伪造位置。
+     */
+    private fun locateMinimapFrame(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        frame: ArgbImage,
+        options: LocateOptions,
+        assets: MapLocateAssets,
+        heatmapCache: MapLocatorHeatmapPipeline.SearchFeatureCache,
+    ): MinimapLocateFrame {
+        // 1) 小地图裁剪：末影控制器是 Android 原生（非 adb/playcover），走默认 ROI、不缩放。
+        val plan = MapLocatorCoarsePure.minimapExtractPlan(frame.width, frame.height, useAdbRoi = false)
+            ?: return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "小地图 ROI 越界")
+        val minimapArgb = MapLocatorCoarsePure.extractMinimapArgb(
+            frame.pixels, frame.width, frame.height, useAdbRoi = false,
+        ) ?: return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "小地图裁剪失败")
+        val yoloBgr = YoloPreprocess.preprocessArgb(minimapArgb, plan.roi.width, plan.roi.height)
+            ?: return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "YOLO 预处理失败")
+        val templateBgr = YoloPreprocess.argbToBgr(minimapArgb)
+
+        var yoloBuf: Pointer? = null
+        var mapBuf: Pointer? = null
+        var templateBuf: Pointer? = null
+        val keepAlive = mutableListOf<Memory>()
+        try {
+            // 2) YOLO 分区分类
+            yoloBuf = lib.MaaImageBufferCreate()
+            if (yoloBuf == null ||
+                !setRawBgr(lib, yoloBuf, yoloBgr, YoloPreprocess.OUTPUT_SIZE, YoloPreprocess.OUTPUT_SIZE, keepAlive)
+            ) {
+                return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "MaaImageBufferSetRawData(128x128) 失败")
+            }
+            val classifyOverride = YoloClassifySupport.buildClassifyOverride(
+                nodeName = YoloClassifySupport.DEFAULT_PROBE_NODE,
+                model = YoloClassifySupport.DEFAULT_MODEL,
+                labels = assets.config.classes,
+            )
+            val yoloRes = runRecognitionOnce(lib, context, yoloBuf, YoloClassifySupport.DEFAULT_PROBE_NODE, classifyOverride)
+                ?: return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "NeuralNetworkClassify 调用失败")
+            val parsed = YoloClassifySupport.parseClassifyDetail(yoloRes.detailJson)
+                ?: return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "无法解析分类详情")
+            val coarse = YoloClassifySupport.resolveClassify(parsed, assets.config, assets.mapping)
+
+            val selector = MapLocatorPure.normalizeExpectedZoneId(options.expectedZoneId) {
+                assets.mapping.convertYoloNameToZoneId(it)
+            }
+            val targetZoneId = selector.ifEmpty { coarse.zoneId }
+            if (!coarse.valid) {
+                return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "YOLO 分类无效（cls_index 越界）")
+            }
+            if (coarse.isNone || targetZoneId.isEmpty() || targetZoneId == "None") {
+                return MinimapLocateFrame(LocateStatus.TRACKING_LOST, null, "本帧没有可定位区域")
+            }
+            val mapFile = assets.mapIndex[targetZoneId]
+                ?: return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "地图资产缺 zone=$targetZoneId")
+            val map = decodeBgr(mapFile)
+                ?: return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "地图资产解码失败")
+
+            // 3) 约束 ROI（buildSearchConstraint）
+            val constraint = buildSearchConstraint(
+                expectedZoneSelector = options.expectedZoneId,
+                targetZoneId = targetZoneId,
+                coarse = coarse,
+                zones = mapOf(targetZoneId to MapDimensions(map.width, map.height)),
+            )
+            val searchRoi = MapLocatorCoarsePure.constrainedSearchRoi(
+                constraint, map.width, map.height, plan.roi.width, plan.roi.height,
+            ) ?: return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "搜索 ROI 裁到边界后为空")
+            if (!constraint.yoloValidated) {
+                return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "YOLO 约束未通过（zone 不匹配 selector）")
+            }
+
+            // 4) 灰度路：地图资产作 image、小地图裁剪作运行时模板
+            templateBuf = lib.MaaImageBufferCreate()
+            if (templateBuf == null ||
+                !setRawBgr(lib, templateBuf, templateBgr, plan.roi.width, plan.roi.height, keepAlive)
+            ) {
+                return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "MaaImageBufferSetRawData(template) 失败")
+            }
+            lib.MaaContextOverrideImage(context, MAP_LOCATE_ASSERT_TEMPLATE, templateBuf)
+            mapBuf = lib.MaaImageBufferCreate()
+            if (mapBuf == null || !setRawBgr(lib, mapBuf, map.bytes, map.width, map.height, keepAlive)) {
+                return MinimapLocateFrame(LocateStatus.YOLO_FAILED, null, "MaaImageBufferSetRawData(map) 失败")
+            }
+            val grayNode = MapLocatorProbeSupport.buildTemplateMatchOverride(
+                nodeName = MAP_LOCATE_ASSERT_TM_NODE,
+                templateName = MAP_LOCATE_ASSERT_TEMPLATE,
+                method = MapLocatorProbeSupport.DEFAULT_METHOD,
+                greenMask = false,
+                threshold = COARSE_MATCH_THRESHOLD,
+                roi = intArrayOf(searchRoi.x, searchRoi.y, searchRoi.width, searchRoi.height),
+            )
+            val tmRes = runRecognitionOnce(lib, context, mapBuf, MAP_LOCATE_ASSERT_TM_NODE, grayNode)
+            val grayHit = tmRes?.hit == true
+            val grayBox = tmRes?.box
+            val grayScore = MapLocatorCoarsePure.bestMatchScore(tmRes?.detailJson)
+
+            // 5) PathHeatmap 并行路（精排为准，失败回退灰度路）
+            val generation = MapLocatorHeatmapPipeline.assetGeneration(mapFile.length(), mapFile.lastModified())
+            val heatmap = runCatching {
+                runHeatmapCoarsePath(
+                    lib, context, map, templateBgr,
+                    plan.roi.width, plan.roi.height,
+                    targetZoneId, searchRoi, generation, grayBox, keepAlive,
+                    heatmapCache = heatmapCache,
+                    tmNode = MAP_LOCATE_ASSERT_HEATMAP_TM_NODE,
+                    tmTemplate = MAP_LOCATE_ASSERT_HEATMAP_TEMPLATE,
+                )
+            }.getOrElse { heatmapFailure("${it.javaClass.simpleName}: ${it.message}") }
+
+            // 观测：热图路优先，其次灰度路命中框；box 是地图坐标下模板左上角，MapPosition 取中心。
+            // 上游 `locate` 在全局搜失败但裸峰 > kSeamFallbackMinPeakScore(0.0) 时照样放行，
+            // 低分由追踪状态机的冷启动共识 / 远跳拒绝兜底，这里保持一致。
+            val observation = run {
+                val hmBox = heatmap.box
+                val hmScore = heatmap.score
+                if (hmScore != null && hmBox != null && hmBox.size >= 4 && hmScore > SEAM_FALLBACK_MIN_PEAK_SCORE) {
+                    MapPosition(
+                        zoneId = targetZoneId,
+                        x = hmBox[0] + hmBox[2] / 2.0,
+                        y = hmBox[1] + hmBox[3] / 2.0,
+                        score = hmScore,
+                    )
+                } else if (grayHit && grayBox != null && grayBox.size >= 4 &&
+                    grayScore != null && grayScore > SEAM_FALLBACK_MIN_PEAK_SCORE
+                ) {
+                    MapPosition(
+                        zoneId = targetZoneId,
+                        x = grayBox[0] + grayBox[2] / 2.0,
+                        y = grayBox[1] + grayBox[3] / 2.0,
+                        score = grayScore,
+                    )
+                } else {
+                    null
+                }
+            }
+            return if (observation != null) {
+                MinimapLocateFrame(LocateStatus.SUCCESS, observation, "Global Search Success")
+            } else {
+                MinimapLocateFrame(LocateStatus.TRACKING_LOST, null, "全局搜索无有效峰")
+            }
+        } finally {
+            if (yoloBuf != null) lib.MaaImageBufferDestroy(yoloBuf)
+            if (mapBuf != null) lib.MaaImageBufferDestroy(mapBuf)
+            if (templateBuf != null) lib.MaaImageBufferDestroy(templateBuf)
+        }
+    }
+
+    /** 从 image buffer 的 PNG 编码字节解出 ARGB（框架回调给的 `image`）。 */
+    private fun decodeArgbFromBuffer(lib: MaaFrameworkLibrary, image: Pointer): ArgbImage? {
+        val bytes = readEncodedImage(lib, image) ?: return null
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        return try {
+            val w = bitmap.width
+            val h = bitmap.height
+            if (w <= 0 || h <= 0) return null
+            val pixels = IntArray(w * h)
+            bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+            ArgbImage(pixels, w, h)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    /** 主动截一帧（assert 轮询的非首帧）。 */
+    private fun captureArgbFrame(lib: MaaFrameworkLibrary): ArgbImage? {
+        val ctrl = currentController ?: return null
+        val capId = lib.MaaControllerPostScreencap(ctrl)
+        if (capId <= 0) return null
+        lib.MaaControllerWait(ctrl, capId)
+        val buf = lib.MaaImageBufferCreate() ?: return null
+        return try {
+            if (lib.MaaControllerCachedImage(ctrl, buf).toInt() == 0) return null
+            if (lib.MaaImageBufferIsEmpty(buf).toInt() != 0) return null
+            decodeArgbFromBuffer(lib, buf)
+        } finally {
+            lib.MaaImageBufferDestroy(buf)
+        }
+    }
+
+    /**
+     * `MapLocateAssertLocation` 的真实识别回调（上游 `MapLocateAction.cpp:404-471`）。
+     *
+     * 首帧用框架给的 `image`，其后自截；每帧定位后喂追踪状态机，accepted 位置落在 target
+     * 矩形内即命中并提前停止。命中时 box = target 矩形（上游 `*out_box = target_rect`）。
+     * detail 用 [MapLocateActionPure.assertLocationDetailJson] 回写 `out_detail`。
+     */
+    private val mapLocateAssertLocationCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, param, image, _, _, outBox, outDetail ->
+        if (!MAP_LOCATE_ASSERT_REAL_ENABLED) return@MaaCustomRecognitionCallback 0
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null) return@MaaCustomRecognitionCallback 0
+        val assertParam = MapLocateActionPure.parseAssertLocationParam(param)
+        val targetRect = MapLocateAssertPure.tryBuildAssertRect(assertParam)
+        if (targetRect == null) {
+            Ln.w("MaaRunner: MapLocateAssertLocation[$nodeName] 参数非法 zone=${assertParam.zoneId} target=${assertParam.target}")
+            return@MaaCustomRecognitionCallback 0
+        }
+        val res = synchronized(lifecycleLock) { resource } ?: return@MaaCustomRecognitionCallback 0
+        val assets = ensureMapLocateAssets(lib, res) ?: return@MaaCustomRecognitionCallback 0
+        val options = MapLocateAssertPure.buildAssertOptions(assertParam)
+
+        synchronized(mapLocateAssertLock) {
+            mapLocateAssertTracking.reset()
+            val frames = ArrayList<MapLocateAssertPure.AssertFrame>(MapLocateAssertPure.ASSERT_LOCATE_MAX_FRAMES)
+            val firstFrame = if (image != null && lib.MaaImageBufferIsEmpty(image).toInt() == 0) {
+                decodeArgbFromBuffer(lib, image)
+            } else {
+                null
+            }
+
+            for (index in 0 until MapLocateAssertPure.ASSERT_LOCATE_MAX_FRAMES) {
+                val frame = if (index == 0) firstFrame else captureArgbFrame(lib)
+                if (frame == null) {
+                    frames += MapLocateAssertPure.AssertFrame(LocateStatus.TRACKING_LOST, null, "取帧失败")
+                } else {
+                    val located = runCatching {
+                        locateMinimapFrame(lib, context, frame, options, assets, mapLocateAssertHeatmapCache)
+                    }.getOrElse {
+                        MinimapLocateFrame(LocateStatus.TRACKING_LOST, null, "${it.javaClass.simpleName}: ${it.message}")
+                    }
+                    val decision = located.observation?.let {
+                        mapLocateAssertTracking.feed(it, System.nanoTime() / 1_000_000_000.0)
+                    }
+                    if (decision != null && decision.action == TrackingAction.ACCEPT && decision.position != null) {
+                        frames += MapLocateAssertPure.AssertFrame(LocateStatus.SUCCESS, decision.position, located.debugMessage)
+                    } else {
+                        frames += MapLocateAssertPure.AssertFrame(LocateStatus.TRACKING_LOST, null, located.debugMessage)
+                    }
+                }
+
+                val last = frames.last()
+                if (last.located && last.position != null &&
+                    MapLocateActionPure.isPositionInsideRect(last.position, targetRect)
+                ) {
+                    break
+                }
+                if (index + 1 < MapLocateAssertPure.ASSERT_LOCATE_MAX_FRAMES) {
+                    runCatching { Thread.sleep(MapLocateAssertPure.ASSERT_LOCATE_POLL_DELAY_MS) }
+                }
+            }
+
+            val outcome = MapLocateAssertPure.evaluateAssertFrames(frames, targetRect)
+            val finalFrame = outcome.finalFrame
+            val finalResult = LocateResult(
+                status = finalFrame.status,
+                position = finalFrame.position,
+                debugMessage = finalFrame.debugMessage,
+            )
+            if (outDetail != null) {
+                runCatching {
+                    lib.MaaStringBufferSet(
+                        outDetail,
+                        MapLocateActionPure.assertLocationDetailJson(
+                            MapLocateActionPure.buildAssertLocationOutput(finalResult, assertParam, outcome.matched),
+                        ),
+                    )
+                }.onFailure { Ln.w("MaaRunner: MapLocateAssertLocation 写 detail 失败：${it.message}") }
+            }
+
+            val posText = finalFrame.position
+                ?.let { String.format(java.util.Locale.US, "(%.2f,%.2f,score=%.3f)", it.x, it.y, it.score) }
+                ?: "-"
+            RunDiagnostics.note(
+                "maplocator",
+                "assertlocation｜" + if (outcome.matched) "命中" else "未命中" +
+                    " zone=${assertParam.zoneId} frame=${outcome.matchedFrame}/${outcome.framesPolled}",
+                mapOf(
+                    "stage" to "assert_location",
+                    "node" to nodeName,
+                    "zone_id" to assertParam.zoneId,
+                    "matched" to outcome.matched,
+                    "matched_frame" to outcome.matchedFrame,
+                    "frames_polled" to outcome.framesPolled,
+                    "target" to listOf(targetRect.x, targetRect.y, targetRect.width, targetRect.height),
+                    "position" to finalFrame.position?.let { listOf(it.x, it.y, it.score) },
+                    "message" to finalFrame.debugMessage,
+                ),
+            )
+            Ln.i(
+                "MaaRunner: MapLocateAssertLocation[$nodeName] zone=${assertParam.zoneId} " +
+                    "matched=${outcome.matched} frame=${outcome.matchedFrame}/${outcome.framesPolled} " +
+                    "target=[${targetRect.x},${targetRect.y},${targetRect.width},${targetRect.height}] " +
+                    "pos=$posText msg=${finalFrame.debugMessage}",
+            )
+
+            if (!outcome.matched) return@MaaCustomRecognitionCallback 0
+            if (outBox != null) {
+                lib.MaaRectSet(outBox, targetRect.x, targetRect.y, targetRect.width, targetRect.height)
+            }
+            1
+        }
+    }
+
     /** 扫描地图资产目录，按上游 key 规则建 zoneId → 文件 索引。 */
     private fun buildMapZoneIndex(mapRoot: File): Map<String, File> {
         val files = mapRoot.walkTopDown()
@@ -4941,6 +5329,9 @@ class MaaRunner(private val agentHost: AgentHost) {
         generation: Long,
         grayBox: IntArray?,
         keepAlive: MutableList<Memory>,
+        heatmapCache: MapLocatorHeatmapPipeline.SearchFeatureCache,
+        tmNode: String,
+        tmTemplate: String,
     ): HeatmapCoarsePathResult {
         val isBase = targetZoneId.contains("Base")
         val kind = if (isBase) TemplateFeatureKind.PATH_HEATMAP_BASE else TemplateFeatureKind.PATH_HEATMAP_TIER
@@ -4958,7 +5349,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             map.bytes, map.width, map.height, searchRoi.x, searchRoi.y, sw, sh,
         ) ?: return heatmapFailure("搜索 ROI 裁剪失败")
         val key = MapLocatorHeatmapPipeline.SearchFeatureKey(targetZoneId, kind, searchRoi, generation)
-        val searchHeat = heatmapSearchCache.getOrCompute(key) {
+        val searchHeat = heatmapCache.getOrCompute(key) {
             MapLocatorPathHeatmap.extractPathHeatmap(roiBgr, sw, sh)
         } ?: return heatmapFailure("搜索热图构建失败")
 
@@ -4997,10 +5388,10 @@ class MaaRunner(private val agentHost: AgentHost) {
             ) {
                 return heatmapFailure("MaaImageBufferSetRawData(热图) 失败")
             }
-            overrideOk = lib.MaaContextOverrideImage(context, DEBUG_COARSE_HEATMAP_TEMPLATE, templBuf).toInt() != 0
+            overrideOk = lib.MaaContextOverrideImage(context, tmTemplate, templBuf).toInt() != 0
             val nodeOverride = MapLocatorProbeSupport.buildTemplateMatchOverride(
-                nodeName = DEBUG_COARSE_HEATMAP_TM_NODE,
-                templateName = DEBUG_COARSE_HEATMAP_TEMPLATE,
+                nodeName = tmNode,
+                templateName = tmTemplate,
                 method = MapLocatorProbeSupport.DEFAULT_METHOD,
                 greenMask = false,
                 threshold = COARSE_MATCH_THRESHOLD,
@@ -5220,6 +5611,9 @@ class MaaRunner(private val agentHost: AgentHost) {
                     lib, context, map, templateBgr,
                     debugCoarseTemplateW, debugCoarseTemplateH,
                     targetZoneId, searchRoi, generation, box, keepAlive,
+                    heatmapCache = heatmapSearchCache,
+                    tmNode = DEBUG_COARSE_HEATMAP_TM_NODE,
+                    tmTemplate = DEBUG_COARSE_HEATMAP_TEMPLATE,
                 )
             }.getOrElse { heatmapFailure("${it.javaClass.simpleName}: ${it.message}") }
             val heatmapLine = if (heatmap.ok || heatmap.coarseScore != null) {
@@ -5699,9 +6093,11 @@ class MaaRunner(private val agentHost: AgentHost) {
             }
             synchronized(lifecycleLock) { tasker = tsk }
         }
-        // debug 探针在运行中也可能用到 YOLO 分类模型；趁任务还没跑、resource 空闲时先登记好，
-        // 免得运行中再 PostBundle 去改 resource（框架 res manager 无锁，会与运行中任务竞争）。
-        if (BuildConfig.DEBUG) preloadYoloClassifyBundle(lib)
+        // YOLO 分类模型（cls.onnx）趁任务还没跑、resource 空闲时先登记好：debug 探针在运行中
+        // 会用，真实 MapLocateAssertLocation 也在运行中（回调里）用；运行中再 PostBundle 会改
+        // resource（框架 res manager 无锁）与任务竞争。release 也要预加载，否则真实现拿不到模型。
+        // 未装 map-locate 补充包时 preloadYoloClassifyBundle 内部直接跳过（只记日志）。
+        preloadYoloClassifyBundle(lib)
         return null
     }
 
@@ -6158,6 +6554,156 @@ class MaaRunner(private val agentHost: AgentHost) {
         if (FailureCollectorSupport.finishSucceeds(failures)) 1 else 0
     }
 
+    // ───────────────── SeizeDeliveryJobs（抢占送货任务）─────────────────
+    // 两个识别原先在 falseRecognitions 里恒假、两个动作在 otherActions 里 noop-success，
+    // 整条链（默认价格筛选路径 + 指定送达点扫描路径）在移动端走不通。这里对齐上游
+    // `agent/go-service/seizedeliveryjobs/{find_target,scan_target}.go` 换成真实实现；
+    // 纯逻辑（奖励解析/链式偏移/候选过滤去重排序/扫描会话）在 [SeizeDeliverySupport]（已单测）。
+
+    /** 从 `__SeizeDeliveryJobsMinReward` 节点定义读价格下限（expected 由 tasks 覆写）。 */
+    private fun readSeizeMinReward(lib: MaaFrameworkLibrary, context: Pointer): Double? {
+        val nodeJson = nodeDefinitionJson(lib, context, SeizeDeliverySupport.MIN_REWARD_NODE) ?: return null
+        return SeizeDeliverySupport.parseMinReward(nodeJson)
+    }
+
+    /** 在指定 ROI 跑一个 OCR 子节点并取 `filtered[0]`（上游 `ocrFirst`，沿用当前截图）。 */
+    private fun runSeizeOcrFirst(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        image: Pointer,
+        node: String,
+        roi: SeizeDeliverySupport.Box,
+    ): SeizeDeliverySupport.FilteredHit? {
+        val res = runRecognitionOnce(lib, context, image, node, SeizeDeliverySupport.roiOverrideJson(node, roi)) ?: return null
+        if (!res.hit) return null
+        return SeizeDeliverySupport.parseFilteredFirst(MaaJsonTree.parse(res.detailJson))
+    }
+
+    /**
+     * 上游 `scanJobs`：以调度券锚点（单节点多模板、多 box）为起点，链式 OCR
+     * 价格/出发地/接取/查看位置，再过滤/去重/排序出达标委托。
+     */
+    private fun scanSeizeJobs(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        image: Pointer,
+        minReward: Double,
+    ): List<SeizeDeliverySupport.JobItem> {
+        val token = runRecognitionOnce(lib, context, image, SeizeDeliverySupport.COMMISSION_TOKEN_NODE)
+        if (token == null || !token.hit) return emptyList()
+        val anchors = SeizeDeliverySupport.parseFilteredBoxes(MaaJsonTree.parse(token.detailJson))
+        if (anchors.isEmpty()) return emptyList()
+
+        val rows = ArrayList<SeizeDeliverySupport.RowObservation>(anchors.size)
+        for (anchor in anchors) {
+            val rewardRoi = SeizeDeliverySupport.offsetBox(anchor, SeizeDeliverySupport.OFFSET_TOKEN_TO_REWARD) ?: continue
+            val reward = runSeizeOcrFirst(lib, context, image, SeizeDeliverySupport.REWARD_NODE, rewardRoi) ?: continue
+            val rewardBox = reward.box ?: continue
+            val originRoi = SeizeDeliverySupport.offsetBox(rewardBox, SeizeDeliverySupport.OFFSET_REWARD_TO_ORIGIN) ?: continue
+            val acceptRoi = SeizeDeliverySupport.offsetBox(rewardBox, SeizeDeliverySupport.OFFSET_REWARD_TO_ACCEPT) ?: continue
+            val viewRoi = SeizeDeliverySupport.offsetBox(rewardBox, SeizeDeliverySupport.OFFSET_REWARD_TO_VIEW) ?: continue
+            val origin = runSeizeOcrFirst(lib, context, image, SeizeDeliverySupport.ORIGIN_NODE, originRoi)
+            val accept = runSeizeOcrFirst(lib, context, image, SeizeDeliverySupport.ACCEPT_NODE, acceptRoi)
+            val view = runSeizeOcrFirst(lib, context, image, SeizeDeliverySupport.VIEW_LOCATION_NODE, viewRoi)
+            rows += SeizeDeliverySupport.RowObservation(
+                rewardText = reward.text,
+                rewardBox = rewardBox,
+                originText = origin?.text,
+                originBox = origin?.box,
+                acceptBox = accept?.box,
+                viewLocationBox = view?.box,
+            )
+        }
+        return SeizeDeliverySupport.assembleJobs(rows, minReward)
+    }
+
+    /** `SeizeDeliveryJobsFindTargetRecognition`：默认路径，返回列表最上达标委托的接取按钮框。 */
+    private val seizeDeliveryFindTargetCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, _, image, _, _, outBox, outDetail ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            val minReward = readSeizeMinReward(lib, context) ?: run {
+                Ln.e("MaaRunner: SeizeDeliveryJobsFindTarget [$nodeName] 读不到价格下限")
+                return@MaaCustomRecognitionCallback 0
+            }
+            val items = scanSeizeJobs(lib, context, image, minReward)
+            val box = SeizeDeliverySupport.findTargetBox(items) ?: run {
+                Ln.i("MaaRunner: SeizeDeliveryJobsFindTarget [$nodeName] 无达标委托 (min=$minReward)")
+                return@MaaCustomRecognitionCallback 0
+            }
+            if (outBox != null) lib.MaaRectSet(outBox, box.x, box.y, box.w, box.h)
+            // 上游返回 Detail 标记；现 MaaStringBufferSet 已绑定，照写（管线不消费，仅可观测）。
+            if (outDetail != null) {
+                runCatching { lib.MaaStringBufferSet(outDetail, SeizeDeliverySupport.FIND_TARGET_DETAIL) }
+                    .onFailure { Ln.w("MaaRunner: SeizeDeliveryJobsFindTarget 写 detail 失败：${it.message}") }
+            }
+            Ln.i("MaaRunner: SeizeDeliveryJobsFindTarget [$nodeName] -> (${box.x},${box.y},${box.w},${box.h}) matched=${items.size}")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: SeizeDeliveryJobsFindTarget error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** `SeizeDeliveryJobsScanTargetRecognition`：指定终点路径，首次扫描缓存整列，后续直接命中。 */
+    private val seizeDeliveryScanTargetCallback = MaaFrameworkLibrary.MaaCustomRecognitionCallback { context, _, nodeName, _, _, image, roi, _, outBox, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomRecognitionCallback 0
+        if (context == null || image == null) return@MaaCustomRecognitionCallback 0
+        try {
+            if (!seizeDeliveryScanSession.isScanned) {
+                val minReward = readSeizeMinReward(lib, context) ?: run {
+                    Ln.e("MaaRunner: SeizeDeliveryJobsScanTarget [$nodeName] 读不到价格下限")
+                    return@MaaCustomRecognitionCallback 0
+                }
+                val items = scanSeizeJobs(lib, context, image, minReward)
+                if (items.isEmpty()) {
+                    Ln.i("MaaRunner: SeizeDeliveryJobsScanTarget [$nodeName] 无达标委托 (min=$minReward)")
+                    return@MaaCustomRecognitionCallback 0
+                }
+                seizeDeliveryScanSession.store(items)
+            }
+            // 命中框 = 本节点 roi（上游 `return Box: arg.Roi`；真正点击目标由 action 覆写）。
+            if (outBox != null && roi != null) {
+                val r = getBoxRect(lib, roi)
+                lib.MaaRectSet(outBox, r.x, r.y, r.w, r.h)
+            }
+            Ln.i("MaaRunner: SeizeDeliveryJobsScanTarget [$nodeName] scanned=${seizeDeliveryScanSession.size} idx=${seizeDeliveryScanSession.index}")
+            1
+        } catch (t: Throwable) {
+            Ln.e("MaaRunner: SeizeDeliveryJobsScanTarget error on node=$nodeName", t)
+            0
+        }
+    }
+
+    /** `SeizeDeliveryJobsScanTargetAction`：覆写当前项查看位置/接取点击目标并前进；用尽返回 false。 */
+    private val seizeDeliveryScanTargetActionCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, _, _, _, _ ->
+        val lib = MaaFrameworkLoader.library ?: return@MaaCustomActionCallback 0
+        if (context == null) return@MaaCustomActionCallback 0
+        val item = seizeDeliveryScanSession.current() ?: run {
+            Ln.i("MaaRunner: SeizeDeliveryJobsScanTargetAction [$nodeName] 已用尽，转 ScanExhausted")
+            return@MaaCustomActionCallback 0
+        }
+        val targets = SeizeDeliverySupport.scanTargets(item) ?: run {
+            Ln.e("MaaRunner: SeizeDeliveryJobsScanTargetAction [$nodeName] 点击目标框退化")
+            return@MaaCustomActionCallback 0
+        }
+        val json = SeizeDeliverySupport.buildScanOverrideJson(targets)
+        if (lib.MaaContextOverridePipeline(context, json).toInt() == 0) {
+            Ln.e("MaaRunner: SeizeDeliveryJobsScanTargetAction [$nodeName] 覆写 target 失败")
+            return@MaaCustomActionCallback 0
+        }
+        seizeDeliveryScanSession.advance()
+        Ln.i("MaaRunner: SeizeDeliveryJobsScanTargetAction [$nodeName] idx=${seizeDeliveryScanSession.index - 1}/${seizeDeliveryScanSession.size}")
+        1
+    }
+
+    /** `SeizeDeliveryJobsResetScanStateAction`：清空扫描状态。 */
+    private val seizeDeliveryResetScanStateCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, _, _, _, _ ->
+        seizeDeliveryScanSession.reset()
+        Ln.i("MaaRunner: SeizeDeliveryJobsResetScanState [$nodeName] 扫描状态已清空")
+        1
+    }
+
     private fun registerCustomActions(lib: MaaFrameworkLibrary, res: Pointer) {
         registeredCustomActions.clear()
         registeredCustomRecognitions.clear()
@@ -6252,6 +6798,13 @@ class MaaRunner(private val agentHost: AgentHost) {
         regAction("FailureCollectorRunTask", failureCollectorRunTaskCallback)
         regAction("FailureCollectorFinish", failureCollectorFinishCallback)
 
+        // SeizeDeliveryJobs：两个识别原先恒假、两个动作原先 noop-success，整条链走不通。
+        // 换成真实实现，并已从下面的 otherActions 与 falseRecognitions 名单删除（否则会被 noop 覆盖）。
+        regReco("SeizeDeliveryJobsFindTargetRecognition", seizeDeliveryFindTargetCallback)
+        regReco("SeizeDeliveryJobsScanTargetRecognition", seizeDeliveryScanTargetCallback)
+        regAction("SeizeDeliveryJobsScanTargetAction", seizeDeliveryScanTargetActionCallback)
+        regAction("SeizeDeliveryJobsResetScanStateAction", seizeDeliveryResetScanStateCallback)
+
         val otherActions = listOf(
             "CreditShoppingScanItemAction",
             "AddItemData",
@@ -6262,8 +6815,6 @@ class MaaRunner(private val agentHost: AgentHost) {
             "CaptureUid",
             "CloseGameAction",
             "ImageCheckSetResultAction",
-            "SeizeDeliveryJobsResetScanStateAction",
-            "SeizeDeliveryJobsScanTargetAction",
             // autoEcoFarmResetSwipeState/InterruptibleSleep/OverrideTargetTemplate 不在此列：
             // 已注册为真实实现
             "AutoFightMainAction",
@@ -6362,7 +6913,15 @@ class MaaRunner(private val agentHost: AgentHost) {
             "ReceptionRoomWaitExchangeKeepAliveDueRecognition",
             receptionKeepAliveDueCallback,
         )
+        // MapLocateAssertLocation 不再是恒假：它是「采集（AutoCollect）」整条链的定位门控
+        // （71 个管线文件引用，上游语义是断言「我在地图上的某个位置」）。真实现走已打通的
+        // 小地图定位原语 + 追踪状态机；未装 map-locate 补充包 / 定位失败时如实返回 0。
+        regReco("MapLocateAssertLocation", mapLocateAssertLocationCallback)
 
+        // MapFind（世界地图找图标，上游 WorldMap/WorldMapFind.cpp）**仍保持恒假**：
+        // 它操作的是全屏大地图（viewport 求解 + 图标模板确认 + 平移/缩放），依赖
+        // WorldMapSolver（1830 行 C++）与本 checkout 里不存在的图标/底图资产，无法用
+        // 小地图定位原语实现。详见本轮报告。
         val falseRecognitions = listOf(
             "ImageCheckNotPassedRecognition",
             "IconRecognition",
@@ -6374,10 +6933,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             "EssenceGridAdvanceRecognition",
             "EssenceGridPendingRecognition",
             "MapFind",
-            "MapLocateAssertLocation",
             "PuzzleRecognition",
-            "SeizeDeliveryJobsFindTargetRecognition",
-            "SeizeDeliveryJobsScanTargetRecognition",
             "TrialOfSwordmancy.Recognize",
             "TrialOfSwordmancy.RecognizeAband",
             "TrialOfSwordmancy.RecognizeDeck"
@@ -6407,8 +6963,11 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
         resource = null
         loadedResourcePaths = emptyList()
-        // resource 换了，YOLO 分类 bundle 的登记也要重来
+        // resource 换了，YOLO 分类 bundle 的登记与 MapLocate 资产缓存都要重来
         ensuredYoloBundleFor = null
+        mapLocateAssetsFor = null
+        mapLocateAssets = null
+        mapLocateAssertHeatmapCache.clear()
     }
 
     private inline fun notify(block: IMaaRunnerCallback.() -> Unit) {
@@ -6474,6 +7033,20 @@ class MaaRunner(private val agentHost: AgentHost) {
 
         /** 粗定位 TemplateMatch 的阈值；对齐上游 loc_threshold 默认 0.55。 */
         const val COARSE_MATCH_THRESHOLD = 0.55
+
+        /**
+         * `MapLocateAssertLocation` 真实实现的回退开关。
+         *
+         * `false` 时识别退化为恒假（与改造前一致），用于真机出现回归时一键回退。
+         * 默认开；真机失败时会如实返回 0，不会伪造命中。
+         */
+        const val MAP_LOCATE_ASSERT_REAL_ENABLED = true
+
+        /** 真实实现用的临时 TemplateMatch 节点/运行时模板名（与 debug 探针分开，避免覆盖表串味）。 */
+        const val MAP_LOCATE_ASSERT_TM_NODE = "__MapLocateAssertTemplateMatch"
+        const val MAP_LOCATE_ASSERT_TEMPLATE = "__MapLocateAssert/minimap.png"
+        const val MAP_LOCATE_ASSERT_HEATMAP_TM_NODE = "__MapLocateAssertHeatmapTemplateMatch"
+        const val MAP_LOCATE_ASSERT_HEATMAP_TEMPLATE = "__MapLocateAssert/heatmap.png"
 
         /** 地图资产扩展名（框架 `imread` 可读的常见几种；上游资产只有 png）。 */
         val MAP_IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "bmp")

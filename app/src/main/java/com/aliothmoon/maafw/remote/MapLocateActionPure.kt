@@ -2,6 +2,10 @@ package com.aliothmoon.maafw.remote
 
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * `MapLocateAction.cpp` 的参数解析与输出构造（纯逻辑部分）。
@@ -140,6 +144,30 @@ object MapLocateActionPure {
         }
         return output
     }
+
+    /**
+     * 上游 `WriteJsonDetail`（`MapLocateAction.cpp:130-139`）的序列化部分：
+     * 把 [AssertLocationOutput] 按 `MEO_JSONIZATION` 字段顺序写成 JSON。
+     *
+     * `to_json` 输出**全部字段**（`MEO_OPT` 只影响反序列化的可选性），所以这里也全字段输出，
+     * 顺序与 `AssertLocationOutput.toJsonObject()` 一致。真正写 `MaaStringBuffer` 的那一步
+     * （依赖 JNA）留在 MaaRunner。
+     */
+    fun assertLocationDetailJson(output: AssertLocationOutput): String = buildJsonObject {
+        put("status", output.status)
+        put("matched", output.matched)
+        put("inTarget", output.inTarget)
+        put("message", output.message)
+        put("zoneId", output.zoneId)
+        put("x", output.x)
+        put("y", output.y)
+        put("rot", output.rot)
+        put("locConf", output.locConf)
+        put("camRot", output.camRot)
+        put("camRotConf", output.camRotConf)
+        put("latencyMs", output.latencyMs)
+        put("target", JsonArray(output.target.map { JsonPrimitive(it) }))
+    }.toString()
 
     // ───────────────────────── 几何 ─────────────────────────
 

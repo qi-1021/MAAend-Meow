@@ -238,6 +238,15 @@ interface MaaFrameworkLibrary : Library {
 
     fun MaaStringBufferGet(handle: Pointer?): String?
 
+    /**
+     * 把 [value] 写进 [handle]（对应 `MaaBool MaaStringBufferSet(MaaStringBuffer*, const char*)`）。
+     *
+     * 自定义识别回调写 `out_detail` 用（上游 `MapLocateAction.cpp:138`
+     * `MaaStringBufferSet(out_detail, json_text.c_str())`）。此前本项目未绑该函数，
+     * 所有自定义识别都只能放弃回写 detail。
+     */
+    fun MaaStringBufferSet(handle: Pointer?, value: String): Byte
+
     // ── Rect ──
 
     fun MaaRectCreate(): Pointer?

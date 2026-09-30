@@ -141,6 +141,40 @@ GROWTH_CHAMBER_CLOSE_BUTTON_FILE = (
 # 真机实测「确认提取」→弹窗可识别约 1.4~1.6s，取 1.5s 等待，让首次识别就落在弹窗就绪后。
 GROWTH_CHAMBER_CLOSE_PRE_DELAY = 1500
 
+# 培养舱「提取基核」返回（GrowBack）时序修复（真机框架日志 + 像素级诊断，2026-09-30）。
+#
+# 现场（08:22 真机日志，submodule fcdc53a7 构建）：
+#   SeedExtractClose 于 08:20:51.224 点掉「提取获得」弹窗底部 ✓[618,586,44,45]，
+#   约 0.2~0.3s 后（08:20:51.4xx）就直接评估 GrowthChamberGrowBack 的识别——
+#   此时关闭动画未结束、返回键 ROI 仍被半透明遮罩盖着，TemplateMatch 只在遮罩上拿到
+#   一簇贴阈值的弱候选：all_results_ 分数 0.53~0.75（阈值 0.7），
+#   best=[1228,19,31,31] score=0.706312。点这个"假返回键"是空击 → GrowViewIn 不出现
+#   → RepeatUntilFoundAction 耗尽 → on_error → 坐标兜底 SeedExtractCloseByCoord 接住。
+#
+# 像素证据（本地 fail_frame.png 1280×720，与设备 on_error 现场同源）：
+#   ROI [1146,0,134,112] 为纯灰渐变（mean≈120、std≈14），
+#   被识别成返回键的 31×31 区域 std≈1.9 —— 返回键被弹窗遮住，根本不在框里。
+#   兜底 ROI [540,538,209,182] 里的底部 ✓ 才是真正能关弹窗的控件。
+#
+# 结论：`method=10001` **不是**根因。它是框架支持的 `SQDIFF_NORMED_Inverted`
+#   （maa-framework-go v4.0.0-beta.18 recognition.go:138；官方注释见 Interface/Scene.json
+#   "默认5时，当弹出右侧面板，此图片依然能匹配上"）。模板 BackButton.png 为 31×31、
+#   远小于 ROI 134×112，也无问题。根因是**识别时机撞上弹窗关闭动画**。
+#
+# 修法（补丁层、按名定位、缺了 raise）：
+#   ① GrowthChamberSeedExtractClose 加 post_wait_freezes：点掉弹窗后，等返回键区域
+#      [1146,0,134,112] 画面稳定，再让 next 去识别 GrowBack，避免在动画遮罩上做匹配。
+#   ② GrowBack 的 RepeatUntilFoundAction 显式 repeat_count/interval_ms：命中即提前返回，
+#      正常路径无额外开销；只把「失败」路径的单次等待窗口说清楚、留足目标页渲染时间。
+GROWTH_CHAMBER_BACK_REGION = [1146, 0, 134, 112]
+GROWTH_CHAMBER_CLOSE_POST_FREEZE = {
+    "time": 200,
+    "timeout": 1500,
+    "target": list(GROWTH_CHAMBER_BACK_REGION),
+}
+GROWTH_CHAMBER_GROWBACK_REPEAT_COUNT = 4
+GROWTH_CHAMBER_GROWBACK_INTERVAL_MS = 3000
+
 
 def log(msg: str):
     print(f"[MAAend-Prep] {msg}", flush=True)
@@ -1150,6 +1184,101 @@ def verify_growth_chamber_extract_close_recognition():
     log("Asserted GrowthChamber extract-close template and settle delay.")
 
 
+def patch_growth_chamber_growback_timing():
+    """
+    修复 ④：培养舱「提取基核」返回（GrowthChamberGrowBack）在弹窗关闭动画上做识别。
+
+    见文件顶部 GROWTH_CHAMBER_BACK_REGION 上的日志 + 像素级诊断。落两件事：
+
+    1. 给 GrowthChamberSeedExtractClose 加 post_wait_freezes（target=返回键 ROI）：
+       点掉「提取获得」弹窗后，等返回键区域画面稳定再评估下一条 GrowBack。
+       真机日志显示 SeedExtractClose 点击到 GrowBack 识别只隔 ~0.2~0.3s，而弹窗关闭
+       动画更久，于是识别撞在半透明遮罩上拿到一簇贴阈值弱候选 → 空击 → 兜底。
+    2. 给 GrowBack 的 RepeatUntilFoundAction 显式 repeat_count/interval_ms：把失败路径
+       的单次等待窗口说清楚（命中仍会提前返回），不再依赖 MaaRunner 的隐式默认。
+
+    两条都按节点名精确定位，任一缺失直接抛错（不静默跳过）。
+    """
+    growth_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "GrowthChamber.json"
+    if not growth_file.is_file():
+        raise RuntimeError(f"培养舱返回时序修复失败：缺少 {growth_file}")
+    growth = load_jsonc(growth_file)
+
+    close_node = growth.get("GrowthChamberSeedExtractClose")
+    if not isinstance(close_node, dict):
+        raise RuntimeError(
+            "GrowthChamber.json 缺少节点 GrowthChamberSeedExtractClose（上游可能已改名/移除）；"
+            "返回时序修复无法应用，请同步更新 scripts/prepare_maaend.py"
+        )
+    close_node["post_wait_freezes"] = json.loads(json.dumps(GROWTH_CHAMBER_CLOSE_POST_FREEZE))
+
+    grow_back = growth.get("GrowthChamberGrowBack")
+    if not isinstance(grow_back, dict):
+        raise RuntimeError(f"GrowthChamber.json 缺少节点 GrowthChamberGrowBack")
+    action = grow_back.get("action")
+    if not isinstance(action, dict) or action.get("type") != "Custom":
+        raise RuntimeError("GrowthChamberGrowBack.action 不是 Custom；返回时序修复无法应用")
+    param = action.get("param")
+    if not isinstance(param, dict) or param.get("custom_action") != "RepeatUntilFoundAction":
+        raise RuntimeError(
+            "GrowthChamberGrowBack 未使用 RepeatUntilFoundAction；返回时序修复无法应用"
+        )
+    cap = param.get("custom_action_param")
+    if not isinstance(cap, dict):
+        raise RuntimeError("GrowthChamberGrowBack.custom_action_param 结构异常")
+    cap["repeat_count"] = GROWTH_CHAMBER_GROWBACK_REPEAT_COUNT
+    cap["interval_ms"] = GROWTH_CHAMBER_GROWBACK_INTERVAL_MS
+
+    write_json(growth_file, growth)
+    log(
+        "Patched GrowthChamberSeedExtractClose.post_wait_freezes (settle back-button ROI) "
+        f"and GrowBack repeat_count={GROWTH_CHAMBER_GROWBACK_REPEAT_COUNT}/"
+        f"interval_ms={GROWTH_CHAMBER_GROWBACK_INTERVAL_MS}."
+    )
+
+
+def verify_growth_chamber_growback_timing():
+    """
+    构建期断言：核对 GrowBack 时序修复确实落在最终产物里。
+
+    上游同步若覆盖/改名，改动会「静默失效」——照样编得过、出得了包，只是真机又回到
+    「点掉弹窗后立刻在半透明遮罩上识别返回键」。这里读回最终产物核对。
+    """
+    growth_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "GrowthChamber.json"
+    if not growth_file.is_file():
+        raise RuntimeError(f"构建期断言失败：缺少 {growth_file}")
+    growth = load_jsonc(growth_file)
+    problems = []
+
+    close_node = growth.get("GrowthChamberSeedExtractClose") or {}
+    pwf = close_node.get("post_wait_freezes")
+    if not isinstance(pwf, dict) or pwf.get("target") != GROWTH_CHAMBER_BACK_REGION:
+        problems.append(
+            "GrowthChamberSeedExtractClose.post_wait_freezes.target: 期望 "
+            f"{GROWTH_CHAMBER_BACK_REGION}，实际 {pwf}"
+        )
+
+    grow_back = growth.get("GrowthChamberGrowBack") or {}
+    cap = (((grow_back.get("action") or {}).get("param") or {}).get("custom_action_param")) or {}
+    if cap.get("repeat_count") != GROWTH_CHAMBER_GROWBACK_REPEAT_COUNT:
+        problems.append(
+            "GrowthChamberGrowBack.repeat_count: 期望 "
+            f"{GROWTH_CHAMBER_GROWBACK_REPEAT_COUNT}，实际 {cap.get('repeat_count')}"
+        )
+    if cap.get("interval_ms") != GROWTH_CHAMBER_GROWBACK_INTERVAL_MS:
+        problems.append(
+            "GrowthChamberGrowBack.interval_ms: 期望 "
+            f"{GROWTH_CHAMBER_GROWBACK_INTERVAL_MS}，实际 {cap.get('interval_ms')}"
+        )
+
+    if problems:
+        raise RuntimeError(
+            "构建期断言失败：培养舱 GrowBack 时序修复不完整"
+            "（上游同步可能覆盖/改名）：\n  " + "\n  ".join(problems)
+        )
+    log("Asserted GrowthChamber GrowBack settle-wait and action window.")
+
+
 def patch_upstream_6076_confirm_box_index():
     """
     同步上游 489ff2fe（#6076 偶现基建任务点击使用助力失效）。
@@ -1428,12 +1557,14 @@ def main():
     patch_adb_growth_chamber_status_rois()
     patch_growth_chamber_extract_resilience()
     patch_growth_chamber_extract_close_recognition()
+    patch_growth_chamber_growback_timing()
     # 断言放最后：读回最终产物，确认没有后续步骤把值覆盖回去
     verify_adb_growth_chamber_status_rois()
     verify_upstream_sync_patches()
     verify_rigid_template_overrides()
     verify_growth_chamber_extract_resilience()
     verify_growth_chamber_extract_close_recognition()
+    verify_growth_chamber_growback_timing()
     log("Preparation complete!")
 
 
