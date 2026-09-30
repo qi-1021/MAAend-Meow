@@ -51,9 +51,75 @@ ADB_GROWTH_CHAMBER_STATUS_FILE = (
     ASSETS_ROOT / "resource_adb" / "pipeline" / "DijiangRewards" / "Template" / "Status.json"
 )
 
+# ============================================================================
+# 上游同步修复（submodule 停在 fcdc53a7，缺以下 4 个与本轮真机 bug 直接相关的
+# 提交；构建期在补丁层逐条落值，不动 submodule 指针、不在子模块里提交）。
+#
+# 证据：gh api repos/MaaEnd/MaaEnd/commits/<sha> --jq '.files[] | {filename, patch}'
+# ============================================================================
+
+# 489ff2fe (#6076 偶现基建任务点击使用助力失效)：同类确认对话框改用图标 box_index。
+# 1 -> 0（Manufacturing 是补上原本缺失的 box_index）。
+UPSTREAM_6076_BOX_INDEX_FIX = [
+    ("resource/pipeline/DijiangRewards/GrowthChamber.json", "GrowthChamberGrowAgainConfirm"),
+    ("resource/pipeline/DijiangRewards/Manufacturing.json", "MFGCabinAssistConfirm"),
+    ("resource/pipeline/DijiangRewards/RecoveryEmotion.json", "RecoveryEmotionConfirm"),
+    ("resource/pipeline/GiftOperator/GiftOperatorGiftFlow.json", "GiftOperatorConfirmDialog"),
+]
+UPSTREAM_6076_BOX_INDEX = 0
+
+# d4ea8745 (#6100 修复 ADB 端基建奖励任务失败)：base resource 侧。
+# 注：任务简报把宽 120->180 记在 GrowthChamberCheckSeedNotEmpty 名下，但上游 diff 的
+#     实际归属是 ClueItem（第 238 行 roi 的第 3 个数）；这里按真实 diff 落值。
+UPSTREAM_6100_CLUE_ITEM_ROI_WIDTH = 180  # 原 120
+UPSTREAM_6100_CLUE_ITEM_ROI = [126, 157, 180, 555]
+UPSTREAM_6100_CLUE_COUNT_COLOR_OFFSET = [103, -15, 45, 36]  # 原 [103, -24, 46, 36]
+UPSTREAM_6100_ADB_CLUE_COUNT_COLOR_OFFSET = [103, -15, 80, 36]
+UPSTREAM_6100_RECEPTION_BG_ROI_HEIGHT = 188  # 原 236
+UPSTREAM_6100_ADB_TEXT_TEMPLATE_FILE = (
+    ASSETS_ROOT / "resource_adb" / "pipeline" / "DijiangRewards" / "Template" / "TextTemplate.json"
+)
+
+# 6af0f43c (#6054 AutoSell 走到物资调度终端后补按交互键)。
+UPSTREAM_6054_PRESS_NODE = "AutoSellPressStockRedistribution"
+UPSTREAM_6054_PRESS_DEF = {
+    "desc": "寻路偶现走到目的地了不按，因此检查一下",
+    "recognition": "OCR",
+    "roi": [755, 330, 297, 312],
+    "expected": ["物资调度终端", "物資調度終端"],
+    "pre_delay": 0,
+    "action": "ClickKey",
+    "key": 70,
+    "post_delay": 0,
+    "rate_limit": 0,
+    "next": ["AutoSellEnterStockRedistributionSuccess"],
+}
+UPSTREAM_6054_ENTRY_NODE = "AutoSellShipEnterStockRedistribution"
+UPSTREAM_6054_NEXT_NODE = "AutoSellEnterStockRedistributionSuccess"
+
+# 27507ad4 (#6085 修复折扣识别区域过大)：折扣数字 ROI 两处。
+UPSTREAM_6085_DISCOUNT_ROI_OFFSET = [41, -178, 52, 34]  # 原 [39, -212, 25, 63]
+UPSTREAM_6085_DISCOUNT_NODES = (
+    "AutoStockInStapleItemDiscountsWuling",
+    "AutoStockInStapleItemDiscountsValleyIV",
+)
+
+# AutoSell 页签按坐标点击复用 AutoStockpile「弹性需求物资」页签 ROI（1280×720 真机截图）。
+ELASTIC_TAB_ROI = [445, 80, 350, 66]
+
 
 def log(msg: str):
     print(f"[MAAend-Prep] {msg}", flush=True)
+
+
+def load_jsonc(path: Path) -> dict:
+    """读取并去除注释后的 JSON（沿用本文件既有的 strip_json_comments 风格）。"""
+    return json.loads(strip_json_comments(path.read_text(encoding="utf-8")))
+
+
+def write_json(path: Path, data) -> None:
+    """以项目统一的格式写回 JSON（4 空格缩进、保留中文）。"""
+    path.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def ensure_maaend_submodule():
@@ -409,38 +475,126 @@ def override_rigid_template_nodes():
     `艳定需求物资提性需深情物 03`——稳→艳、弹→提、求→深，还把两个页签并成一句、
     重复三份。720p 下这个字号这套字体认不准，模糊匹配也救不回来。
     页签位置是固定 UI，直接按坐标点更可靠。
+
+    同一套坐标点击也复用到 AutoSell 的扫描页签：`AutoSellScan*SwitchTab` /
+    `...SwitchTabSuccess` 是刚性 TemplateMatch（ElasticGoodsButton.png /
+    TabSwitchElasticGoodsActive.png）。720p 真机模板失配时，SwitchTab 点不到、
+    SwitchTabSuccess 落空，直接把下一个候选 `AutoSellScanRegionNull` 命中成
+    「当前区域物资为空」，于是静默 0 物资不卖。页签是固定 UI，改成坐标点击。
     """
     # 「弹性需求物资」页签的范围（1280×720，取自真机截图）。
     # 左边那个「稳定需求物资」是白底约 x∈[75,435]，弹性页签深色底 x∈[440,800]。
-    elastic_tab_roi = [445, 80, 350, 66]
+    elastic_tab_roi = list(ELASTIC_TAB_ROI)
+
+    # ---- AutoStockpile：进入购买页后切到「弹性需求物资」页签 ----
     entry = ASSETS_ROOT / "resource" / "pipeline" / "AutoStockpile" / "Entry.json"
-    if not entry.is_file():
+    if entry.is_file():
+        try:
+            data = load_jsonc(entry)
+            modified = False
+            # 切到弹性页签：DirectHit 直接命中页签矩形，自带的 Click 点它的中心。
+            # 进购买页默认是稳定物资，这一步是必须的。
+            node = data.get("AutoStockpileGotoElasticGoods")
+            if isinstance(node, dict):
+                node["recognition"] = "DirectHit"
+                node["roi"] = elastic_tab_roi
+                node["action"] = {"type": "Click", "param": {}}
+                modified = True
+            # 这里不再校验页签：真正的校验是决策节点的货物识别。
+            # 货组名（…货组）只出现在弹性页签上，点歪了就在决策里认不出货、
+            # 按 Skip 收尾，不会拿着稳定物资当弹性货去买。
+            node = data.get("AutoStockpileEnaureElasticClicked")
+            if isinstance(node, dict):
+                node["recognition"] = "DirectHit"
+                node["roi"] = elastic_tab_roi
+                node["action"] = {"type": "DoNothing", "param": {}}
+                modified = True
+            if modified:
+                write_json(entry, data)
+                log("Overrode AutoStockpile elastic-tab nodes with a positional click.")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            log(f"Warning: failed to override rigid template nodes: {e}")
+
+    # ---- AutoSell：扫描前切到「弹性需求物资」页签（同一固定 UI，复用坐标）----
+    scan = ASSETS_ROOT / "resource" / "pipeline" / "AutoSell" / "ScanItem.json"
+    if not scan.is_file():
         return
-    try:
-        data = json.loads(strip_json_comments(entry.read_text(encoding="utf-8")))
-        modified = False
-        # 切到弹性页签：DirectHit 直接命中页签矩形，自带的 Click 点它的中心。
-        # 进购买页默认是稳定物资，这一步是必须的。
-        node = data.get("AutoStockpileGotoElasticGoods")
-        if isinstance(node, dict):
-            node["recognition"] = "DirectHit"
-            node["roi"] = elastic_tab_roi
-            node["action"] = {"type": "Click", "param": {}}
-            modified = True
-        # 这里不再校验页签：真正的校验是决策节点的货物识别。
-        # 货组名（…货组）只出现在弹性页签上，点歪了就在决策里认不出货、
-        # 按 Skip 收尾，不会拿着稳定物资当弹性货去买。
-        node = data.get("AutoStockpileEnaureElasticClicked")
-        if isinstance(node, dict):
-            node["recognition"] = "DirectHit"
-            node["roi"] = elastic_tab_roi
-            node["action"] = {"type": "DoNothing", "param": {}}
-            modified = True
-        if modified:
-            entry.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
-            log("Overrode AutoStockpile elastic-tab nodes with a positional click.")
-    except Exception as e:
-        log(f"Warning: failed to override rigid template nodes: {e}")
+    data = load_jsonc(scan)
+    # 点击节点：坐标点击页签；校验节点：坐标命中即视为切换成功，
+    # 不再用模板二次校验（真正的校验是 Save 节点的物资识别）。
+    for node_name in ("AutoSellScanValleyIVSwitchTab", "AutoSellScanWulingSwitchTab"):
+        node = data.get(node_name)
+        if not isinstance(node, dict):
+            raise RuntimeError(
+                f"AutoSell/ScanItem.json 缺少节点 {node_name}（上游可能已改名/移除）；"
+                f"页签按坐标点击无法应用，请同步更新 scripts/prepare_maaend.py"
+            )
+        node["recognition"] = "DirectHit"
+        node["roi"] = list(elastic_tab_roi)
+        node["action"] = {"type": "Click", "param": {}}
+        node.pop("template", None)
+        node.pop("threshold", None)
+    for node_name in ("AutoSellScanValleyIVSwitchTabSuccess", "AutoSellScanWulingSwitchTabSuccess"):
+        node = data.get(node_name)
+        if not isinstance(node, dict):
+            raise RuntimeError(
+                f"AutoSell/ScanItem.json 缺少节点 {node_name}（上游可能已改名/移除）；"
+                f"页签按坐标点击无法应用，请同步更新 scripts/prepare_maaend.py"
+            )
+        node["recognition"] = "DirectHit"
+        node["roi"] = list(elastic_tab_roi)
+        node["action"] = {"type": "DoNothing", "param": {}}
+        node.pop("template", None)
+        node.pop("threshold", None)
+    write_json(scan, data)
+    log("Overrode AutoSell scan-tab nodes with a positional click.")
+
+
+def verify_rigid_template_overrides():
+    """
+    构建期断言：Upstream/AutoStockpile/AutoSell 的页签节点必须是坐标点击。
+
+    理由同 verify_adb_growth_chamber_status_rois：模板节点在真机（720p）会失配，
+    而我们改成了按坐标点击。若上游同步把这些节点改回 TemplateMatch，或后续步骤
+    覆盖回旧值，真机就会重新走 ScanRegionNull / 认不出货，且**编得过、出得了包**。
+    这里读回最终产物核对，不一致就让构建失败。
+    """
+    problems = []
+
+    entry = ASSETS_ROOT / "resource" / "pipeline" / "AutoStockpile" / "Entry.json"
+    if entry.is_file():
+        data = load_jsonc(entry)
+        for node_name in ("AutoStockpileGotoElasticGoods", "AutoStockpileEnaureElasticClicked"):
+            actual = (data.get(node_name) or {}).get("roi")
+            if actual != list(ELASTIC_TAB_ROI):
+                problems.append(f"AutoStockpile/{node_name}.roi: 期望 {ELASTIC_TAB_ROI}，实际 {actual}")
+
+    scan = ASSETS_ROOT / "resource" / "pipeline" / "AutoSell" / "ScanItem.json"
+    if scan.is_file():
+        data = load_jsonc(scan)
+        for node_name in (
+            "AutoSellScanValleyIVSwitchTab",
+            "AutoSellScanWulingSwitchTab",
+            "AutoSellScanValleyIVSwitchTabSuccess",
+            "AutoSellScanWulingSwitchTabSuccess",
+        ):
+            node = data.get(node_name) or {}
+            if node.get("recognition") != "DirectHit" or node.get("roi") != list(ELASTIC_TAB_ROI):
+                problems.append(
+                    f"AutoSell/{node_name}: 期望 DirectHit@{ELASTIC_TAB_ROI}，"
+                    f"实际 {node.get('recognition')}@{node.get('roi')}"
+                )
+            if "template" in node or "threshold" in node:
+                problems.append(f"AutoSell/{node_name}: 仍残留 template/threshold 刚性模板字段")
+
+    if problems:
+        raise RuntimeError(
+            "构建期断言失败：页签节点不是按坐标点击（上游同步可能改回模板匹配）：\n  "
+            + "\n  ".join(problems)
+        )
+    log("Asserted AutoStockpile/AutoSell tab nodes are positional clicks.")
 
 
 def apply_mobile_resilience_patches():
@@ -737,9 +891,15 @@ def patch_growth_chamber_extract_resilience():
     （识别返回键并反复点，直到回到培养选择界面）：
       1. GrowthChamberSeedExtractConfirm 加 on_error：确认已点、但结果页/关闭按钮没出现时兜底。
       2. GrowthChamberSeedExtract 加 on_error：确认提取/原料不足/返回三条出路都没命中时兜底。
-      3. ExtractSeedCloseText.expected 扩通用「获得」类文案（参考 CloseRewardsButtonText）：
+      3. GrowthChamberSeedExtractClose 加 on_error（它原先没有）：真机失败帧证明
+         「提取获得」弹窗已经出现（道具 + 底部 ✓），但关闭按钮识别不到 → 链断 → 整任务红。
+      4. ExtractSeedCloseText.expected 扩通用「获得」类文案（参考 CloseRewardsButtonText）：
          提取结算标题与普通奖励结算共用同一标题区，文案微调也能认出关闭按钮。
-      4. GrowthChamberNoMaterials.expected 扩原料不足类文案。
+      5. GrowthChamberNoMaterials.expected 扩原料不足类文案。
+
+    此外，GrowBack 本身依赖右上角返回键模板。若弹窗盖住返回键 / 返回键点不掉，GrowBack
+    仍会失败；所以给 GrowBack 再挂一个「按坐标点底部确认键」的兜底节点
+    （GrowthChamberSeedExtractCloseByCoord），确保提取链**任何断法**都不会把任务拖红。
     """
     growth_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "GrowthChamber.json"
     tmpl_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "Template" / "TextTemplate.json"
@@ -748,10 +908,15 @@ def patch_growth_chamber_extract_resilience():
             raise RuntimeError(f"培养舱提取链修复失败：缺少 {path}")
 
     safe_node = "GrowthChamberGrowBack"
+    coord_close_node = "GrowthChamberSeedExtractCloseByCoord"
 
-    # 1/2) on_error 兜底
-    growth = json.loads(strip_json_comments(growth_file.read_text(encoding="utf-8")))
-    for node_name in ("GrowthChamberSeedExtractConfirm", "GrowthChamberSeedExtract"):
+    # 1/2/3) on_error 兜底：提取链任一出路断掉都收敛到 GrowBack
+    growth = load_jsonc(growth_file)
+    for node_name in (
+        "GrowthChamberSeedExtractConfirm",
+        "GrowthChamberSeedExtract",
+        "GrowthChamberSeedExtractClose",
+    ):
         node = growth.get(node_name)
         if not isinstance(node, dict):
             raise RuntimeError(
@@ -760,7 +925,24 @@ def patch_growth_chamber_extract_resilience():
             )
         node["on_error"] = [safe_node]
 
-    # 4) NoMaterials 文案扩展
+    # GrowBack 的兜底：GrowBack 需要右上角返回键；识别不到 / 点不掉时，
+    # 直接按坐标点底部的确认键（CloseRewardsButton 模板所在区域），再等回培养列表。
+    grow_back = growth.get(safe_node)
+    if not isinstance(grow_back, dict):
+        raise RuntimeError(f"GrowthChamber.json 缺少节点 {safe_node}")
+    growth[coord_close_node] = {
+        "desc": "[培养舱·基核] 提取获得弹窗在但关闭按钮识别不到时，按坐标点击底部确认键兜底",
+        "recognition": "DirectHit",
+        "roi": [540, 538, 209, 182],
+        "pre_delay": 0,
+        "action": {"type": "Click"},
+        "post_delay": 0,
+        "rate_limit": 0,
+        "next": ["GrowthChamberGrowViewIn"],
+    }
+    grow_back["on_error"] = [coord_close_node]
+
+    # 5) NoMaterials 文案扩展
     no_materials = growth.get("GrowthChamberNoMaterials")
     if not isinstance(no_materials, dict):
         raise RuntimeError("GrowthChamber.json 缺少节点 GrowthChamberNoMaterials")
@@ -775,10 +957,10 @@ def patch_growth_chamber_extract_resilience():
         "(?i)Not\\s*enough",
         "(?i)Insufficient",
     ])
-    growth_file.write_text(json.dumps(growth, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+    write_json(growth_file, growth)
 
-    # 3) 提取结算关闭文案扩展
-    tmpl = json.loads(strip_json_comments(tmpl_file.read_text(encoding="utf-8")))
+    # 4) 提取结算关闭文案扩展
+    tmpl = load_jsonc(tmpl_file)
     close_text = tmpl.get("ExtractSeedCloseText")
     if not isinstance(close_text, dict):
         raise RuntimeError("TextTemplate.json 缺少节点 ExtractSeedCloseText")
@@ -788,9 +970,314 @@ def patch_growth_chamber_extract_resilience():
         "(?i)Rewards?\\s*Acquired",
         "報酬一覧",
     ])
-    tmpl_file.write_text(json.dumps(tmpl, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+    write_json(tmpl_file, tmpl)
 
     log("Patched GrowthChamber extraction chain with on_error fallbacks and wider OCR text.")
+
+
+def verify_growth_chamber_extract_resilience():
+    """
+    构建期断言：提取链每一处都必须有 on_error 兜底，且关闭兜底节点存在。
+
+    真机失败模式是「弹窗在、关闭按钮识别不到、链断、整任务红」。这里读回最终产物，
+    确认 1) SeedExtract/SeedExtractConfirm/SeedExtractClose 都挂了 GrowBack；
+    2) GrowBack 挂了按坐标点确认键的兜底；3) 关闭/原料不足文案已扩容。
+    任何一项被上游同步抹掉都会让构建失败，而不是等到真机复现才想起。
+    """
+    growth_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "GrowthChamber.json"
+    tmpl_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "Template" / "TextTemplate.json"
+    for path in (growth_file, tmpl_file):
+        if not path.is_file():
+            raise RuntimeError(f"构建期断言失败：产物缺少 {path}")
+
+    safe_node = "GrowthChamberGrowBack"
+    coord_close_node = "GrowthChamberSeedExtractCloseByCoord"
+    growth = load_jsonc(growth_file)
+    problems = []
+    for node_name in (
+        "GrowthChamberSeedExtractConfirm",
+        "GrowthChamberSeedExtract",
+        "GrowthChamberSeedExtractClose",
+    ):
+        on_error = (growth.get(node_name) or {}).get("on_error")
+        if safe_node not in (on_error or []):
+            problems.append(f"{node_name}.on_error: 期望含 {safe_node}，实际 {on_error}")
+    grow_back_on_error = (growth.get(safe_node) or {}).get("on_error")
+    if coord_close_node not in (grow_back_on_error or []):
+        problems.append(f"{safe_node}.on_error: 期望含 {coord_close_node}，实际 {grow_back_on_error}")
+    coord_node = growth.get(coord_close_node)
+    if not isinstance(coord_node, dict) or coord_node.get("recognition") != "DirectHit":
+        problems.append(f"缺少按坐标关闭兜底节点 {coord_close_node}")
+
+    close_text = (load_jsonc(tmpl_file).get("ExtractSeedCloseText") or {})
+    close_expected = (((close_text.get("recognition") or {}).get("param") or {}).get("expected")) or []
+    if "获得" not in close_expected:
+        problems.append("ExtractSeedCloseText.expected 缺少「获得」类文案")
+    no_materials = growth.get("GrowthChamberNoMaterials") or {}
+    nm_expected = (((no_materials.get("recognition") or {}).get("param") or {}).get("expected")) or []
+    if "原料不足" not in nm_expected:
+        problems.append("GrowthChamberNoMaterials.expected 缺少「原料不足」类文案")
+
+    if problems:
+        raise RuntimeError(
+            "构建期断言失败：培养舱提取链兜底不完整（上游同步可能抹掉 on_error/文案）：\n  "
+            + "\n  ".join(problems)
+        )
+    log("Asserted GrowthChamber extraction chain has on_error fallbacks.")
+
+
+def patch_upstream_6076_confirm_box_index():
+    """
+    同步上游 489ff2fe（#6076 偶现基建任务点击使用助力失效）。
+
+    真机「点使用助力」偶发失效：确认对话框用文字识别会误命中，改用图标的 box_index。
+        培养舱再次种植 GrowthChamberGrowAgainConfirm            : box_index 1 -> 0
+        制造舱助力 MFGCabinAssistConfirm                        : 补上缺失的 box_index 0
+        恢复心情 RecoveryEmotionConfirm                         : box_index 1 -> 0
+        干员赠礼 GiftOperatorConfirmDialog                      : box_index 1 -> 0
+    整提交全部应用；节点缺失（上游改名/移除）直接抛错，不静默跳过。
+    """
+    for rel, node_name in UPSTREAM_6076_BOX_INDEX_FIX:
+        path = ASSETS_ROOT / rel
+        if not path.is_file():
+            raise RuntimeError(f"489ff2fe 同步失败：缺少 {path}")
+        data = load_jsonc(path)
+        node = data.get(node_name)
+        if not isinstance(node, dict):
+            raise RuntimeError(
+                f"{rel} 缺少节点 {node_name}（上游可能已改名/移除）；"
+                f"489ff2fe 同步无法应用，请同步更新 scripts/prepare_maaend.py"
+            )
+        recognition = node.get("recognition")
+        if not isinstance(recognition, dict) or not isinstance(recognition.get("param"), dict):
+            raise RuntimeError(f"{rel} 节点 {node_name} 的 recognition.param 结构异常；489ff2fe 同步无法应用")
+        recognition["param"]["box_index"] = UPSTREAM_6076_BOX_INDEX
+        write_json(path, data)
+        log(f"Patched {node_name}.box_index = {UPSTREAM_6076_BOX_INDEX} (upstream #6076).")
+
+
+def patch_upstream_6100_dijiang_rewards():
+    """
+    同步上游 d4ea8745（#6100 修复 ADB 端基建奖励任务失败）的 base resource 侧改动。
+
+    说明：ADB 覆盖层 Status.json 的两个 roi_offset 早已由
+    patch_adb_growth_chamber_status_rois() 单独处理，这里**不重复、不冲突**。
+    本函数补齐此前只跟了 ADB roi_offset、遗漏的其余部分：
+      1. GrowthChamberFindTargetBySeed.desc 去掉 #1313 绕开备注（行为不变，文案对齐）。
+      2. ReceptionRoom 快速赠予重复线索：背景色 roi 高 236 -> 188，并去掉冗余的
+         pre_delay/post_delay/rate_limit（两个节点）。
+      3. base Template/Status.json：ClueItem roi 宽 120 -> 180（任务简报误记为
+         GrowthChamberCheckSeedNotEmpty；实际归属见上游 diff 第 238 行，勿按简报写错节点）；
+         删除废弃节点 GrowthChamberCheckTargetNotEmpty；给两个检查节点补 desc。
+      4. base Template/TextTemplate.json：ClueItemCountColor roi_offset 更新。
+      5. ADB Template/TextTemplate.json：新增 ClueItemCountColor 覆盖。
+    """
+    growth_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "GrowthChamber.json"
+    reception_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "ReceptionRoom.json"
+    status_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "Template" / "Status.json"
+    text_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "Template" / "TextTemplate.json"
+    for path in (growth_file, reception_file, status_file, text_file, UPSTREAM_6100_ADB_TEXT_TEMPLATE_FILE):
+        if not path.is_file():
+            raise RuntimeError(f"d4ea8745 同步失败：缺少 {path}")
+
+    # 1) GrowthChamberFindTargetBySeed.desc
+    growth = load_jsonc(growth_file)
+    node = growth.get("GrowthChamberFindTargetBySeed")
+    if not isinstance(node, dict):
+        raise RuntimeError("GrowthChamber.json 缺少节点 GrowthChamberFindTargetBySeed")
+    node["desc"] = "[培养舱·培养] 点击有基核的培养对象"
+    write_json(growth_file, growth)
+
+    # 2) ReceptionRoom 快速赠予重复线索两节点
+    reception = load_jsonc(reception_file)
+    bg = reception.get("ReceptionRoomSendCluesQuickGiveDuplicatesBackground")
+    if not isinstance(bg, dict):
+        raise RuntimeError("ReceptionRoom.json 缺少节点 ReceptionRoomSendCluesQuickGiveDuplicatesBackground")
+    bg_roi = ((bg.get("recognition") or {}).get("param") or {}).get("roi")
+    if not (isinstance(bg_roi, list) and len(bg_roi) == 4):
+        raise RuntimeError("ReceptionRoomSendCluesQuickGiveDuplicatesBackground.roi 结构异常")
+    bg_roi[3] = UPSTREAM_6100_RECEPTION_BG_ROI_HEIGHT
+    for key in ("pre_delay", "post_delay", "rate_limit"):
+        bg.pop(key, None)
+    text_node = reception.get("ReceptionRoomSendCluesQuickGiveDuplicatesText")
+    if not isinstance(text_node, dict):
+        raise RuntimeError("ReceptionRoom.json 缺少节点 ReceptionRoomSendCluesQuickGiveDuplicatesText")
+    for key in ("pre_delay", "post_delay", "rate_limit"):
+        text_node.pop(key, None)
+    write_json(reception_file, reception)
+
+    # 3) base Template/Status.json
+    status = load_jsonc(status_file)
+    clue = status.get("ClueItem")
+    if not isinstance(clue, dict):
+        raise RuntimeError("Status.json 缺少节点 ClueItem")
+    clue_roi = ((clue.get("recognition") or {}).get("param") or {}).get("roi")
+    if not (isinstance(clue_roi, list) and len(clue_roi) == 4):
+        raise RuntimeError("ClueItem.roi 结构异常")
+    clue_roi[2] = UPSTREAM_6100_CLUE_ITEM_ROI_WIDTH
+    status.pop("GrowthChamberCheckTargetNotEmpty", None)  # 上游已废弃删除
+    for node_name, desc in (
+        ("GrowthChamberCheckSeedNotEmpty", "[培养舱·培养] 识别种子数量不为0"),
+        ("GrowthChamberCheckPlantNotEmpty", "[培养舱·培养] 识别培养对象数量不为0"),
+    ):
+        if not isinstance(status.get(node_name), dict):
+            raise RuntimeError(f"Status.json 缺少节点 {node_name}")
+        status[node_name]["desc"] = desc
+    write_json(status_file, status)
+
+    # 4) base Template/TextTemplate.json ClueItemCountColor
+    text = load_jsonc(text_file)
+    clue_count = text.get("ClueItemCountColor")
+    if not isinstance(clue_count, dict):
+        raise RuntimeError("TextTemplate.json 缺少节点 ClueItemCountColor")
+    cc_param = (clue_count.get("recognition") or {}).get("param")
+    if not isinstance(cc_param, dict):
+        raise RuntimeError("ClueItemCountColor.recognition.param 结构异常")
+    cc_param["roi_offset"] = list(UPSTREAM_6100_CLUE_COUNT_COLOR_OFFSET)
+    write_json(text_file, text)
+
+    # 5) ADB Template/TextTemplate.json 新增 ClueItemCountColor
+    adb_text = load_jsonc(UPSTREAM_6100_ADB_TEXT_TEMPLATE_FILE)
+    adb_text["ClueItemCountColor"] = {"roi_offset": list(UPSTREAM_6100_ADB_CLUE_COUNT_COLOR_OFFSET)}
+    write_json(UPSTREAM_6100_ADB_TEXT_TEMPLATE_FILE, adb_text)
+
+    log("Patched DijiangRewards base + ADB for upstream #6100 (d4ea8745).")
+
+
+def patch_upstream_6054_autosell_interact():
+    """
+    同步上游 6af0f43c（#6054 AutoSell 走到物资调度终端后补按交互键）。
+
+    真机问题：MapNavigate 的 INTERACT 偶发「走到目的地了没按」，于是没进物资调度页面，
+    后续一直等弹性需求物资页到超时。上游在 `AutoSellShipEnterStockRedistribution.next`
+    里 Success 之后补一个 `AutoSellPressStockRedistribution`：OCR 认出「物资调度终端」
+    就补按交互键（F / KeymapInteract），再走 Success。
+
+    Android 没有键盘：ADB 覆盖层把该节点的 ClickKey(F) 换成 Custom AutoAltClickAction
+    （点击 OCR 命中的文本框），与上游 resource_adb 覆盖一致。
+    macos/Keymap 的改动与 Android 无关，且 Keymap.json 已被本脚本从 import 里移除，
+    故不落（它们在手机上无意义）。
+    """
+    base_file = ASSETS_ROOT / "resource" / "pipeline" / "AutoSell" / "Common.json"
+    if not base_file.is_file():
+        raise RuntimeError(f"6af0f43c 同步失败：缺少 {base_file}")
+    data = load_jsonc(base_file)
+    entry = data.get(UPSTREAM_6054_ENTRY_NODE)
+    if not isinstance(entry, dict):
+        raise RuntimeError(f"AutoSell/Common.json 缺少节点 {UPSTREAM_6054_ENTRY_NODE}")
+    next_list = entry.get("next")
+    if not isinstance(next_list, list):
+        raise RuntimeError(f"{UPSTREAM_6054_ENTRY_NODE}.next 不是数组")
+    if UPSTREAM_6054_PRESS_NODE not in next_list:
+        # 与上游一致：Success 在前，Press 在后（Success 命中即短路，不打扰已到达的场景）
+        if UPSTREAM_6054_NEXT_NODE in next_list:
+            next_list.insert(next_list.index(UPSTREAM_6054_NEXT_NODE) + 1, UPSTREAM_6054_PRESS_NODE)
+        else:
+            next_list.append(UPSTREAM_6054_PRESS_NODE)
+    data[UPSTREAM_6054_PRESS_NODE] = json.loads(json.dumps(UPSTREAM_6054_PRESS_DEF))
+    write_json(base_file, data)
+
+    adb_file = ASSETS_ROOT / "resource_adb" / "pipeline" / "AutoSell" / "Common.json"
+    adb = load_jsonc(adb_file) if adb_file.is_file() else {}
+    adb[UPSTREAM_6054_PRESS_NODE] = {
+        "action": {"type": "Custom", "param": {"custom_action": "AutoAltClickAction"}}
+    }
+    adb_file.parent.mkdir(parents=True, exist_ok=True)
+    write_json(adb_file, adb)
+    log("Patched AutoSell stock-redistribution interact key for upstream #6054.")
+
+
+def patch_upstream_6085_staple_discount_roi():
+    """
+    同步上游 27507ad4（#6085 修复折扣识别区域过大）。
+
+    购买稳定物资时折扣数字 OCR 的 roi_offset 过大，框住了非数字区域导致识别错乱；
+    两个地区的节点都用同一修复值：
+        AutoStockInStapleItemDiscountsWuling / ...ValleyIV : [39,-212,25,63] -> [41,-178,52,34]
+    """
+    item_file = ASSETS_ROOT / "resource" / "pipeline" / "AutoStockStaple" / "General" / "Item.json"
+    if not item_file.is_file():
+        raise RuntimeError(f"27507ad4 同步失败：缺少 {item_file}")
+    data = load_jsonc(item_file)
+    for node_name in UPSTREAM_6085_DISCOUNT_NODES:
+        node = data.get(node_name)
+        if not isinstance(node, dict):
+            raise RuntimeError(
+                f"AutoStockStaple/General/Item.json 缺少节点 {node_name}（上游可能已改名/移除）；"
+                f"27507ad4 同步无法应用，请同步更新 scripts/prepare_maaend.py"
+            )
+        param = (node.get("recognition") or {}).get("param")
+        if not isinstance(param, dict):
+            raise RuntimeError(f"{node_name}.recognition.param 结构异常")
+        param["roi_offset"] = list(UPSTREAM_6085_DISCOUNT_ROI_OFFSET)
+    write_json(item_file, data)
+    log("Patched AutoStockStaple discount number ROIs for upstream #6085.")
+
+
+def verify_upstream_sync_patches():
+    """
+    构建期断言：核对 4 个上游修复的关键值确实落在最终产物里。
+
+    每个补丁都按节点名精确落值；若上游同步改名/移除，或后续步骤覆盖回旧值，补丁会
+    「静默失效」——照样编得过、出得了包，只是真机行为悄悄变回去。这里读回最终产物核对。
+    """
+    problems = []
+
+    # 489ff2fe：四个确认框 box_index == 0
+    for rel, node_name in UPSTREAM_6076_BOX_INDEX_FIX:
+        path = ASSETS_ROOT / rel
+        actual = None
+        if path.is_file():
+            actual = (((load_jsonc(path).get(node_name) or {}).get("recognition") or {}).get("param") or {}).get("box_index")
+        if actual != UPSTREAM_6076_BOX_INDEX:
+            problems.append(f"{rel}::{node_name}.box_index: 期望 {UPSTREAM_6076_BOX_INDEX}，实际 {actual}")
+
+    # d4ea8745：ClueItem 宽 180、废弃节点已删、文案已补、ADB ClueItemCountColor 已加
+    status_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "Template" / "Status.json"
+    status = load_jsonc(status_file) if status_file.is_file() else {}
+    actual_clue_roi = (((status.get("ClueItem") or {}).get("recognition") or {}).get("param") or {}).get("roi")
+    if actual_clue_roi != UPSTREAM_6100_CLUE_ITEM_ROI:
+        problems.append(f"Status.json::ClueItem.roi: 期望 {UPSTREAM_6100_CLUE_ITEM_ROI}，实际 {actual_clue_roi}")
+    if "GrowthChamberCheckTargetNotEmpty" in status:
+        problems.append("Status.json 仍残留废弃节点 GrowthChamberCheckTargetNotEmpty")
+    text_file = ASSETS_ROOT / "resource" / "pipeline" / "DijiangRewards" / "Template" / "TextTemplate.json"
+    text = load_jsonc(text_file) if text_file.is_file() else {}
+    actual_cc = (((text.get("ClueItemCountColor") or {}).get("recognition") or {}).get("param") or {}).get("roi_offset")
+    if actual_cc != UPSTREAM_6100_CLUE_COUNT_COLOR_OFFSET:
+        problems.append(f"TextTemplate.json::ClueItemCountColor.roi_offset: 期望 {UPSTREAM_6100_CLUE_COUNT_COLOR_OFFSET}，实际 {actual_cc}")
+    adb_text = load_jsonc(UPSTREAM_6100_ADB_TEXT_TEMPLATE_FILE) if UPSTREAM_6100_ADB_TEXT_TEMPLATE_FILE.is_file() else {}
+    actual_adb_cc = (adb_text.get("ClueItemCountColor") or {}).get("roi_offset")
+    if actual_adb_cc != UPSTREAM_6100_ADB_CLUE_COUNT_COLOR_OFFSET:
+        problems.append(f"ADB TextTemplate::ClueItemCountColor.roi_offset: 期望 {UPSTREAM_6100_ADB_CLUE_COUNT_COLOR_OFFSET}，实际 {actual_adb_cc}")
+
+    # 6af0f43c：基础节点存在、next 已挂、ADB 覆盖为 Custom AutoAltClickAction
+    base_autosell = ASSETS_ROOT / "resource" / "pipeline" / "AutoSell" / "Common.json"
+    base = load_jsonc(base_autosell) if base_autosell.is_file() else {}
+    if UPSTREAM_6054_PRESS_NODE not in base:
+        problems.append(f"AutoSell/Common.json 缺少基础节点 {UPSTREAM_6054_PRESS_NODE}")
+    entry_next = ((base.get(UPSTREAM_6054_ENTRY_NODE) or {}).get("next")) or []
+    if UPSTREAM_6054_PRESS_NODE not in entry_next:
+        problems.append(f"{UPSTREAM_6054_ENTRY_NODE}.next 未包含 {UPSTREAM_6054_PRESS_NODE}：{entry_next}")
+    adb_autosell = ASSETS_ROOT / "resource_adb" / "pipeline" / "AutoSell" / "Common.json"
+    adb = load_jsonc(adb_autosell) if adb_autosell.is_file() else {}
+    adb_action = ((adb.get(UPSTREAM_6054_PRESS_NODE) or {}).get("action") or {})
+    if adb_action.get("type") != "Custom" or (adb_action.get("param") or {}).get("custom_action") != "AutoAltClickAction":
+        problems.append(f"ADB AutoSell 覆盖 {UPSTREAM_6054_PRESS_NODE} 不是 Custom/AutoAltClickAction：{adb_action}")
+
+    # 27507ad4：两个折扣节点 roi_offset
+    item_file = ASSETS_ROOT / "resource" / "pipeline" / "AutoStockStaple" / "General" / "Item.json"
+    item = load_jsonc(item_file) if item_file.is_file() else {}
+    for node_name in UPSTREAM_6085_DISCOUNT_NODES:
+        actual = (((item.get(node_name) or {}).get("recognition") or {}).get("param") or {}).get("roi_offset")
+        if actual != UPSTREAM_6085_DISCOUNT_ROI_OFFSET:
+            problems.append(f"AutoStockStaple::Item.json::{node_name}.roi_offset: 期望 {UPSTREAM_6085_DISCOUNT_ROI_OFFSET}，实际 {actual}")
+
+    if problems:
+        raise RuntimeError(
+            "构建期断言失败：上游同步补丁未落在产物里（上游同步可能覆盖/改名）：\n  "
+            + "\n  ".join(problems)
+        )
+    log("Asserted upstream #6076/#6100/#6054/#6085 sync patches are present.")
 
 
 def main():
@@ -809,10 +1296,18 @@ def main():
     apply_mobile_resilience_patches()
     neutralize_touch_move_nodes()
     apply_outpost_trading_arbitrage()
+    # 上游 4 个真机修复（submodule 停在 fcdc53a7，构建期在补丁层同步）
+    patch_upstream_6076_confirm_box_index()
+    patch_upstream_6100_dijiang_rewards()
+    patch_upstream_6054_autosell_interact()
+    patch_upstream_6085_staple_discount_roi()
     patch_adb_growth_chamber_status_rois()
     patch_growth_chamber_extract_resilience()
-    # 断言放最后：读回最终产物，确认没有后续步骤把 ROI 覆盖回去
+    # 断言放最后：读回最终产物，确认没有后续步骤把值覆盖回去
     verify_adb_growth_chamber_status_rois()
+    verify_upstream_sync_patches()
+    verify_rigid_template_overrides()
+    verify_growth_chamber_extract_resilience()
     log("Preparation complete!")
 
 
