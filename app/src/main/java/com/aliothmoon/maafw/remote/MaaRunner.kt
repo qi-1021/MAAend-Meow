@@ -4704,6 +4704,12 @@ class MaaRunner(private val agentHost: AgentHost) {
     @Volatile
     private var debugCoarseMapIndex: Map<String, File> = emptyMap()
 
+    /**
+     * PathHeatmap 并行路的**搜索热图两槽缓存**（对齐上游 `getGlobalSearchFeature`
+     * `MapLocator.cpp:926-948` 的 `cacheSlotIndex` 语义）：key = `zoneId+kind+roi+generation`。
+     */
+    private val heatmapSearchCache = MapLocatorHeatmapPipeline.SearchFeatureCache()
+
     private class ArgbImage(val pixels: IntArray, val width: Int, val height: Int)
 
     private class BgrImage(val bytes: ByteArray, val width: Int, val height: Int)
@@ -4830,6 +4836,189 @@ class MaaRunner(private val agentHost: AgentHost) {
         memory.write(0, bgr, 0, bgr.size)
         keepAlive += memory
         return lib.MaaImageBufferSetRawData(buffer, memory, width, height, MaaImageType.CV_8UC3).toInt() != 0
+    }
+
+    // ───────────────────── PathHeatmap 并行路（粗排 a + 精排 b） ─────────────────────
+
+    /**
+     * PathHeatmap 粗定位结果。
+     *
+     * [coarseScore]/[coarseBox] 是框架 `TemplateMatch`（掩膜外均值填充模板，选项 a）的粗排；
+     * [score]/[box] 是最终结果（精排成功用真掩膜 ZNCC（选项 b），否则回退粗排）。box 均为**地图坐标**。
+     */
+    private data class HeatmapCoarsePathResult(
+        val ok: Boolean,
+        val overrideOk: Boolean,
+        val coarseHit: Boolean,
+        val coarseScore: Double?,
+        val coarseBox: IntArray?,
+        val score: Double?,
+        val box: IntArray?,
+        val usedRefine: Boolean,
+        val trackingValid: Boolean?,
+        val globalAccepted: Double?,
+        val error: String?,
+    )
+
+    private fun heatmapFailure(reason: String): HeatmapCoarsePathResult = HeatmapCoarsePathResult(
+        ok = false, overrideOk = false, coarseHit = false, coarseScore = null, coarseBox = null,
+        score = null, box = null, usedRefine = false,
+        trackingValid = null, globalAccepted = null, error = reason,
+    )
+
+    /**
+     * PathHeatmap 并行路（不替换灰度路，仅并列对照）：
+     *
+     *  1. 地图搜索 ROI 与 小地图 各自 `extractPathHeatmap`；模板侧 `extractTemplatePathFeature`
+     *     取掩膜。搜索热图按 `(zoneId, kind, roi, generation)` 走 [heatmapSearchCache] 两槽缓存。
+     *  2. 模板按掩膜外接框裁剪（上游 `MapLocator.cpp:413-419`）。
+     *  3. 框架粗排：搜索热图（单通道 → 复制成 BGR）经 `MaaImageBufferSetRawData` 作帧图、
+     *     掩膜外**均值**填充的模板热图经 `MaaContextOverrideImage` 作运行时模板，跑
+     *     `TemplateMatch(method=5, green_mask=false)`——框架吃不了 mask，故用选项 (a) 近似。
+     *  4. Kotlin 精排：粗框邻域窗口内用真掩膜 ZNCC（选项 b）定最终分/框；无解则回退粗排。
+     *  5. 裁决走既有 [MatchValidation] 的 [PathHeatmapMatchStrategy]（`validateGlobalSearch` /
+     *     `validateTracking`），本文件不重造。
+     */
+    private fun runHeatmapCoarsePath(
+        lib: MaaFrameworkLibrary,
+        context: Pointer,
+        map: BgrImage,
+        minimapBgr: ByteArray,
+        minimapW: Int,
+        minimapH: Int,
+        targetZoneId: String,
+        searchRoi: MapRect,
+        generation: Long,
+        grayBox: IntArray?,
+        keepAlive: MutableList<Memory>,
+    ): HeatmapCoarsePathResult {
+        val isBase = targetZoneId.contains("Base")
+        val kind = if (isBase) TemplateFeatureKind.PATH_HEATMAP_BASE else TemplateFeatureKind.PATH_HEATMAP_TIER
+        val cfg = if (isBase) {
+            MapLocatorPathHeatmap.ImageProcessingConfig.Base
+        } else {
+            MapLocatorPathHeatmap.ImageProcessingConfig.Tier
+        }
+        val sw = searchRoi.width
+        val sh = searchRoi.height
+        if (sw <= 0 || sh <= 0) return heatmapFailure("搜索 ROI 为空")
+
+        // 1) 搜索热图（缓存 key = zoneId+kind+roi+generation，对齐 getGlobalSearchFeature）
+        val roiBgr = MapLocatorProbeSupport.cropBgr(
+            map.bytes, map.width, map.height, searchRoi.x, searchRoi.y, sw, sh,
+        ) ?: return heatmapFailure("搜索 ROI 裁剪失败")
+        val key = MapLocatorHeatmapPipeline.SearchFeatureKey(targetZoneId, kind, searchRoi, generation)
+        val searchHeat = heatmapSearchCache.getOrCompute(key) {
+            MapLocatorPathHeatmap.extractPathHeatmap(roiBgr, sw, sh)
+        } ?: return heatmapFailure("搜索热图构建失败")
+
+        // 2) 模板热图 + 掩膜，并按掩膜外接框裁剪（MapLocator.cpp:413-419）
+        val tmpl = MapLocatorPathHeatmap.extractTemplatePathFeature(minimapBgr, minimapW, minimapH, cfg)
+            ?: return heatmapFailure("模板热图/掩膜提取失败")
+        val bbox = MapLocatorHeatmapPipeline.maskBoundingBox(tmpl.mask, minimapW, minimapH)
+        if (bbox.isEmpty) return heatmapFailure("模板掩膜为空")
+        val croppedFeature = MapLocatorHeatmapPipeline.cropGray(tmpl.feature, minimapW, minimapH, bbox)
+            ?: return heatmapFailure("模板热图裁剪失败")
+        val croppedMask = MapLocatorHeatmapPipeline.cropMask(tmpl.mask, minimapW, minimapH, bbox)
+            ?: return heatmapFailure("模板掩膜裁剪失败")
+        val tw = bbox.width
+        val th = bbox.height
+        if (tw > sw || th > sh) return heatmapFailure("模板(${tw}x${th})大于搜索窗(${sw}x${sh})")
+
+        // 3) 框架粗排（选项 a）
+        var overrideOk = false
+        var coarseHit = false
+        var coarseScore: Double? = null
+        var coarseBox: IntArray? = null
+        val searchBuf = lib.MaaImageBufferCreate()
+        val templBuf = lib.MaaImageBufferCreate()
+        if (searchBuf == null || templBuf == null) {
+            searchBuf?.let { lib.MaaImageBufferDestroy(it) }
+            templBuf?.let { lib.MaaImageBufferDestroy(it) }
+            return heatmapFailure("MaaImageBufferCreate 失败")
+        }
+        try {
+            val searchBgr = MapLocatorHeatmapPipeline.replicateToBgr(searchHeat)
+            val coarseTempl = MapLocatorHeatmapPipeline.replicateToBgr(
+                MapLocatorHeatmapPipeline.fillOutsideMask(croppedFeature, croppedMask),
+            )
+            if (!setRawBgr(lib, searchBuf, searchBgr, sw, sh, keepAlive) ||
+                !setRawBgr(lib, templBuf, coarseTempl, tw, th, keepAlive)
+            ) {
+                return heatmapFailure("MaaImageBufferSetRawData(热图) 失败")
+            }
+            overrideOk = lib.MaaContextOverrideImage(context, DEBUG_COARSE_HEATMAP_TEMPLATE, templBuf).toInt() != 0
+            val nodeOverride = MapLocatorProbeSupport.buildTemplateMatchOverride(
+                nodeName = DEBUG_COARSE_HEATMAP_TM_NODE,
+                templateName = DEBUG_COARSE_HEATMAP_TEMPLATE,
+                method = MapLocatorProbeSupport.DEFAULT_METHOD,
+                greenMask = false,
+                threshold = COARSE_MATCH_THRESHOLD,
+                roi = null,
+            )
+            val res = runRecognitionOnce(lib, context, searchBuf, DEBUG_COARSE_HEATMAP_TM_NODE, nodeOverride)
+            coarseHit = res?.hit == true
+            coarseScore = MapLocatorCoarsePure.bestMatchScore(res?.detailJson)
+            // 未命中时不采信域内默认框，留空让精排用灰度路框 / 窗中心
+            coarseBox = if (coarseHit) res?.box?.copyOf() else null
+        } finally {
+            lib.MaaImageBufferDestroy(searchBuf)
+            lib.MaaImageBufferDestroy(templBuf)
+        }
+
+        // 4) 精排（选项 b）：粗框邻域窗口内真掩膜 ZNCC
+        val cb = coarseBox
+        val centerX = when {
+            cb != null -> cb[0]
+            grayBox != null && grayBox.size >= 4 -> grayBox[0] - searchRoi.x
+            else -> (sw - tw) / 2
+        }
+        val centerY = when {
+            cb != null -> cb[1]
+            grayBox != null && grayBox.size >= 4 -> grayBox[1] - searchRoi.y
+            else -> (sh - th) / 2
+        }
+        val refined = MapLocatorHeatmapPipeline.refineInWindow(
+            searchHeat, sw, sh, croppedFeature, tw, th, croppedMask, centerX, centerY,
+        )
+        val finalScore = refined?.score ?: coarseScore
+        val finalRoiBox = refined?.let { intArrayOf(it.x, it.y, tw, th) } ?: coarseBox
+        val finalMapBox = finalRoiBox?.let {
+            intArrayOf(it[0] + searchRoi.x, it[1] + searchRoi.y, it[2], it[3])
+        }
+
+        // 5) 裁决走既有 MatchValidation（PathHeatmap.validateGlobalSearch / validateTracking）
+        val strategy = MatchStrategyFactory.create(targetZoneId, mode = MatchMode.FORCE_PATH_HEATMAP)
+        val raw = MatchResultRaw(
+            score = finalScore ?: -1.0,
+            locX = (finalRoiBox?.get(0) ?: 0).toDouble(),
+            locY = (finalRoiBox?.get(1) ?: 0).toDouble(),
+            secondScore = refined?.secondScore ?: -1.0,
+            delta = refined?.delta ?: 0.0,
+            psr = refined?.psr ?: 0.0,
+        )
+        val globalAccepted = strategy.validateGlobalSearch(raw)
+        val tracking = strategy.validateTracking(
+            raw,
+            dtSeconds = 0.0,
+            lastPos = null,
+            searchRect = MapRect(0, 0, sw, sh),
+            templCols = tw,
+            templRows = th,
+        )
+        return HeatmapCoarsePathResult(
+            ok = finalScore != null,
+            overrideOk = overrideOk,
+            coarseHit = coarseHit,
+            coarseScore = coarseScore,
+            coarseBox = coarseBox,
+            score = finalScore,
+            box = finalMapBox,
+            usedRefine = refined != null,
+            trackingValid = tracking.isValid,
+            globalAccepted = globalAccepted,
+            error = if (finalScore == null) "热图路无有效分数" else null,
+        )
     }
 
     /**
@@ -4973,6 +5162,28 @@ class MaaRunner(private val agentHost: AgentHost) {
             val scale = zoneTemplateScale(targetZoneId)
             val boxText = box?.let { "[${it.joinToString(",")}]" } ?: "null"
 
+            // PathHeatmap 并行路（与灰度路并列，不替换灰度路——灰度路留作回退）。
+            // 裁决内部走既有 MatchValidation 的 PathHeatmapMatchStrategy。
+            val generation = MapLocatorHeatmapPipeline.assetGeneration(mapFile.length(), mapFile.lastModified())
+            val heatmap = runCatching {
+                runHeatmapCoarsePath(
+                    lib, context, map, templateBgr,
+                    debugCoarseTemplateW, debugCoarseTemplateH,
+                    targetZoneId, searchRoi, generation, box, keepAlive,
+                )
+            }.getOrElse { heatmapFailure("${it.javaClass.simpleName}: ${it.message}") }
+            val heatmapLine = if (heatmap.ok || heatmap.coarseScore != null) {
+                val cBox = heatmap.coarseBox?.let { "[${it.joinToString(",")}]" } ?: "null"
+                val fBox = heatmap.box?.let { "[${it.joinToString(",")}]" } ?: "null"
+                "heatmap: override=${if (heatmap.overrideOk) "ok" else "FAILED"} " +
+                    "coarse_hit=${heatmap.coarseHit} coarse_score=${heatmap.coarseScore ?: "-"} coarse_box=$cBox " +
+                    "refine=${if (heatmap.usedRefine) "(b)" else "fallback(a)"} " +
+                    "score=${heatmap.score ?: "-"} box=$fBox " +
+                    "tracking_valid=${heatmap.trackingValid ?: "-"} global_accepted=${heatmap.globalAccepted ?: "-"}"
+            } else {
+                "heatmap: error: ${heatmap.error}"
+            }
+
             debugCoarseResult = listOf(
                 "zone selector: ${selector.ifBlank { "-" }}",
                 "yolo: index=${parsed.clsIndex} class=${coarse.rawClass} zone=${coarse.zoneId} " +
@@ -4992,6 +5203,7 @@ class MaaRunner(private val agentHost: AgentHost) {
                 "in_map: ${outcome.inMap}",
                 "in_roi: ${outcome.inRoi}",
                 "result: ${if (outcome.hit) "PASS" else "FAIL"}",
+                heatmapLine,
             )
 
             RunDiagnostics.note(
@@ -5016,11 +5228,22 @@ class MaaRunner(private val agentHost: AgentHost) {
                     "box" to box?.toList(),
                     "in_map" to outcome.inMap,
                     "in_roi" to outcome.inRoi,
+                    "heatmap_ok" to heatmap.ok,
+                    "heatmap_override_ok" to heatmap.overrideOk,
+                    "heatmap_coarse_hit" to heatmap.coarseHit,
+                    "heatmap_coarse_score" to heatmap.coarseScore,
+                    "heatmap_coarse_box" to heatmap.coarseBox?.toList(),
+                    "heatmap_used_refine" to heatmap.usedRefine,
+                    "heatmap_score" to heatmap.score,
+                    "heatmap_box" to heatmap.box?.toList(),
+                    "heatmap_tracking_valid" to heatmap.trackingValid,
+                    "heatmap_global_accepted" to heatmap.globalAccepted,
+                    "heatmap_error" to heatmap.error,
                 ),
             )
             Ln.i(
                 "MaaRunner: coarselocate zone=$targetZoneId class=${coarse.rawClass} hit=$hit " +
-                    "box=$boxText in_map=${outcome.inMap} in_roi=${outcome.inRoi}",
+                    "box=$boxText in_map=${outcome.inMap} in_roi=${outcome.inRoi} | $heatmapLine",
             )
             if (outcome.hit) 1 else 0
         } catch (t: Throwable) {
@@ -6155,6 +6378,13 @@ class MaaRunner(private val agentHost: AgentHost) {
         const val DEBUG_COARSE_RECO = "DebugCliCoarse"
         const val DEBUG_COARSE_TM_NODE = "__DebugCliCoarseTemplateMatch"
         const val DEBUG_COARSE_TEMPLATE = "__DebugCliCoarse/minimap.png"
+
+        /**
+         * PathHeatmap 并行路的临时 TemplateMatch 节点与运行时模板名（与灰度路分开，
+         * 避免覆盖灰度路正在用的模板）。
+         */
+        const val DEBUG_COARSE_HEATMAP_TM_NODE = "__DebugCliCoarseHeatmapTemplateMatch"
+        const val DEBUG_COARSE_HEATMAP_TEMPLATE = "__DebugCliCoarse/heatmap.png"
 
         /** 粗定位 TemplateMatch 的阈值；对齐上游 loc_threshold 默认 0.55。 */
         const val COARSE_MATCH_THRESHOLD = 0.55
