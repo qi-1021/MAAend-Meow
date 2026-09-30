@@ -52,6 +52,16 @@ object MapLocatorHeatmapPipeline {
      */
     const val REFINE_RADIUS = 40
 
+    /**
+     * 粗排 `TemplateMatch` 的框架阈值（**仅用于求峰位，不用于采信**）。
+     *
+     * 框架的 `TemplateMatch` 在最高分低于 `threshold` 时会回 `[0,0,0,0]`、detail 无 `best`，
+     * 于是峰位信息整个丢失。全局搜索需要的是「峰在哪」，采信与否由后续真掩膜精排
+     * （[refineInWindow]）与追踪状态机裁决；故求峰位这一道阈值放到 0.0，保证
+     * 只要峰分不小于 0 就能拿到位置。最终采信仍要求 `score > SEAM_FALLBACK_MIN_PEAK_SCORE`。
+     */
+    const val COARSE_SEED_THRESHOLD = 0.0
+
     /** 一次搜索热图缓存 key，对齐上游 `GlobalSearchFeatureCacheKey`（`MapLocator.cpp:939-944`）。 */
     data class SearchFeatureKey(
         val zoneId: String,
@@ -227,6 +237,23 @@ object MapLocatorHeatmapPipeline {
         if (y + h > searchHeight) h = searchHeight - y
         if (w < templW || h < templH) return null
         return MapRect(x, y, w, h)
+    }
+
+    /**
+     * 粗排框是否**可用作精排种子**。
+     *
+     * 框架 `TemplateMatch` 未命中（分数低于 `threshold`）时会返回 `[0,0,0,0]`；把它当成有效
+     * 观测传给 [refineInWindow] 会让 `coarseX - searchRoi.x = -searchRoi.x < 0`，窗口被夹到
+     * 搜索 ROI 的**左上角**——「全局搜索」退化成角落局部搜索，报出的位置与真值相差
+     * 搜索窗原点量级（真机实测 40~190px，且随 YOLO tile 变化**无规律**）。
+     *
+     * 因此只有「宽高为正且左上角非原点」的框才是有意义的峰位。宽高为负、长度不足或
+     * `[0,0,0,0]` 一律判不可用，调用方改用搜索窗中心或另一条路的框。
+     */
+    fun isUsableSeedBox(box: IntArray?): Boolean {
+        if (box == null || box.size < 4) return false
+        if (box[2] <= 0 || box[3] <= 0) return false
+        return box[0] != 0 || box[1] != 0
     }
 
     /**

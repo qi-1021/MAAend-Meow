@@ -5180,27 +5180,24 @@ class MaaRunner(private val agentHost: AgentHost) {
                 runHeatmapCoarsePath(
                     lib, context, map, templateBgr,
                     plan.roi.width, plan.roi.height,
-                    targetZoneId, searchRoi, generation, grayBox, keepAlive,
+                    targetZoneId, searchRoi, generation,
+                    // 灰度路未命中时框架回 `[0,0,0,0]`，不能当精排种子（会夹到搜索 ROI 左上角）
+                    grayBox = if (grayHit) grayBox else null,
+                    keepAlive = keepAlive,
                     heatmapCache = heatmapCache,
                     tmNode = MAP_LOCATE_ASSERT_HEATMAP_TM_NODE,
                     tmTemplate = MAP_LOCATE_ASSERT_HEATMAP_TEMPLATE,
                 )
             }.getOrElse { heatmapFailure("${it.javaClass.simpleName}: ${it.message}") }
 
-            // 观测：热图路优先，其次灰度路命中框；box 是地图坐标下模板左上角，MapPosition 取中心。
-            // 上游 `locate` 在全局搜失败但裸峰 > kSeamFallbackMinPeakScore(0.0) 时照样放行，
+            // 观测：按上游策略分区选取——非路径热图区（Wuling/Valley 等）用 Standard（灰度路），
+            // 只有 OMVBase 这类路径热图区才用热图路。真机实测：ValleyIV 灰度路命中 0.68，却被
+            // 热图路的局部精排（0.55）盖掉，位置反而更差。故非路径区灰度路命中时优先它；
+            // 灰度路没命中（Wuling 常态）才回退热图路。上游 `locate` 在裸峰 > 0.0 时照样放行，
             // 低分由追踪状态机的冷启动共识 / 远跳拒绝兜底，这里保持一致。
+            // box 是地图坐标下模板左上角，MapPosition 取中心。
             val observation = run {
-                val hmBox = heatmap.box
-                val hmScore = heatmap.score
-                if (hmScore != null && hmBox != null && hmBox.size >= 4 && hmScore > SEAM_FALLBACK_MIN_PEAK_SCORE) {
-                    MapPosition(
-                        zoneId = targetZoneId,
-                        x = hmBox[0] + hmBox[2] / 2.0,
-                        y = hmBox[1] + hmBox[3] / 2.0,
-                        score = hmScore,
-                    )
-                } else if (grayHit && grayBox != null && grayBox.size >= 4 &&
+                val grayObservation = if (grayHit && grayBox != null && grayBox.size >= 4 &&
                     grayScore != null && grayScore > SEAM_FALLBACK_MIN_PEAK_SCORE
                 ) {
                     MapPosition(
@@ -5211,6 +5208,25 @@ class MaaRunner(private val agentHost: AgentHost) {
                     )
                 } else {
                     null
+                }
+                val hmBox = heatmap.box
+                val hmScore = heatmap.score
+                val heatmapObservation = if (hmScore != null && hmBox != null && hmBox.size >= 4 &&
+                    hmScore > SEAM_FALLBACK_MIN_PEAK_SCORE
+                ) {
+                    MapPosition(
+                        zoneId = targetZoneId,
+                        x = hmBox[0] + hmBox[2] / 2.0,
+                        y = hmBox[1] + hmBox[3] / 2.0,
+                        score = hmScore,
+                    )
+                } else {
+                    null
+                }
+                when {
+                    !isPathHeatmapZone(targetZoneId) && grayObservation != null -> grayObservation
+                    heatmapObservation != null -> heatmapObservation
+                    else -> grayObservation
                 }
             }
             return if (observation != null) {
@@ -6270,29 +6286,38 @@ class MaaRunner(private val agentHost: AgentHost) {
                 templateName = tmTemplate,
                 method = MapLocatorProbeSupport.DEFAULT_METHOD,
                 greenMask = false,
-                threshold = COARSE_MATCH_THRESHOLD,
+                threshold = MapLocatorHeatmapPipeline.COARSE_SEED_THRESHOLD,
                 roi = null,
             )
-            val res = runRecognitionOnce(lib, context, searchBuf, DEBUG_COARSE_HEATMAP_TM_NODE, nodeOverride)
+            // 必须用调用方传入的 `tmNode`：旧实现写死成调试节点名，assert 路径的覆写定义的是
+            // `MAP_LOCATE_ASSERT_HEATMAP_TM_NODE`，却在 `DEBUG_COARSE_HEATMAP_TM_NODE` 上跑，
+            // 节点不存在 → 全局热图粗搜恒失败，只剩角落局部精排（真机位置偏差的根因之一）。
+            val res = runRecognitionOnce(lib, context, searchBuf, tmNode, nodeOverride)
             coarseHit = res?.hit == true
             coarseScore = MapLocatorCoarsePure.bestMatchScore(res?.detailJson)
-            // 未命中时不采信域内默认框，留空让精排用灰度路框 / 窗中心
-            coarseBox = if (coarseHit) res?.box?.copyOf() else null
+            // 未命中时框架回 `[0,0,0,0]`，不是有效峰位；留空让精排用灰度路框 / 窗中心
+            coarseBox = if (coarseHit) {
+                res?.box?.copyOf()?.takeIf { MapLocatorHeatmapPipeline.isUsableSeedBox(it) }
+            } else {
+                null
+            }
         } finally {
             lib.MaaImageBufferDestroy(searchBuf)
             lib.MaaImageBufferDestroy(templBuf)
         }
 
         // 4) 精排（选项 b）：粗框邻域窗口内真掩膜 ZNCC
+        // 灰度路未命中时其框是 `[0,0,0,0]`，绝不能当种子（会把窗口夹到搜索 ROI 左上角）。
+        val seedGrayBox = grayBox?.takeIf { MapLocatorHeatmapPipeline.isUsableSeedBox(it) }
         val cb = coarseBox
         val centerX = when {
             cb != null -> cb[0]
-            grayBox != null && grayBox.size >= 4 -> grayBox[0] - searchRoi.x
+            seedGrayBox != null -> seedGrayBox[0] - searchRoi.x
             else -> (sw - tw) / 2
         }
         val centerY = when {
             cb != null -> cb[1]
-            grayBox != null && grayBox.size >= 4 -> grayBox[1] - searchRoi.y
+            seedGrayBox != null -> seedGrayBox[1] - searchRoi.y
             else -> (sh - th) / 2
         }
         val refined = MapLocatorHeatmapPipeline.refineInWindow(
@@ -6486,7 +6511,9 @@ class MaaRunner(private val agentHost: AgentHost) {
                 runHeatmapCoarsePath(
                     lib, context, map, templateBgr,
                     debugCoarseTemplateW, debugCoarseTemplateH,
-                    targetZoneId, searchRoi, generation, box, keepAlive,
+                    targetZoneId, searchRoi, generation,
+                    grayBox = if (hit) box else null,
+                    keepAlive = keepAlive,
                     heatmapCache = heatmapSearchCache,
                     tmNode = DEBUG_COARSE_HEATMAP_TM_NODE,
                     tmTemplate = DEBUG_COARSE_HEATMAP_TEMPLATE,
@@ -6504,19 +6531,10 @@ class MaaRunner(private val agentHost: AgentHost) {
                 "heatmap: error: ${heatmap.error}"
             }
 
-            // 供 tracklocate 喂追踪状态机的本帧观测：优先热图路（精排分/框），否则灰度路命中框。
-            // box 是地图坐标下模板左上角 [x,y,w,h]，MapPosition 取模板中心。
+            // 供 tracklocate 喂追踪状态机的本帧观测：与 [locateMinimapFrame] 同一套分区选取——
+            // 非路径热图区灰度路命中优先灰度，否则热图路。box 是地图坐标下模板左上角，取中心。
             debugCoarseObservation = run {
-                val hmBox = heatmap.box
-                val hmScore = heatmap.score
-                if (hmScore != null && hmBox != null && hmBox.size >= 4) {
-                    MapPosition(
-                        zoneId = targetZoneId,
-                        x = hmBox[0] + hmBox[2] / 2.0,
-                        y = hmBox[1] + hmBox[3] / 2.0,
-                        score = hmScore,
-                    )
-                } else if (hit && box != null && box.size >= 4 && score != null) {
+                val grayObservation = if (hit && box != null && box.size >= 4 && score != null) {
                     MapPosition(
                         zoneId = targetZoneId,
                         x = box[0] + box[2] / 2.0,
@@ -6525,6 +6543,23 @@ class MaaRunner(private val agentHost: AgentHost) {
                     )
                 } else {
                     null
+                }
+                val hmBox = heatmap.box
+                val hmScore = heatmap.score
+                val heatmapObservation = if (hmScore != null && hmBox != null && hmBox.size >= 4) {
+                    MapPosition(
+                        zoneId = targetZoneId,
+                        x = hmBox[0] + hmBox[2] / 2.0,
+                        y = hmBox[1] + hmBox[3] / 2.0,
+                        score = hmScore,
+                    )
+                } else {
+                    null
+                }
+                when {
+                    !isPathHeatmapZone(targetZoneId) && grayObservation != null -> grayObservation
+                    heatmapObservation != null -> heatmapObservation
+                    else -> grayObservation
                 }
             }
 

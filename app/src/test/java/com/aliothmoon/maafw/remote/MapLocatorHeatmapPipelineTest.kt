@@ -244,4 +244,31 @@ class MapLocatorHeatmapPipelineTest {
         assertTrue(P.assetGeneration(1001L, 12345L) != P.assetGeneration(1000L, 12345L))
         assertTrue(P.assetGeneration(1000L, 12346L) != P.assetGeneration(1000L, 12345L))
     }
+
+    // ───────────────────── 精排种子框合法性（角落夹窗根因） ─────────────────────
+
+    @Test
+    fun `isUsableSeedBox 拒掉框架未命中的 0 0 0 0 框`() {
+        // 框架 TemplateMatch 未命中时回的框，绝不能当种子（否则窗口夹到搜索 ROI 左上角）
+        assertTrue(!P.isUsableSeedBox(intArrayOf(0, 0, 0, 0)))
+        // 宽高为负 / 长度不足 / null 都不可用
+        assertTrue(!P.isUsableSeedBox(intArrayOf(0, 0, -1, 5)))
+        assertTrue(!P.isUsableSeedBox(intArrayOf(5, 5, 0, 0)))
+        assertTrue(!P.isUsableSeedBox(intArrayOf(0, 0, 10)))
+        assertTrue(!P.isUsableSeedBox(null))
+    }
+
+    @Test
+    fun `isUsableSeedBox 接受左上角非原点的正框`() {
+        assertTrue(P.isUsableSeedBox(intArrayOf(1, 0, 10, 10)))
+        assertTrue(P.isUsableSeedBox(intArrayOf(0, 1, 10, 10)))
+        assertTrue(P.isUsableSeedBox(intArrayOf(445, 625, 118, 120)))
+    }
+
+    @Test
+    fun `粗排求峰阈值必须低于采信阈值以免丢失峰位`() {
+        // 求峰位用 0.0：只要非负峰就保留位置，采信与否交后续精排/追踪
+        assertEquals(0.0, P.COARSE_SEED_THRESHOLD, 0.0)
+        assertTrue(P.COARSE_SEED_THRESHOLD <= 0.0)
+    }
 }
