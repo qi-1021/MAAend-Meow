@@ -409,6 +409,88 @@ class DebugCliSupportTest {
         assertTrue(failure("mapfind Wuling 1 2", ctx(controllerReady = false)).contains("controller 未就绪"))
     }
 
+    // ───────────────────── copyout ─────────────────────
+
+    @Test
+    fun `copyout 返回源与目标路径`() {
+        assertEquals(
+            DebugCliIntent.CopyOut("/data/data/com.hypergryph.endfield", "/sdcard/Android/data/app/files/rescue"),
+            ok("copyout /data/data/com.hypergryph.endfield /sdcard/Android/data/app/files/rescue"),
+        )
+    }
+
+    @Test
+    fun `copyout 命令名大小写不敏感`() {
+        assertEquals(
+            DebugCliIntent.CopyOut("/data/data/x", "/sdcard/y"),
+            ok("CopyOut /data/data/x /sdcard/y"),
+        )
+    }
+
+    @Test
+    fun `copyout 不需要 controller 就绪`() {
+        assertEquals(
+            DebugCliIntent.CopyOut("/data/data/x", "/sdcard/y"),
+            ok("copyout /data/data/x /sdcard/y", ctx(controllerReady = false)),
+        )
+    }
+
+    @Test
+    fun `copyout 缺少参数报错`() {
+        assertTrue(failure("copyout").contains("需要 <srcPath> <dstDir>"))
+        assertTrue(failure("copyout /data/data/x").contains("需要 <srcPath> <dstDir>"))
+    }
+
+    @Test
+    fun `copyout 多余参数报错`() {
+        assertTrue(failure("copyout /a /b /c").contains("只接受 <srcPath> <dstDir>"))
+    }
+
+    @Test
+    fun `copyout srcPath 必须绝对`() {
+        assertTrue(failure("copyout relative/path /sdcard/y").contains("srcPath 必须是绝对路径"))
+    }
+
+    @Test
+    fun `copyout dstDir 必须绝对`() {
+        assertTrue(failure("copyout /data/data/x relative").contains("dstDir 必须是绝对路径"))
+    }
+
+    // ───────────────────── rootcmd ─────────────────────
+
+    @Test
+    fun `rootcmd 返回命令串`() {
+        assertEquals(DebugCliIntent.RootCmd("id"), ok("rootcmd id"))
+    }
+
+    @Test
+    fun `rootcmd 命令名大小写不敏感`() {
+        assertEquals(DebugCliIntent.RootCmd("id -u"), ok("RootCmd id -u"))
+    }
+
+    @Test
+    fun `rootcmd 多 token 原样拼回`() {
+        assertEquals(
+            DebugCliIntent.RootCmd("tar -czf /sdcard/x.tar.gz -C /data/data com.hypergryph.endfield"),
+            ok("rootcmd tar -czf /sdcard/x.tar.gz -C /data/data com.hypergryph.endfield"),
+        )
+    }
+
+    @Test
+    fun `rootcmd 不需要 controller 就绪`() {
+        assertEquals(DebugCliIntent.RootCmd("id"), ok("rootcmd id", ctx(controllerReady = false)))
+    }
+
+    @Test
+    fun `rootcmd 缺参数报错`() {
+        assertTrue(failure("rootcmd").contains("需要一条 shell 命令"))
+    }
+
+    @Test
+    fun `rootcmd 命令过长报错`() {
+        assertTrue(failure("rootcmd " + "a".repeat(DEBUG_CLI_MAX_ROOT_CMD + 10)).contains("命令过长"))
+    }
+
     // ───────────────────── 渲染与常量 ─────────────────────
 
     @Test
@@ -430,7 +512,7 @@ class DebugCliSupportTest {
     @Test
     fun `helpText 列出全部命令`() {
         val text = DebugCliSupport.helpText()
-        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "probe-result", "overrideprobe", "yoloprobe", "coarselocate", "tracklocate", "mapfind")) {
+        for (command in listOf("help", "status", "report", "logtail", "screenshot", "ocr", "run", "probe-result", "overrideprobe", "yoloprobe", "coarselocate", "tracklocate", "mapfind", "copyout", "rootcmd")) {
             assertTrue("helpText 缺少 $command", text.contains(command))
         }
     }

@@ -28,6 +28,9 @@ const val DEBUG_CLI_DEFAULT_TAIL = 50
 /** `report` / `logtail` 行数上限，防止一条命令把整份日志拖进来。 */
 const val DEBUG_CLI_MAX_TAIL = 2000
 
+/** `rootcmd` 命令串长度上限，挡住误粘贴一整段脚本；超出直接拒绝而不是截断。 */
+const val DEBUG_CLI_MAX_ROOT_CMD = 4096
+
 /**
  * 命令解析所需的**只读上下文快照**。
  *
@@ -135,6 +138,24 @@ sealed interface DebugCliIntent {
         val atY: Double,
         val icon: String?,
     ) : DebugCliIntent
+
+    /**
+     * 调试用「拷出来」：在**特权进程**里把设备上的 [srcPath] 递归复制到 [dstDir] 之下。
+     *
+     * 用途：拿到 root 授权后，把 `/data/data/<pkg>` 这类只有特权身份才读得到的目录
+     * 搬到 app 自己的外部 files 目录，再由 `adb pull` 回本机。解析层只做参数形态校验
+     * （都是绝对路径）；路径是否存在、读不读得到、目标是否合法，全由特权进程实现判定并如实报错。
+     */
+    data class CopyOut(val srcPath: String, val dstDir: String) : DebugCliIntent
+
+    /**
+     * 调试用「以 root 跑一条 shell 命令」：在特权侧执行 [command] 并回显 stdout/stderr/退出码。
+     *
+     * 用途：拿到 root 授权后抢救 `/data/data/<pkg>` 这类只有 root 读得到的目录——例如
+     * `rootcmd tar -czf ... -C /data/data com.hypergryph.endfield`。解析层只做**基本**校验：
+     * 命令非空、长度不超 [DEBUG_CLI_MAX_ROOT_CMD]、不含控制字符；真正的权限/是否存在由特权侧判定。
+     */
+    data class RootCmd(val command: String) : DebugCliIntent
 }
 
 /** 解析结果：要么是意图，要么是给用户看的错误。 */
@@ -247,6 +268,33 @@ object DebugCliSupport {
                 }
             }
 
+            // 特权进程内的「拷出来」；不依赖 controller，只做形态校验，能否读由实现判定
+            "copyout" -> when {
+                args.size < 2 -> DebugCliParse.Failure("copyout 需要 <srcPath> <dstDir>")
+                args.size > 2 -> DebugCliParse.Failure("copyout 只接受 <srcPath> <dstDir>（路径不要带空格）")
+                !args[0].startsWith("/") -> DebugCliParse.Failure("copyout 的 srcPath 必须是绝对路径：${args[0]}")
+                !args[1].startsWith("/") -> DebugCliParse.Failure("copyout 的 dstDir 必须是绝对路径：${args[1]}")
+                else -> DebugCliParse.Ok(DebugCliIntent.CopyOut(args[0], args[1]))
+            }
+
+            // 以 root 跑一条 shell 命令；命令名之后的所有 token 原样拼回（含空格），只做基本校验
+            "rootcmd" -> {
+                if (args.isEmpty()) {
+                    DebugCliParse.Failure("rootcmd 需要一条 shell 命令：rootcmd <cmd...>")
+                } else {
+                    val command = args.joinToString(" ")
+                    when {
+                        command.length > DEBUG_CLI_MAX_ROOT_CMD ->
+                            DebugCliParse.Failure("rootcmd 命令过长（上限 $DEBUG_CLI_MAX_ROOT_CMD 字符）")
+
+                        command.any { it == '\u0000' || it == '\n' || it == '\r' } ->
+                            DebugCliParse.Failure("rootcmd 命令不能包含控制字符")
+
+                        else -> DebugCliParse.Ok(DebugCliIntent.RootCmd(command))
+                    }
+                }
+            }
+
             else -> DebugCliParse.Failure("未知命令：$command（输入 help 查看可用命令）")
         }
     }
@@ -270,6 +318,8 @@ object DebugCliSupport {
         appendLine("coarselocate <frame> [zone]  全帧裁小地图 → YOLO → 地图资产上 TemplateMatch 粗定位")
         appendLine("tracklocate <frame> [zone] | reset  粗定位观测喂追踪状态机，打印 accept/reject/hold/relocate 与累计状态")
         appendLine("mapfind <zone> <at_x> <at_y> [icon]  在当前全屏大地图上解 viewport → 目标投屏 → 图标确认（只读）")
+        appendLine("copyout <srcPath> <dstDir>  特权进程内递归复制到 dstDir 下（root 后用于抢救 /data/data）")
+        appendLine("rootcmd <cmd...>    以 root 跑一条 shell 命令，回显 stdout/stderr/退出码（抢救 /data/data 用）")
     }.trimEnd()
 
     /** `status` 的渲染文本，多行。 */

@@ -66,3 +66,8 @@ __pycache__/
 
 # deepwork 会话状态（只留本地，不进 git）
 .slim/deepwork/
+
+# IDE 产物（Eclipse/Android Studio）
+.classpath
+.project
+.settings/

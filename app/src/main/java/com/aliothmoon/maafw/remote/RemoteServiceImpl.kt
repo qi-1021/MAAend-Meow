@@ -37,6 +37,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
 /**
@@ -558,10 +559,176 @@ class RemoteServiceImpl : RemoteService.Stub() {
 
         override fun mapFind(zone: String, atX: Double, atY: Double, icon: String?): List<String> =
             runner.debugMapFind(zone, atX, atY, icon)
+
+        /**
+         * 特权进程内递归复制：源路径限定在常用数据根下，目标必须落在本 App 自己的外部
+         * files 目录，避免调试接口被用来乱写别处。root 授权后即可读 `/data/data/<pkg>`。
+         *
+         * 只做「基本校验」：两边都要求绝对路径（解析层已保证），这里再做范围与存在性判定；
+         * 任一步失败如实返回 `error:`，绝不静默产出半份数据。
+         */
+        override fun copyOut(srcPath: String, dstDir: String): List<String> {
+            val src = File(srcPath)
+            val dst = File(dstDir)
+            val allowedRoot = canonicalOrNull(
+                File("/sdcard/Android/data/${BuildConfig.APPLICATION_ID}/files")
+            ) ?: return listOf("error: 无法解析 app 外部目录")
+            val dstCanonical = canonicalOrNull(dst)
+                ?: return listOf("error: 无法解析目标目录：$dstDir")
+            if (dstCanonical != allowedRoot &&
+                !dstCanonical.path.startsWith(allowedRoot.path + File.separator)
+            ) {
+                return listOf("error: dstDir 必须位于 ${allowedRoot.path} 之下（当前：${dstCanonical.path}）")
+            }
+            val srcCanonical = canonicalOrNull(src)
+                ?: return listOf("error: 无法解析源路径：$srcPath")
+            val allowedSrcRoots = listOf("/data/data", "/data/user", "/data/app", "/sdcard", "/storage")
+            if (allowedSrcRoots.none {
+                    srcCanonical.path == it || srcCanonical.path.startsWith(it + File.separator)
+                }
+            ) {
+                return listOf("error: srcPath 不在允许范围内（/data/data, /data/user, /data/app, /sdcard, /storage）")
+            }
+            if (!src.exists()) return listOf("error: 源路径不存在：$srcPath")
+            return try {
+                val target = File(dst, src.name)
+                target.parentFile?.mkdirs()
+                val stats = CopyStats()
+                copyRecursive(src, target, stats, HashSet())
+                listOf(
+                    "ok: copied ${stats.files} files, ${stats.bytes} bytes",
+                    "src: ${srcCanonical.path}",
+                    "dst: ${target.absolutePath}",
+                )
+            } catch (t: Throwable) {
+                listOf("error: copyout 失败：${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
+
+        private fun canonicalOrNull(file: File): File? =
+            runCatching { file.canonicalFile }.getOrNull()
+
+        /** 递归复制；[visited] 记已访问规范路径，挡住符号链接自环。 */
+        private fun copyRecursive(src: File, dst: File, stats: CopyStats, visited: MutableSet<String>) {
+            val canonical = src.canonicalPath
+            if (!visited.add(canonical)) return
+            when {
+                src.isDirectory -> {
+                    dst.mkdirs()
+                    src.listFiles()?.forEach { child ->
+                        copyRecursive(child, File(dst, child.name), stats, visited)
+                    }
+                }
+
+                src.isFile -> {
+                    dst.parentFile?.mkdirs()
+                    src.inputStream().use { input ->
+                        dst.outputStream().use { output -> input.copyTo(output, 1 shl 16) }
+                    }
+                    stats.files++
+                    stats.bytes += dst.length()
+                }
+                // socket/fifo 等特殊文件救不了也不该救，跳过
+            }
+        }
+
+        /**
+         * 以 root 跑一条 shell 命令并回显。硬门控在 debug 构建内；实现见 [runRootCommand]。
+         */
+        override fun rootCmd(command: String): List<String> {
+            if (!BuildConfig.DEBUG) return listOf("error: rootcmd 仅 debug 构建可用")
+            return runCatching { runRootCommand(command) }
+                .getOrElse { listOf("error: rootcmd 失败：${it.javaClass.simpleName}: ${it.message}") }
+        }
+
+        /**
+         * 优先 `su -c`：这是 KernelSU 按应用授权、弹窗放行的正规入口。逐个候选路径尝试启动，
+         * 起不来的（不存在 / 不可执行）换下一个。若候选全起不来而本进程本身已是 uid 0
+         * （Root 后端的特权进程就是这种），直接 `sh -c`——不为了形式上的 su 把能成的也赔进去。
+         */
+        private fun runRootCommand(command: String): List<String> {
+            val suCandidates = listOf(
+                "su",
+                "/system/bin/su",
+                "/system/xbin/su",
+                "/debug_ramdisk/su",
+                "/data/adb/ksu/bin/su",
+            )
+            var lastError: String? = null
+            for (su in suCandidates) {
+                try {
+                    return execCollect(listOf(su, "-c", command), "su=$su")
+                } catch (e: java.io.IOException) {
+                    lastError = "$su: ${e.message}"
+                }
+            }
+            if (Process.myUid() == 0) {
+                return execCollect(listOf("sh", "-c", command), "direct(uid=0)")
+            }
+            return listOf(
+                "error: 没有可用的 su（试过：${suCandidates.joinToString(", ")}）",
+                "hint: 在 KernelSU 里对本 App 授权，或把运行后端切到 Root 后重试",
+                "last: ${lastError ?: "-"}",
+            )
+        }
+
+        /** 起进程、并发抽干 stdout/stderr（避免缓冲区写满死锁），带超时；回显退出码与两路输出。 */
+        private fun execCollect(argv: List<String>, source: String): List<String> {
+            val process = ProcessBuilder(argv).redirectErrorStream(false).start()
+            val stdout = StringBuilder()
+            val stderr = StringBuilder()
+            val outThread = drain(process.inputStream, stdout)
+            val errThread = drain(process.errorStream, stderr)
+            val finished = process.waitFor(ROOT_CMD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            if (!finished) {
+                process.destroyForcibly()
+                outThread.join(1_000L)
+                errThread.join(1_000L)
+                return listOf(
+                    "error: rootcmd 超时（${ROOT_CMD_TIMEOUT_SECONDS}s，$source）",
+                    "hint: 若 KernelSU 弹窗未处理，请手动允许后重试",
+                )
+            }
+            outThread.join(2_000L)
+            errThread.join(2_000L)
+            val out = stdout.toString().trimEnd('\n')
+            val err = stderr.toString().trimEnd('\n')
+            return buildList {
+                add("exit: ${process.exitValue()}")
+                add("via: $source")
+                if (out.isNotEmpty()) {
+                    add("stdout:")
+                    out.lines().forEach { add(it) }
+                }
+                if (err.isNotEmpty()) {
+                    add("stderr:")
+                    err.lines().forEach { add(it) }
+                }
+            }
+        }
+
+        /** 后台线程把 [stream] 逐行读进 [sink]；进程被杀后流关闭，线程自然结束。 */
+        private fun drain(stream: java.io.InputStream, sink: StringBuilder): Thread =
+            Thread {
+                runCatching { stream.bufferedReader().use { r -> r.forEachLine { sink.appendLine(it) } } }
+            }.apply {
+                name = "debug-cli-rootcmd-drain"
+                isDaemon = true
+                start()
+            }
     }
 
     private companion object {
         const val TAG = "RemoteService"
         const val HEARTBEAT_INTERVAL_MS = 5_000L
+
+        /** `rootcmd` 单次执行超时；KernelSU 弹窗需要人点，给足时间。 */
+        const val ROOT_CMD_TIMEOUT_SECONDS = 120L
     }
+}
+
+/** copyout 复制计数：文件数与总字节数，用于回执与本地核对（不能嵌在 inner class 里）。 */
+private class CopyStats {
+    var files = 0L
+    var bytes = 0L
 }

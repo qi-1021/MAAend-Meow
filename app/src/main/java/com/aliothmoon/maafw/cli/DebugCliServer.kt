@@ -254,6 +254,10 @@ object DebugCliServer {
             is DebugCliIntent.TrackLocate -> host.trackLocate(intent.imagePath, intent.zone)
 
             is DebugCliIntent.MapFind -> host.mapFind(intent.zone, intent.atX, intent.atY, intent.icon)
+
+            is DebugCliIntent.CopyOut -> host.copyOut(intent.srcPath, intent.dstDir)
+
+            is DebugCliIntent.RootCmd -> host.rootCmd(intent.command)
         }
 
     /**
@@ -410,6 +414,23 @@ interface DebugCliHost {
      * 目标屏幕框 / 是否命中 / 耗时），解不出时如实说明。
      */
     fun mapFind(zone: String, atX: Double, atY: Double, icon: String?): List<String>
+
+    /**
+     * 特权进程内递归复制：把设备上的 [srcPath]（文件或目录）复制到 [dstDir] 之下。
+     *
+     * 实现跑在特权进程里，因此 root 授权后能读 `/data/data/<pkg>` 这类普通进程读不到的目录。
+     * 成功返回若干行结果（含目标路径与文件/字节计数），失败返回以 `error:` 开头的如实说明。
+     */
+    fun copyOut(srcPath: String, dstDir: String): List<String>
+
+    /**
+     * 以 root 跑一条 shell 命令 [command]，回显 stdout / stderr / 退出码。
+     *
+     * 实现跑在特权进程里：优先 `ProcessBuilder("su","-c",command)`；若该进程本身已是 uid 0
+     * 而 `su` 不可用，则直接 `sh -c` 执行。**只做 debug 构建**。拿不到 root 时如实返回
+     * 以 `error:` 开头的说明，不要伪造成功。
+     */
+    fun rootCmd(command: String): List<String>
 }
 
 /** [DebugCliHost.ocr] 的结果；[text] 为 null 时看 [reason]。 */
