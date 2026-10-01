@@ -114,9 +114,9 @@ python3 scripts/debug_cli_bridge.py --listen 127.0.0.1:7788 --target 127.0.0.1:7
   静态初始化且共用这一个桩，改后所有探测都认为「没有高级特性」，KleidiCV 回退 NEON 基线（即任何不支持
   SVE2 的真机本来就会走的路径）。实现见 `scripts/setup_maa_framework.py` 的 `patch_kleidicv_getauxval()`，
   铺完 .so 后自动执行、字节不符即报错、幂等。**只需在模拟器上跑一次任务确认 SIGILL 消失**（记得用完彻底关机）。
+  失败的那条环境变量注入路线已从代码里撤掉，别再重试。
 - **虚拟机纪律（用户要求）**：不用时**彻底关闭**（`adb emu kill` + 确认无 `qemu-system` 残留、
   无 5554/5555 监听、AVD 目录无 `.lock`），不要留挂起实例；并**尽量少用虚拟手机**，它性能开销大。
-  失败的那条环境变量注入路线已从代码里撤掉，别再重试。
 - **清空重建的完整配方**：删 `userdata-qemu.img.qcow2` → 装 `base.apk` → 首启建目录 →
   `tar xf -` 流式灌 30GB → 解 CE/DE → 用 `pm list packages -U` 的 uid 统一三个目录属主 + `restorecon`
   → 装 App/Shizuku（`libshizuku.so` 起 root server）→ 开调试模式 → 下 map-locate 补充包。
