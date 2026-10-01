@@ -308,6 +308,77 @@ def realign_elf_16kb(path: Path) -> bool:
     return True
 
 
+# ── KleidiCV getauxval 补丁 ─────────────────────────────────────────────────
+# Apple Silicon 上的 Android 模拟器会把宿主 M4 的 sve2/sme 等扩展一并透传给 guest，
+# 而 MaaDeps 预编译的 opencv4 静态链了 KleidiCV 0.5.0 HAL：它每个 API 的静态构造函数
+# 都调 getauxval 查 HWCAP，据此把 sve2:: 实现的地址写进分派表，于是第一次
+# matchTemplate 就执行 cnth/ptrue(SVE) 并 SIGILL（tombstone 存于 game-rescue/tombstones/）。
+# OpenCV 自己的 OPENCV_CPU_DISABLE 管不到 HAL——4.12.0 的 ARM 名字只有
+# FP16/NEON/NEON_DOTPROD/NEON_FP16/NEON_BF16，写 SVE/SME 会被判 unknown；
+# 编译期唯一开关是 -DWITH_KLEIDICV=OFF，而我们不重编上游。
+#
+# 但整库 195 处 getauxval 调用**全部**来自 _GLOBAL__sub_I_*.cpp（KleidiCV 各 API 的静态
+# 初始化），且都走同一个 getauxval@plt 桩。把那个桩改成「返回 0」，所有探测就都认为
+# 「没有高级特性」，KleidiCV 自动回退 NEON 基线——这正是任何不支持 SVE2 的真机上本来
+# 就会走的路径，因此语义安全。
+KLEIDICV_PLT_PATCH = {
+    "libopencv_world4.so": {
+        # 从 MaaDeps v2.12.6 的 android-aarch64 产物上用 llvm-objdump/llvm-nm 量出
+        "plt_vaddr": 0x17E4CA0,
+        # 原始桩: adrp x16,...; ldr x17,[x16,#0x378]; add x16,x16,#0x378; br x17
+        "expected": bytes.fromhex("3002009011be41f910e20d9120021fd6"),
+        # 改为: mov w0,#0; ret; nop; nop
+        "patched": bytes.fromhex("00008052c0035fd61f2003d51f2003d5"),
+    },
+}
+
+
+def _vaddr_to_file_offset(data: bytes, vaddr: int) -> int | None:
+    """按 LOAD 段把虚拟地址换算成文件偏移；不在任何已加载段里则返回 None。"""
+    if data[:4] != b"\x7fELF" or data[4] != 2:  # ELF64
+        return None
+    e_phoff = struct.unpack_from("<Q", data, 0x20)[0]
+    e_phentsize = struct.unpack_from("<H", data, 0x36)[0]
+    e_phnum = struct.unpack_from("<H", data, 0x38)[0]
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        if struct.unpack_from("<I", data, off)[0] != 1:  # PT_LOAD
+            continue
+        p_offset, p_vaddr = struct.unpack_from("<QQ", data, off + 0x08)
+        p_filesz = struct.unpack_from("<Q", data, off + 0x20)[0]
+        if p_vaddr <= vaddr < p_vaddr + p_filesz:
+            return p_offset + (vaddr - p_vaddr)
+    return None
+
+
+def patch_kleidicv_getauxval(path: Path) -> str:
+    """把 KleidiCV 依赖的 getauxval@plt 桩改成返回 0。
+
+    返回 "patched" / "already" / "absent"（不适用此库）。
+    字节与预期不符时抛 RuntimeError：上游产物变了就必须重新核对，绝不盲打。
+    """
+    spec = KLEIDICV_PLT_PATCH.get(path.name)
+    if spec is None:
+        return "absent"
+    data = bytearray(path.read_bytes())
+    off = _vaddr_to_file_offset(bytes(data), spec["plt_vaddr"])
+    if off is None:
+        raise RuntimeError(
+            f"{path.name}: 虚拟地址 0x{spec['plt_vaddr']:x} 不在任何 LOAD 段里，上游可能改了布局"
+        )
+    cur = bytes(data[off:off + len(spec["patched"])])
+    if cur == spec["patched"]:
+        return "already"
+    if cur != spec["expected"]:
+        raise RuntimeError(
+            f"{path.name}: 0x{spec['plt_vaddr']:x} 处字节与预期不符"
+            f"（实际 {cur.hex()}，预期 {spec['expected'].hex()}）：上游产物已变，需重新核对再打"
+        )
+    data[off:off + len(spec["patched"])] = spec["patched"]
+    path.write_bytes(bytes(data))
+    return "patched"
+
+
 def deploy_zip(archive: Path, abi: str, project_root: Path, with_plugins: bool) -> dict:
     jnilib_dir = project_root / JNILIBS_DIR / abi
     if jnilib_dir.exists():
@@ -353,6 +424,16 @@ def deploy_zip(archive: Path, abi: str, project_root: Path, with_plugins: bool) 
             realigned_count += 1
     if realigned_count > 0:
         print(f"    [ALIGN-16K] 成功重对齐 {realigned_count} 个 .so 库至 16KB 页面")
+
+    # KleidiCV HAL 的 getauxval 补丁：让模拟器上不再被选中执行不了的 SVE2 后端
+    if abi == "arm64-v8a":
+        opencv_so = jnilib_dir / "libopencv_world4.so"
+        if opencv_so.exists():
+            status = patch_kleidicv_getauxval(opencv_so)
+            if status == "patched":
+                print("    [FIX-KLEIDICV] getauxval 桩已改为返回 0（不再走 SVE2/SME 后端）")
+            elif status == "already":
+                print("    [FIX-KLEIDICV] 已打过补丁，跳过")
 
     return stats
 

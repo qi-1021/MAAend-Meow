@@ -1,6 +1,5 @@
 package com.aliothmoon.maafw.privileged
 
-import android.os.Build
 import moe.shizuku.server.IRemoteProcess
 import moe.shizuku.server.IShizukuService
 import rikka.shizuku.Shizuku
@@ -18,22 +17,8 @@ object ShizukuSpawner : ProcessSpawner {
 
     // test -x：DAC 层不可执行直接 126 退出，不白等超时
     // stdio 断开防止管道写满卡住服务进程，日志全走 --log-file
-    // 前置的 OpenCV 兼容前缀只在模拟器上非空：宿主 CPU 特性会被透传，OpenCV 会选中执行不了的
-    // 指令路径，而它的分派只在静态初始化时读一次环境，所以必须在服务进程 exec 之前就 export 好
-    override fun wrapCommand(launcherPath: String, invocation: String): String {
-        val openCvCompat = OpenCvEmulatorCompat.shellPrefix(
-            Build.HARDWARE, Build.FINGERPRINT, roKernelQemu()
-        )
-        return "${openCvCompat}test -x ${shellQuote(launcherPath)} || exit 126;" +
-            " exec $invocation </dev/null >/dev/null 2>&1"
-    }
-
-    /** `ro.kernel.qemu` 是最权威的模拟器信号，但它没有公开 API，取不到就按「不是」处理 */
-    private fun roKernelQemu(): String? = runCatching {
-        val systemProperties = Class.forName("android.os.SystemProperties")
-        systemProperties.getMethod("get", String::class.java)
-            .invoke(null, "ro.kernel.qemu") as? String
-    }.getOrNull()
+    override fun wrapCommand(launcherPath: String, invocation: String): String =
+        "test -x ${shellQuote(launcherPath)} || exit 126; exec $invocation </dev/null >/dev/null 2>&1"
 
     override fun spawn(command: String): SpawnHandle =
         RemoteProcessHandle(requireServer().newProcess(arrayOf("sh", "-c", command), null, null))

@@ -7,6 +7,42 @@
 > 追加格式：新条目放在最上面，标题写 `## YYYY-MM-DD`，正文用「做了什么 / 为什么 / 怎么验的 / 教训 / 未做」几段。
 
 ---
+## 2026-10-01 · 无实物定位并修掉模拟器上的 OpenCV SIGILL（补 OpenCV 的 getauxval 桩）
+
+### 它到底崩在哪（纯静态分析，未开模拟器）
+
+反汇编归档 tombstone 里那一帧（`game-rescue/tombstones/tombstone_00_emu_sigill_opencv.txt`）：
+`libopencv_world4.so` 偏移 `0x1548120` 处是 **`cnth x8` / `ptrue p0.s`**（SVE 指令），
+所属符号是 **`kleidicv::sve2::float_conversion<unsigned char, float>`**。
+
+原因链条：Apple Silicon 的模拟器把宿主 M4 的 `sve2/sme` 当作 HWCAP 透传给 guest，
+而 MaaDeps v2.12.6 预编译的 opencv4 **静态链了 KleidiCV 0.5.0 HAL**；HAL 每个 API 的静态
+构造函数读 HWCAP，写下 `sve2::` 实现的地址，于是第一次 `matchTemplate` 就执行 SVE 指令并 SIGILL。
+同栈在 opencv#27618 与 MAA-Meow #202 都已确认。
+
+### 怎么修的（不需要任何设备）
+
+- `llvm-nm`：全库 650 个 kleidicv 符号里 `sve2::` 33 个、`neon::` 145 个、`sme*` 0 个；
+  `getauxval` 是**动态导入符号**，且**全部 195 处调用都落在 `_GLOBAL__sub_I_*.cpp`**
+  （`add/sub/multiply/absdiff/min_max/remap/median_blur/...` = KleidiCV 各 API 的静态初始化），
+  库内没有任何别的代码用它。
+- 因此它们**共用同一个 `getauxval@plt` 桩**（`0x17e4ca0`，4 条指令的经典 PLT）。
+  把这个桩改成 `mov w0,#0; ret; nop; nop`，195 处探测就全部认为「没有高级特性」，
+  KleidiCV 自动回退 NEON 基线——**这正是任何不支持 SVE2 的真机上本来就会走的路径**，语义安全。
+- 落点在构建层：`scripts/setup_maa_framework.py` 新增 `patch_kleidicv_getauxval()`，
+  在 `deploy_zip` 铺完 .so（16KB 对齐之后）对 `arm64-v8a` 打补丁。
+  经 LOAD 段换算文件偏移（本例 vaddr 与偏移 1:1）；**字节与预期不符就抛错**，
+  绝不盲打上游变了样的产物；重复执行幂等（返回 `already`）。
+
+### 怎么验的
+
+- 反汇编打补丁后的文件：`0x17e4ca0` 已变为 `mov w0,#0 / ret / nop / nop` ✓。
+- 幂等性：二次执行返回 `already` ✓。
+- 纯逻辑闸门：**1374/1374**（已撤回上一版基于环境变量的假方案，不留误导性代码）。
+- **仍未做**：在模拟器上实测（用户要求暂不使用虚拟手机），届时只需一次启动即可确认。
+
+---
+
 
 ## 2026-10-01 · 清空重建模拟器（手机替代方案）+ 查出 MaaFW 在模拟器上 SIGILL 的根因
 
@@ -48,13 +84,10 @@
   进程名与栈与 37.1.11 时完全一致；已存档 `game-rescue/tombstones/tombstone_01_emu_3732_sigill.txt`）。
   **结论：常规/开发通道目前都给不出能跑 MaaFW vision 的模拟器，模拟器上任何 pipeline 识别都会在第一次
   `matchTemplate` 崩掉，因此它只能用来跑游戏本体与外观类工作。**
-- **② 已在 App 侧落地（等设备验证）**：`OpenCvEmulatorCompat`（纯逻辑，判模拟器 + 生成
-  `export OPENCV_CPU_DISABLE=NEON_DOTPROD,NEON_FP16,NEON_BF16,SVE; ` 前缀）+ `ShizukuSpawner.wrapCommand`
-  把它前置到拉起特权进程的 shell 命令最前面。走 shell export 而不是 `newProcess` 的 env 参数，
-  因为后者会整体替换环境、丢掉 `BOOTCLASSPATH` 之类会让服务进程根本起不来。
-  真机上前缀恒为空串，命令逐字不变，因此对现有链路零影响。
-  纯逻辑闸门：**1379/1379**（新增 `OpenCvEmulatorCompatTest` 5 条）。
-  **仍未做**：在模拟器上实测这次注入是否真能消除 SIGILL（需开一次虚拟机）。
+- **② 曾按此思路在 App 侧落地，但当天晚些时候被证伪并已撤回**：`OPENCV_CPU_DISABLE` 在这条
+  链路上是空操作——OpenCV 4.12.0 的 ARM 可名字化特性只有 `FP16/NEON/NEON_DOTPROD/NEON_FP16/NEON_BF16`
+  （写 `SVE`/`SME` 一律 "unknown feature"），而 MaaDeps 这版 opencv4 因未启用 intrinsics feature
+  **连 OpenCV 自身的 dispatch 都没编进去**。真正崩的是静态链入的 KleidiCV HAL，见下一条。
 - 仍未试的路：
   ② 给加载 OpenCV 的进程注入 `OPENCV_CPU_DISABLE=NEON_DOTPROD,NEON_FP16,NEON_BF16,SVE`
   （Shizuku 的 `newProcess` 可以带 env，但 `wrap.*` setprop 因属性名不能含 `:` 覆盖不到 `:shizuku_service`）；

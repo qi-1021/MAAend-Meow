@@ -31,8 +31,6 @@ TDIAG="$REPO/app/src/test/java/com/aliothmoon/maafw/diagnostics"
 # 调试 CLI 的命令解析是纯逻辑（不碰 socket/Android），纳入本机验证
 CLI="$REPO/app/src/main/java/com/aliothmoon/maafw/cli"
 TCLI="$REPO/app/src/test/java/com/aliothmoon/maafw/cli"
-PRIV="$REPO/app/src/main/java/com/aliothmoon/maafw/privileged"
-TPRIV="$REPO/app/src/test/java/com/aliothmoon/maafw/privileged"
 WORK="$REPO/.tmp/verify"
 STUB="$WORK/jstub"
 GC=~/.gradle/caches/modules-2/files-2.1
@@ -133,7 +131,6 @@ MAIN_FILES=(
     "$CLI/DebugCliSupport.kt"
     "$CLI/DebugCliRemote.kt"
     "$CLI/DebugCliRelay.kt"
-    "$PRIV/OpenCvEmulatorCompat.kt"
   )
 TEST_FILES=(
   "$TST/BetterSlidingSupportTest.kt"
@@ -204,7 +201,6 @@ TEST_FILES=(
     "$TCLI/DebugCliSupportTest.kt"
     "$TCLI/DebugCliRemoteTest.kt"
     "$TCLI/DebugCliRelayTest.kt"
-    "$TPRIV/OpenCvEmulatorCompatTest.kt"
   )
 TEST_CLASSES=(
   com.aliothmoon.maafw.remote.BetterSlidingSupportTest
@@ -275,7 +271,6 @@ TEST_CLASSES=(
     com.aliothmoon.maafw.cli.DebugCliSupportTest
     com.aliothmoon.maafw.cli.DebugCliRemoteTest
     com.aliothmoon.maafw.cli.DebugCliRelayTest
-    com.aliothmoon.maafw.privileged.OpenCvEmulatorCompatTest
   )
 
 stubs() {
@@ -445,7 +440,6 @@ fun main() {
         "com.aliothmoon.maafw.cli.DebugCliSupportTest",
         "com.aliothmoon.maafw.cli.DebugCliRemoteTest",
         "com.aliothmoon.maafw.cli.DebugCliRelayTest",
-        "com.aliothmoon.maafw.privileged.OpenCvEmulatorCompatTest",
     )
     var pass = 0
     var fail = 0
