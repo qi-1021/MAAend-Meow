@@ -36,7 +36,17 @@
   ← `libMaaFramework.so (MaaNS::VisionNS::TemplateMatcher::template_match)`。
 - 判断：模拟器 vCPU 把宿主 M4 的 `sve2/sme/i8mm` 等新扩展一并暴露，OpenCV 运行时派发据此选了高级指令路径，
   而该路径在模拟器上触发非法指令。**真机 arm64 不受影响**（这也是 phone 上一切正常的原因）。
-- 尝试过 `-qemu -cpu max,sve=off,sme=off`：模拟器起不来，参数格式待再试。
+- 尝试过 `-qemu -cpu max,sve=off,sme=off`：模拟器直接起不来，日志给出确凿原因 ——
+  `can't apply global max-arm-cpu.sve=off: Property '.sve' not found`。说明这个版本（37.1.11）的 QEMU
+  在 HVF 下**不建模 CPU**，feature 是宿主直接透传，因此 `-cpu` 这条路在本版本上封死。
+- 外部研究（@librarian）确认这是 M4 + Android 模拟器的**已知通用坑**（MediaPipe #6293 做到指令级：
+  模拟器广播 `sme2` 但 `rdsvl` 一执行就 trap；dotnet/runtime #127398 标题就是「SME but no SVE」；
+  Podman #28312、Parallels 论坛同源）。OpenCV issue #27618 的崩溃栈与本案**逐帧一致**，
+  且其初始化日志显示派发了 `NEON_DOTPROD/NEON_FP16`。
+- 可行的三条路：① 换 emulator 版本（较新的 QEMU 在 HVF 下主动屏蔽 SME，或已正确支持 SME2）；
+  ② 给加载 OpenCV 的进程注入 `OPENCV_CPU_DISABLE=NEON_DOTPROD,NEON_FP16,NEON_BF16,SVE`
+  （Shizuku 的 `newProcess` 可以带 env，但 `wrap.*` setprop 因属性名不能含 `:` 覆盖不到 `:shizuku_service`）；
+  ③ 真机。
 
 ### 怎么验的
 - 游戏进世界：observer 读图确认（`Explore` / `Bell of Recollection` `1/4` / 圆形小地图 / 摇杆与动作键）。
