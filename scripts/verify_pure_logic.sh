@@ -31,6 +31,8 @@ TDIAG="$REPO/app/src/test/java/com/aliothmoon/maafw/diagnostics"
 # 调试 CLI 的命令解析是纯逻辑（不碰 socket/Android），纳入本机验证
 CLI="$REPO/app/src/main/java/com/aliothmoon/maafw/cli"
 TCLI="$REPO/app/src/test/java/com/aliothmoon/maafw/cli"
+PRIV="$REPO/app/src/main/java/com/aliothmoon/maafw/privileged"
+TPRIV="$REPO/app/src/test/java/com/aliothmoon/maafw/privileged"
 WORK="$REPO/.tmp/verify"
 STUB="$WORK/jstub"
 GC=~/.gradle/caches/modules-2/files-2.1
@@ -128,10 +130,11 @@ MAIN_FILES=(
   "$SUP/SupplementPackLocal.kt"
   "$DIAG/RunDiagnosticsPolicy.kt"
   "$DIAG/GoodsProbeDumpPolicy.kt"
-  "$CLI/DebugCliSupport.kt"
-  "$CLI/DebugCliRemote.kt"
-  "$CLI/DebugCliRelay.kt"
-)
+    "$CLI/DebugCliSupport.kt"
+    "$CLI/DebugCliRemote.kt"
+    "$CLI/DebugCliRelay.kt"
+    "$PRIV/OpenCvEmulatorCompat.kt"
+  )
 TEST_FILES=(
   "$TST/BetterSlidingSupportTest.kt"
   "$TST/BetterSlidingParamsTest.kt"
@@ -198,10 +201,11 @@ TEST_FILES=(
   "$TSUP/SupplementPackLocalTest.kt"
   "$TDIAG/RunDiagnosticsPolicyTest.kt"
   "$TDIAG/GoodsProbeDumpPolicyTest.kt"
-  "$TCLI/DebugCliSupportTest.kt"
-  "$TCLI/DebugCliRemoteTest.kt"
-  "$TCLI/DebugCliRelayTest.kt"
-)
+    "$TCLI/DebugCliSupportTest.kt"
+    "$TCLI/DebugCliRemoteTest.kt"
+    "$TCLI/DebugCliRelayTest.kt"
+    "$TPRIV/OpenCvEmulatorCompatTest.kt"
+  )
 TEST_CLASSES=(
   com.aliothmoon.maafw.remote.BetterSlidingSupportTest
   com.aliothmoon.maafw.remote.BetterSlidingParamsTest
@@ -268,10 +272,11 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.supplement.SupplementPackLocalTest
   com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest
   com.aliothmoon.maafw.diagnostics.GoodsProbeDumpPolicyTest
-  com.aliothmoon.maafw.cli.DebugCliSupportTest
-  com.aliothmoon.maafw.cli.DebugCliRemoteTest
-  com.aliothmoon.maafw.cli.DebugCliRelayTest
-)
+    com.aliothmoon.maafw.cli.DebugCliSupportTest
+    com.aliothmoon.maafw.cli.DebugCliRemoteTest
+    com.aliothmoon.maafw.cli.DebugCliRelayTest
+    com.aliothmoon.maafw.privileged.OpenCvEmulatorCompatTest
+  )
 
 stubs() {
   mkdir -p "$STUB/org/junit/function" "$WORK/jstubout"
@@ -440,6 +445,7 @@ fun main() {
         "com.aliothmoon.maafw.cli.DebugCliSupportTest",
         "com.aliothmoon.maafw.cli.DebugCliRemoteTest",
         "com.aliothmoon.maafw.cli.DebugCliRelayTest",
+        "com.aliothmoon.maafw.privileged.OpenCvEmulatorCompatTest",
     )
     var pass = 0
     var fail = 0

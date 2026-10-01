@@ -48,7 +48,14 @@
   进程名与栈与 37.1.11 时完全一致；已存档 `game-rescue/tombstones/tombstone_01_emu_3732_sigill.txt`）。
   **结论：常规/开发通道目前都给不出能跑 MaaFW vision 的模拟器，模拟器上任何 pipeline 识别都会在第一次
   `matchTemplate` 崩掉，因此它只能用来跑游戏本体与外观类工作。**
-- 仍未试的两条路：
+- **② 已在 App 侧落地（等设备验证）**：`OpenCvEmulatorCompat`（纯逻辑，判模拟器 + 生成
+  `export OPENCV_CPU_DISABLE=NEON_DOTPROD,NEON_FP16,NEON_BF16,SVE; ` 前缀）+ `ShizukuSpawner.wrapCommand`
+  把它前置到拉起特权进程的 shell 命令最前面。走 shell export 而不是 `newProcess` 的 env 参数，
+  因为后者会整体替换环境、丢掉 `BOOTCLASSPATH` 之类会让服务进程根本起不来。
+  真机上前缀恒为空串，命令逐字不变，因此对现有链路零影响。
+  纯逻辑闸门：**1379/1379**（新增 `OpenCvEmulatorCompatTest` 5 条）。
+  **仍未做**：在模拟器上实测这次注入是否真能消除 SIGILL（需开一次虚拟机）。
+- 仍未试的路：
   ② 给加载 OpenCV 的进程注入 `OPENCV_CPU_DISABLE=NEON_DOTPROD,NEON_FP16,NEON_BF16,SVE`
   （Shizuku 的 `newProcess` 可以带 env，但 `wrap.*` setprop 因属性名不能含 `:` 覆盖不到 `:shizuku_service`）；
   ③ 真机。
