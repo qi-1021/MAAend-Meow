@@ -109,7 +109,11 @@ python3 scripts/debug_cli_bridge.py --listen 127.0.0.1:7788 --target 127.0.0.1:7
   `libopencv_world4.so` 的 `cv::parallel_for_ → matchTemplate`，见
   `game-rescue/tombstones/tombstone_00_emu_sigill_opencv.txt`）。模拟器 vCPU 暴露了 M4 的
   `sve2/sme` 等新扩展，OpenCV 运行时派发选了模拟器实现不了的高级指令路径。**真机 arm64 正常**，
-  所以走路闭环调参仍以真机为准，或在模拟器上先想办法屏蔽这些扩展。
+  所以走路闭环调参仍以真机为准。**升级 emulator 到 canary 37.3.2 也无效**（同样 SIGILL，已存档对比 tombstone）。
+- **虚拟机纪律（用户要求）**：不用时**彻底关闭**（`adb emu kill` + 确认无 `qemu-system` 残留、
+  无 5554/5555 监听、AVD 目录无 `.lock`），不要留挂起实例；并**尽量少用虚拟手机**，它性能开销大。
+  未尝试的替代路线：给加载 OpenCV 的特权进程注入
+  `OPENCV_CPU_DISABLE=NEON_DOTPROD,NEON_FP16,NEON_BF16,SVE`（需保证在 dlopen 之前生效），或直接用真机。
 - **清空重建的完整配方**：删 `userdata-qemu.img.qcow2` → 装 `base.apk` → 首启建目录 →
   `tar xf -` 流式灌 30GB → 解 CE/DE → 用 `pm list packages -U` 的 uid 统一三个目录属主 + `restorecon`
   → 装 App/Shizuku（`libshizuku.so` 起 root server）→ 开调试模式 → 下 map-locate 补充包。

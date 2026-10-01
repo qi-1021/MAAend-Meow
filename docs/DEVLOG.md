@@ -43,7 +43,12 @@
   模拟器广播 `sme2` 但 `rdsvl` 一执行就 trap；dotnet/runtime #127398 标题就是「SME but no SVE」；
   Podman #28312、Parallels 论坛同源）。OpenCV issue #27618 的崩溃栈与本案**逐帧一致**，
   且其初始化日志显示派发了 `NEON_DOTPROD/NEON_FP16`。
-- 可行的三条路：① 换 emulator 版本（较新的 QEMU 在 HVF 下主动屏蔽 SME，或已正确支持 SME2）；
+- **① 换 emulator 版本 —— 已试，无效**：canary 通道升到 **37.3.2**（boot 正常 19.9s），
+  但 `start` 后 `:shizuku_service` 依旧 SIGILL（tombstone 新增第 2 个，`signal 4 (SIGILL) ILL_ILLOPC`，
+  进程名与栈与 37.1.11 时完全一致；已存档 `game-rescue/tombstones/tombstone_01_emu_3732_sigill.txt`）。
+  **结论：常规/开发通道目前都给不出能跑 MaaFW vision 的模拟器，模拟器上任何 pipeline 识别都会在第一次
+  `matchTemplate` 崩掉，因此它只能用来跑游戏本体与外观类工作。**
+- 仍未试的两条路：
   ② 给加载 OpenCV 的进程注入 `OPENCV_CPU_DISABLE=NEON_DOTPROD,NEON_FP16,NEON_BF16,SVE`
   （Shizuku 的 `newProcess` 可以带 env，但 `wrap.*` setprop 因属性名不能含 `:` 覆盖不到 `:shizuku_service`）；
   ③ 真机。
