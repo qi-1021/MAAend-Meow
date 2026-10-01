@@ -59,6 +59,7 @@ data class NavWalkConfig(
     val maxRelocateAttempts: Int = 2,
     val waypointTimeoutMs: Long = 90_000L,
     val tickIntervalMs: Long = 250L,
+    val maxPlausibleStepDistance: Double = 50.0,
 ) {
     companion object {
         /** 起步到达圈，对齐 [MapNavControlPure.DEFAULT_ARRIVAL_RADIUS_WU]。 */
@@ -194,7 +195,14 @@ class MapNavWalkPlanner(
         }
 
         val usable = fix.usable
-        if (usable) {
+        val isJumpOutlier = if (usable && lastDistance > 0.0) {
+            val dist = hypot(fix.x - waypoint.x, fix.y - waypoint.y)
+            abs(dist - lastDistance) > config.maxPlausibleStepDistance
+        } else {
+            false
+        }
+
+        if (usable && !isJumpOutlier) {
             // 有可用定位即恢复：清丢失计数、重定位窗口与已用预算（已重新推进即算恢复）。
             lostStreak = 0
             relocateTicksRemaining = 0
@@ -212,7 +220,8 @@ class MapNavWalkPlanner(
             return result(NavWalkAction.FAILED, 0, null, null, "timeout ${elapsedMs}ms")
         }
 
-        if (usable) {
+        val acceptedUsable = usable && !isJumpOutlier
+        if (acceptedUsable) {
             val yaw = fix.yawDeg!!
             val bearing = control.bearing(fix.x, fix.y, waypoint.x, waypoint.y)
             val yawError = control.normalizeAngle(bearing - yaw)

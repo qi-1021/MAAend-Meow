@@ -177,9 +177,32 @@ class MapNavWalkPureTest {
     }
 
     @Test
+    fun `突发跳变离群值被拒且不污染距离`() {
+        val planner = MapNavWalkPlanner(NavWaypoint(100.0, 0.0), TestControl())
+        // 初始正常推进：距目标 20px
+        val t1 = planner.tick(fix(80.0, 0.0, yaw = 90.0), 100)
+        assertEquals(NavWalkAction.WALK, t1.action)
+        assertEquals(20.0, t1.distance, 1e-6)
+
+        // 突发 170px 假匹配：假坐标 (250.0, 0.0)，离 waypoint 150px，距上一拍跳变 130px > 50px
+        val t2 = planner.tick(fix(250.0, 0.0, yaw = 90.0), 100)
+        assertEquals(NavWalkAction.HOLD, t2.action)
+        assertEquals(20.0, t2.distance, 1e-6) // 保持上一拍正常距离
+        assertEquals(1, t2.lostStreak)
+        assertFalse(planner.finished)
+
+        // 下一拍恢复正常坐标 (85.0, 0.0)：距目标 15px，距上一拍正常距离变动 5px < 50px
+        val t3 = planner.tick(fix(85.0, 0.0, yaw = 90.0), 100)
+        assertEquals(NavWalkAction.WALK, t3.action)
+        assertEquals(15.0, t3.distance, 1e-6)
+        assertEquals(0, t3.lostStreak)
+    }
+
+    @Test
     fun `空会话视为已完成`() {
         val session = MapNavWalkSession(emptyList(), TestControl())
         assertTrue(session.finished)
         assertEquals(NavWalkAction.FAILED, session.tick(fix(0.0, 0.0), 100).action)
     }
 }
+

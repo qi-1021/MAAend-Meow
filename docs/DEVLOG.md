@@ -8,6 +8,40 @@
 
 ---
 
+## 2026-10-01 · 触摸驱动多指对齐 + 走路闭环 170px 假匹配物理步长离群抑制
+
+### 做了什么
+
+**① 触摸驱动接触点 ID（contact_id）全量对齐上游 C++ 布局**
+- 现场排查与对齐上游 `agent/cpp-algo/source/MapNavigator/Backend/Adb/`：
+  - `adb_camera_swipe_driver.h:15`：`contact_id = 1`（此前误设为 9，在部分 Android 驱动/虚拟触摸注入器超出 5 点槽位上限被静默丢弃导致视角不转、yaw 位级不变）。
+  - `adb_input_backend.h:29-35` `AdbActionButtonLayout`：
+    - `interact_button.contact_id = 5`（此前为 10）
+    - `sprint_button.contact_id = 2`
+    - `jump_button.contact_id = 3`
+    - `attack_button.contact_id = 4`
+  - 修改 `MotionSupport.kt`：`CONTACT_CAMERA = 1`，`CONTACT_ACTION = 5`，`CONTACT_SPRINT = 2`，`CONTACT_JUMP = 3`，`CONTACT_ATTACK = 4`。
+  - `tapButton` 动作按钮（交互/冲刺/跳跃/攻击）调用时传入专有 contact_id，避免跨功能触摸 ID 碰撞或被底层驱动丢弃。
+
+**② 走路闭环步长突变抑制（单拍 ~170px 假匹配抑制）**
+- 现象：真机闭环走路过程中小地图偶尔出现低置信突发假匹配跳变（~170px），由于之前 `MapNavWalkPlanner.tick` 只要 `fix.usable` 就无条件更新 `lastDistance`，导致到路点距离从 20px 瞬间被污染成 150px/210px，破坏单调性并引发误判。
+- 修复：
+  - `NavWalkConfig` 增加 `maxPlausibleStepDistance: Double = 50.0`（角色单拍 250ms 最大物理位移约 5~8px，50px 足够包容冲刺同时拦截 >100px 的严重假匹配）。
+  - 在 `MapNavWalkPlanner.tick` 中增加物理步长跳变检测：若上一拍已有有效距离，且单拍距离变动 `abs(dist - lastDistance) > config.maxPlausibleStepDistance`，拒绝更新 `lastDistance` 与到达判定，降级为 `HOLD` 并计入丢失计数，保护走路连续性。
+- 单元测试：在 `MapNavWalkPureTest.kt` 新增 `突发跳变离群值被拒且不污染距离` 回归测试。
+
+**③ 资产准备层断言与上游同步**
+- `scripts/prepare_maaend.py`：上游同步在 `SceneValleyIV.json` 新增了 `__ScenePrivateMapValleyIVAburreyQuarryEnterWorldAnchorWithPick` 与 `__ScenePrivateMapValleyIVValleyPassEnterWorldAnchorWithPick` 两个进世界锚点，构建期断言发现漏补。
+- 将枚举与总数更新至 20 个，全部安全补齐 `__ScenePrivateAnyExit` 末位兜底与 `on_error`。
+
+### 怎么验的
+- 纯逻辑闸门：`./scripts/verify_pure_logic.sh all` 全部通过（**1374/1374**）。
+- 国际化一致性检查：`python3 scripts/check_i18n_strings.py` 全部通过（中英 663 条无缺失）。
+- 本地构建与打包：`scripts/build_local.sh debug` 成功生成 `app-debug.apk`。
+- 全程未启动模拟器，严格遵守移动硬盘存储与上游子模块指针保护纪律。
+
+---
+
 ## 2026-09-30 · 采集/送货打通：MapFind（WorldMap）移植完成并真机验证
 
 ### 做了什么

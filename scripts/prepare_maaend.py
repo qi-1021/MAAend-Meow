@@ -225,7 +225,7 @@ AUTOCOLLECT_ENTERWORLD_FALLBACK_FILE = (
 # 节点名里用于「独立枚举」的标记：verify 会据此重扫产物，任何新增/改名都会被抓住。
 AUTOCOLLECT_ENTERWORLD_ANCHOR_MARKER = "EnterWorldAnchor"
 # 兜底应覆盖的锚点总数（与下面枚举逐项对应；verify 会独立复算并断言相等，防止以后再漏）。
-AUTOCOLLECT_ENTERWORLD_EXPECTED_COUNT = 18
+AUTOCOLLECT_ENTERWORLD_EXPECTED_COUNT = 20
 AUTOCOLLECT_ENTERWORLD_ANCHORS = {
     "resource/pipeline/SceneManager/SceneWuling.json": [
         # A 类 WithPick（MapFind 恒假）—— 其中 6 个上轮已补，其余 3 个本轮补。
@@ -245,8 +245,10 @@ AUTOCOLLECT_ENTERWORLD_ANCHORS = {
         "__ScenePrivateMapWulingTestAreaEnterWorldAnchor",
     ],
     "resource/pipeline/SceneManager/SceneValleyIV.json": [
-        # A 类 WithPick —— 上轮已补。
+        # A 类 WithPick —— TheHub、AburreyQuarry、ValleyPass。
         "__ScenePrivateMapValleyIVTheHubEnterWorldAnchorWithPick",
+        "__ScenePrivateMapValleyIVAburreyQuarryEnterWorldAnchorWithPick",
+        "__ScenePrivateMapValleyIVValleyPassEnterWorldAnchorWithPick",
         # B 类旧模板 —— PowerPlateau/OriginLodespring 上轮已补，OriginiumSciencePark 本轮补。
         "__ScenePrivateMapValleyIVPowerPlateauEnterWorldAnchor",
         "__ScenePrivateMapValleyIVOriginLodespringEnterWorldAnchor",

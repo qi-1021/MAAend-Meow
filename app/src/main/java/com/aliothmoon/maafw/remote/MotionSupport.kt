@@ -61,10 +61,13 @@ object MotionSupport {
     private const val ATTACK_BTN_X = 1030
     private const val ATTACK_BTN_Y = 551
 
-    /** 摇杆拖拽专用 contact；转向/点击各自独立 contact，多指并存 */
+    /** 摇杆拖拽专用 contact；转向/点击各自独立 contact，多指并存（完全对齐上游） */
     private const val CONTACT_JOYSTICK = 8
-    private const val CONTACT_CAMERA = 9
-    private const val CONTACT_ACTION = 10
+    private const val CONTACT_CAMERA = 1
+    private const val CONTACT_ACTION = 5 // 对齐 interact_button.contact_id = 5
+    private const val CONTACT_SPRINT = 2 // 对齐 sprint_button.contact_id = 2
+    private const val CONTACT_JUMP = 3   // 对齐 jump_button.contact_id = 3
+    private const val CONTACT_ATTACK = 4 // 对齐 attack_button.contact_id = 4
 
     /** 摇杆方向向量（index = 上游 Direction 枚举序）：8 向单位向量 */
     private val DIRECTION_VECTORS = arrayOf(
@@ -229,16 +232,16 @@ object MotionSupport {
     // ── 高层动作（对齐上游 action_buttons_）──
 
     fun interact(holdMs: Int = 50) {
-        tapButton(INTERACT_BTN_X, INTERACT_BTN_Y, holdMs)
+        tapButton(INTERACT_BTN_X, INTERACT_BTN_Y, holdMs, CONTACT_ACTION)
     }
 
     fun jump(holdMs: Int = 50) {
-        tapButton(JUMP_BTN_X, JUMP_BTN_Y, holdMs)
+        tapButton(JUMP_BTN_X, JUMP_BTN_Y, holdMs, CONTACT_JUMP)
     }
 
     /** 普攻一次（MapNavigateAction 的 FIGHT 动作）。 */
     fun attack(holdMs: Int = 50) {
-        tapButton(ATTACK_BTN_X, ATTACK_BTN_Y, holdMs)
+        tapButton(ATTACK_BTN_X, ATTACK_BTN_Y, holdMs, CONTACT_ATTACK)
     }
 
     /** 冲刺是 toggle 键：记录状态避免连按解除 */
@@ -248,10 +251,10 @@ object MotionSupport {
     @Synchronized
     fun sprint(enable: Boolean) {
         if (enable && !sprintDown) {
-            tapButton(SPRINT_BTN_X, SPRINT_BTN_Y)
+            tapButton(SPRINT_BTN_X, SPRINT_BTN_Y, contact = CONTACT_SPRINT)
             sprintDown = true
         } else if (!enable && sprintDown) {
-            tapButton(SPRINT_BTN_X, SPRINT_BTN_Y)
+            tapButton(SPRINT_BTN_X, SPRINT_BTN_Y, contact = CONTACT_SPRINT)
             sprintDown = false
         }
     }
