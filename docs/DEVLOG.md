@@ -140,7 +140,8 @@
 - 上游 HEAD 里还是旧值，是 `git -C upstream/maaend fetch --depth=1 origin e2462511` 取回来逐行比对确认的。
 
 ### 怎么验的
-- 纯逻辑闸门：`./scripts/verify_pure_logic.sh all` 全部通过（**1379/1379**）。
+- 纯逻辑闸门：`./scripts/verify_pure_logic.sh all` 全部通过（当时为 **1379/1379**，含本方案新增的
+  5 条测试；该方案当晚已证伪并撤回，现基线为 **1374/1374**）。
 - 国际化一致性检查：`python3 scripts/check_i18n_strings.py` 全部通过（中英 663 条无缺失）。
 - 本地构建与打包：`scripts/build_local.sh debug` 成功生成 `app-debug.apk`。
 - 全程未启动模拟器，严格遵守移动硬盘存储与上游子模块指针保护纪律。
