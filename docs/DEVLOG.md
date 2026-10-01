@@ -98,8 +98,16 @@
 - `scripts/prepare_maaend.py`：上游同步在 `SceneValleyIV.json` 新增了 `__ScenePrivateMapValleyIVAburreyQuarryEnterWorldAnchorWithPick` 与 `__ScenePrivateMapValleyIVValleyPassEnterWorldAnchorWithPick` 两个进世界锚点，构建期断言发现漏补。
 - 将枚举与总数更新至 20 个，全部安全补齐 `__ScenePrivateAnyExit` 末位兜底与 `on_error`。
 
+**④ 相机拖拽时序移植（上游 `e2462511` #6097，取回本地才确认）**
+- `touch_down_hold_ms 8 → 100`、`end_hold_ms 30 → 100`：上游注释写明「游戏逐帧采样触点，
+  与按下或抬起同帧的位移会整步丢失，两端停留要盖过负载高时的一帧」——这正是真机上
+  「转了但 yaw 不动」的另一种成因（整步丢）。
+- 起点改为横向中心对称 `center.x - dx/2`：被当成点击时落点离屏幕中心最近，
+  碰不到两侧的任务追踪与按钮。
+- 上游 HEAD 里还是旧值，是 `git -C upstream/maaend fetch --depth=1 origin e2462511` 取回来逐行比对确认的。
+
 ### 怎么验的
-- 纯逻辑闸门：`./scripts/verify_pure_logic.sh all` 全部通过（**1374/1374**）。
+- 纯逻辑闸门：`./scripts/verify_pure_logic.sh all` 全部通过（**1379/1379**）。
 - 国际化一致性检查：`python3 scripts/check_i18n_strings.py` 全部通过（中英 663 条无缺失）。
 - 本地构建与打包：`scripts/build_local.sh debug` 成功生成 `app-debug.apk`。
 - 全程未启动模拟器，严格遵守移动硬盘存储与上游子模块指针保护纪律。

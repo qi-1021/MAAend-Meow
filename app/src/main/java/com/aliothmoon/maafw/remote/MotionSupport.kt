@@ -43,11 +43,11 @@ object MotionSupport {
     private const val CAMERA_ORIGIN_X = FRAME_W / 2
     private const val CAMERA_ORIGIN_Y = FRAME_H / 2 - 96
 
-    /** 上游 `AdbCameraSwipeDriverConfig` 的分步拖拽时序。 */
+    /** 上游 `AdbCameraSwipeDriverConfig` 的分步拖拽时序（对齐 e2462511）。 */
     private const val CAMERA_MOVE_STEPS = 6
-    private const val CAMERA_TOUCH_DOWN_HOLD_MS = 8L
+    private const val CAMERA_TOUCH_DOWN_HOLD_MS = 100L
     private const val CAMERA_MOVE_STEP_DELAY_MS = 10L
-    private const val CAMERA_END_HOLD_MS = 30L
+    private const val CAMERA_END_HOLD_MS = 100L
 
     // ── 动作按钮（contact id 固定，互不干扰）──
     private const val SPRINT_BTN_X = 1166
@@ -133,12 +133,13 @@ object MotionSupport {
      */
     fun rotateView(dx: Int, dy: Int) {
         if (dx == 0 && dy == 0) return
-        val sx = CAMERA_ORIGIN_X
+        // 横向以中心对称起落（对齐 e2462511）：被当成点击时落点离屏幕中心最近，碰不到两侧的任务追踪和按钮
+        val sx = (CAMERA_ORIGIN_X - dx / 2).coerceIn(0, FRAME_W - 1)
         val sy = CAMERA_ORIGIN_Y
         val ex = (sx + dx).coerceIn(0, FRAME_W - 1)
         val ey = (sy + dy).coerceIn(0, FRAME_H - 1)
         // 分步移动模拟连续拖拽（上游 ExecuteStableDrag：down→hold→6 步 move→end hold→up），
-        // 避免一次大位移被游戏判定为 fling。
+        // 避免一次大位移被游戏判定为 fling。两端停留 100ms 盖过一帧逐帧采样，杜绝与 down/up 同帧位移丢步。
         touchDown(CONTACT_CAMERA, sx, sy)
         sleep(CAMERA_TOUCH_DOWN_HOLD_MS)
         for (i in 1..CAMERA_MOVE_STEPS) {
