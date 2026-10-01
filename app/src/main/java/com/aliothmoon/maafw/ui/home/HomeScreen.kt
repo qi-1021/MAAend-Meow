@@ -368,7 +368,7 @@ private fun ExpandToggle(expanded: Boolean, onToggle: () -> Unit) {
     }
 }
 
-/** 服务入口；启动/停止特权服务的开关还没做（见 TODO） */
+/** 服务入口：按钮按当前连接状态连接/断开特权服务，连接中禁用，避免并发 bind 把状态搅乱 */
 @Composable
 private fun ServiceActionButtons(state: SessionUiState, onIntent: (SessionIntent) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(MaaDesignTokens.Spacing.md)) {
