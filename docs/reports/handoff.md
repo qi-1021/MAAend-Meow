@@ -94,6 +94,15 @@ python3 scripts/debug_cli_bridge.py --listen 127.0.0.1:7788 --target 127.0.0.1:7
   `adb root` 后执行 APK 内 `lib/arm64/libshizuku.so` 即可）。
   只剩两步 UI 操作：**开「调试模式」**（CLI 才监听 7777）+ 在「补充包」里**下载 map-locate**（走镜像）。
   启停：`EMU_GPU=host bash /Volumes/mac第三磁盘/AndroidStudio/start_emulator.sh`（见同目录 `EMULATOR.md`）。
+
+  **模拟器启动的已知坑（今晚实测）**：`start_emulator.sh` 自带 60s 的 adb 超时偏短，冷启动常要 2-3 分钟，
+  超时报错不等于失败，先 `adb devices` 复查。用 `emu kill` 关掉之后再启动，出现过两次
+  **卡在日志最后一行 `Vulkan emulation initialized`**（qemu CPU 0.1%、无 adb、无监听端口）——
+  疑似 AVD 脏锁或宿主 GPU 上下文（显示器休眠时 `-gpu host` 可能拿不到 Metal）。处置顺序：
+  1) 杀干净 `qemu-system` 进程并删 `maaend_api35.avd/*.lock`；2) 隔一会儿用 `-gpu swiftshader_indirect`
+  重试（它虽跑不动游戏，但足够做 App 侧设置）；3) 仍不行再考虑 `-wipe-data` —— **注意那会清掉已导入的
+  30GB 游戏数据**（数据本体在 `/Volumes/mac第三磁盘/codes/game-rescue/`，可重导，但要花时间）。
+  躺平恢复后 `player.log` 里应能看到 `Vulkan emulation initialized` 之后的 `boot completed`。
 - **GrowBack 修复待复测**：培养舱 3 槽被种满（16~43h 成熟），提取分支当前不可达。
 - **root 隐藏模块未装**（Zygisk-Next / Shamiko + 排除列表）——用户明确要求过。
 - CreditShopping 等上游 draft PR #6055 合并后再整体更新。
