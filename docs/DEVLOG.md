@@ -88,10 +88,8 @@
   链路上是空操作——OpenCV 4.12.0 的 ARM 可名字化特性只有 `FP16/NEON/NEON_DOTPROD/NEON_FP16/NEON_BF16`
   （写 `SVE`/`SME` 一律 "unknown feature"），而 MaaDeps 这版 opencv4 因未启用 intrinsics feature
   **连 OpenCV 自身的 dispatch 都没编进去**。真正崩的是静态链入的 KleidiCV HAL，见下一条。
-- 仍未试的路：
-  ② 给加载 OpenCV 的进程注入 `OPENCV_CPU_DISABLE=NEON_DOTPROD,NEON_FP16,NEON_BF16,SVE`
-  （Shizuku 的 `newProcess` 可以带 env，但 `wrap.*` setprop 因属性名不能含 `:` 覆盖不到 `:shizuku_service`）；
-  ③ 真机。
+- 剩下唯一没试的是**真机**；至于给加载 OpenCV 的进程注入 `OPENCV_CPU_DISABLE` 那条，
+  当晚已证伪（它管不到 HAL），最终改走构建期补 `getauxval` 桩，见本文件最新条目。
 
 ### 怎么验的
 - 游戏进世界：observer 读图确认（`Explore` / `Bell of Recollection` `1/4` / 圆形小地图 / 摇杆与动作键）。
