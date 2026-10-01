@@ -105,15 +105,18 @@ python3 scripts/debug_cli_bridge.py --listen 127.0.0.1:7788 --target 127.0.0.1:7
   躺平恢复后 `player.log` 里应能看到 `Vulkan emulation initialized` 之后的 `boot completed`。
 - **能用/不能用的渲染配置（已实测）**：`-no-window -gpu host` = 游戏能进 3D 世界 ✓；
   有窗口的 `-gpu host` = 卡在崩溃上报弹窗 ✗；`swiftshader_indirect` = 游戏画面全黑 ✗。
-- **模拟器跑不了 pipeline 任务**：`:shizuku_service` 会 SIGILL 死亡（栈在
-  `libopencv_world4.so` 的 `cv::parallel_for_ → matchTemplate`，见
-  `game-rescue/tombstones/tombstone_00_emu_sigill_opencv.txt`）。模拟器 vCPU 暴露了 M4 的
-  `sve2/sme` 等新扩展，OpenCV 运行时派发选了模拟器实现不了的高级指令路径。**真机 arm64 正常**，
-  所以走路闭环调参仍以真机为准。**升级 emulator 到 canary 37.3.2 也无效**（同样 SIGILL，已存档对比 tombstone）。
+- **模拟器上的 pipeline SIGILL：已定位、已在构建期补掉（还差一次实测确认）**：
+  崩溃指令是 `kleidicv::sve2::float_conversion` 里的 `cnth/ptrue`（SVE）。根因是模拟器把宿主 M4 的
+  `sve2/sme` 当 HWCAP 透传给 guest，而 MaaDeps 的 OpenCV 4.12.0 静态链了 KleidiCV 0.5.0 HAL，
+  每个 API 的静态构造函数据此选中 SVE2 内核。`OPENCV_CPU_DISABLE` 管不到 HAL（4.12.0 的 ARM 名字
+  里根本没有 SVE/SME），升级 emulator（canary 37.3.2）同样无效，两条路都已实测排除。
+  **解法**：把 `getauxval@plt` 桩改成返回 0——全库 195 处 `getauxval` 调用全部来自 KleidiCV 各 API 的
+  静态初始化且共用这一个桩，改后所有探测都认为「没有高级特性」，KleidiCV 回退 NEON 基线（即任何不支持
+  SVE2 的真机本来就会走的路径）。实现见 `scripts/setup_maa_framework.py` 的 `patch_kleidicv_getauxval()`，
+  铺完 .so 后自动执行、字节不符即报错、幂等。**只需在模拟器上跑一次任务确认 SIGILL 消失**（记得用完彻底关机）。
 - **虚拟机纪律（用户要求）**：不用时**彻底关闭**（`adb emu kill` + 确认无 `qemu-system` 残留、
   无 5554/5555 监听、AVD 目录无 `.lock`），不要留挂起实例；并**尽量少用虚拟手机**，它性能开销大。
-  未尝试的替代路线：给加载 OpenCV 的特权进程注入
-  `OPENCV_CPU_DISABLE=NEON_DOTPROD,NEON_FP16,NEON_BF16,SVE`（需保证在 dlopen 之前生效），或直接用真机。
+  失败的那条环境变量注入路线已从代码里撤掉，别再重试。
 - **清空重建的完整配方**：删 `userdata-qemu.img.qcow2` → 装 `base.apk` → 首启建目录 →
   `tar xf -` 流式灌 30GB → 解 CE/DE → 用 `pm list packages -U` 的 uid 统一三个目录属主 + `restorecon`
   → 装 App/Shizuku（`libshizuku.so` 起 root server）→ 开调试模式 → 下 map-locate 补充包。
