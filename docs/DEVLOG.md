@@ -8,11 +8,50 @@
 
 ---
 
+## 2026-10-01 · 清空重建模拟器（手机替代方案）+ 查出 MaaFW 在模拟器上 SIGILL 的根因
+
+### 做了什么
+
+**① 按"清空模拟器 → 只装终末地 → 重新下载编译"重建**
+- 删掉 AVD 的 `userdata-qemu.img.qcow2`（37G）做数据区清空；`-wipe-data` 也试过，崩溃与数据无关。
+- 装 `game-rescue/apk/base.apk`（1.6G），首启建目录后用 **流式解包** 灌 30GB 外部数据
+  （`adb shell 'cd /sdcard/Android/data && tar xf -' < external_data.tar`，避免设备端再落一份 30GB 中转，
+  数据分区只有 64GB 会不够）。内部 CE/DE 解包后 **按 `pm list packages -U` 的权威 uid 统一三个目录的属主**
+  （tar 里带的是原机 uid，直接 chown 会拿到错的值），再 `restorecon`。
+- 重编 App（`scripts/build_local.sh debug`）、装 Shizuku 并用 **APK 内 `lib/arm64/libshizuku.so` 直接启动 server（root）**、
+  开调试模式、下载 map-locate 补充包（23M，`pi/resource/image/MapLocator/` 6 个文件）。
+
+**② 模拟器跑游戏的可用配置（关键）**
+- **`-no-window -gpu host`**：能进 3D 世界（完整 HUD + 左上小地图 + 任务进度，0 个 `HG_ALWAYS_ASSERT`）。
+- 有窗口的 `-gpu host` 会卡在 Vulkan 初始化后的 **崩溃上报同意弹窗**（`Showing crashdialog to get consent`），
+  疑似显示器休眠时拿不到 Metal 上下文；`swiftshader_indirect` 能启动但游戏画面全黑。**别用这两种。**
+- `start_emulator.sh` 自带的 60s adb 超时短于冷启动，超时报错≠失败。
+
+**③ MaaFW 在模拟器上跑任务会 SIGILL（根因已定位）**
+- 现象：`start` 驱动任务后 `:shizuku_service` 立刻死亡，App 报
+  `privileged process died mid-run, forcing abort`，CLI 随即无响应。
+- tombstone（已存档 `game-rescue/tombstones/tombstone_00_emu_sigill_opencv.txt`）：
+  `signal 4 (SIGILL), code 1 (ILL_ILLOPC)`，栈是
+  `libopencv_world4.so (cv::parallel_for_ → cv::Mat::convertTo → cv::matchTemplate)`
+  ← `libMaaFramework.so (MaaNS::VisionNS::TemplateMatcher::template_match)`。
+- 判断：模拟器 vCPU 把宿主 M4 的 `sve2/sme/i8mm` 等新扩展一并暴露，OpenCV 运行时派发据此选了高级指令路径，
+  而该路径在模拟器上触发非法指令。**真机 arm64 不受影响**（这也是 phone 上一切正常的原因）。
+- 尝试过 `-qemu -cpu max,sve=off,sme=off`：模拟器起不来，参数格式待再试。
+
+### 怎么验的
+- 游戏进世界：observer 读图确认（`Explore` / `Bell of Recollection` `1/4` / 圆形小地图 / 摇杆与动作键）。
+- 数据完整性：外部 30GB、CE 20M、DE 128K，uid 10207 全目录一致。
+- 纯逻辑闸门不受影响：1374/1374。
+
+### 未做 / 未解
+- 模拟器上跑不了 pipeline 任务（SIGILL），所以**走路闭环的调参仍然需要真机**，或在模拟器上先解决 CPU 特性屏蔽。
+- 游戏曾报 `Error code: 1103`（取不到版本数据），点 Confirm 重试后正常进世界。
+
 ## 2026-10-01 · 触摸驱动多指对齐 + 走路闭环 170px 假匹配物理步长离群抑制
 
 ### 做了什么
 
-**① 触摸驱动接触点 ID（contact_id）全量对齐上游 C++ 布局**
+**① 触摸驱动接触点 ID（contact_id）与滑动时序全量对齐上游 C++ 布局**
 - 现场排查与对齐上游 `agent/cpp-algo/source/MapNavigator/Backend/Adb/`：
   - `adb_camera_swipe_driver.h:15`：`contact_id = 1`（此前误设为 9，在部分 Android 驱动/虚拟触摸注入器超出 5 点槽位上限被静默丢弃导致视角不转、yaw 位级不变）。
   - `adb_input_backend.h:29-35` `AdbActionButtonLayout`：
@@ -20,7 +59,10 @@
     - `sprint_button.contact_id = 2`
     - `jump_button.contact_id = 3`
     - `attack_button.contact_id = 4`
-  - 修改 `MotionSupport.kt`：`CONTACT_CAMERA = 1`，`CONTACT_ACTION = 5`，`CONTACT_SPRINT = 2`，`CONTACT_JUMP = 3`，`CONTACT_ATTACK = 4`。
+  - 同步上游 **`e2462511` (#6097 ADB 转向丢步与起落对称修复)**：
+    - `adb_camera_swipe_driver.h:27,30`：两端停留时间 `touch_down_hold_ms = 100ms`, `end_hold_ms = 100ms`（原 8ms / 30ms）。游戏逐帧采样触点，与按下或抬起同帧的位移会整步丢失；延长两端停留确保覆盖一帧完整采样，消除转视角丢步。
+    - `adb_camera_swipe_driver.cpp:94`：横向中心对称起落 `sx = 640 - dx/2, ex = sx + dx`。被当成点击时落点最靠近屏幕中心，杜绝误触屏幕两侧的任务追踪或动作按钮。
+  - 修改 `MotionSupport.kt`：`CONTACT_CAMERA = 1`，`CONTACT_ACTION = 5`，`CONTACT_SPRINT = 2`，`CONTACT_JUMP = 3`，`CONTACT_ATTACK = 4`，更新分步滑动时序与中心对称坐标。
   - `tapButton` 动作按钮（交互/冲刺/跳跃/攻击）调用时传入专有 contact_id，避免跨功能触摸 ID 碰撞或被底层驱动丢弃。
 
 **② 走路闭环步长突变抑制（单拍 ~170px 假匹配抑制）**

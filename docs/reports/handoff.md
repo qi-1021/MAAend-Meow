@@ -103,6 +103,16 @@ python3 scripts/debug_cli_bridge.py --listen 127.0.0.1:7788 --target 127.0.0.1:7
   重试（它虽跑不动游戏，但足够做 App 侧设置）；3) 仍不行再考虑 `-wipe-data` —— **注意那会清掉已导入的
   30GB 游戏数据**（数据本体在 `/Volumes/mac第三磁盘/codes/game-rescue/`，可重导，但要花时间）。
   躺平恢复后 `player.log` 里应能看到 `Vulkan emulation initialized` 之后的 `boot completed`。
+- **能用/不能用的渲染配置（已实测）**：`-no-window -gpu host` = 游戏能进 3D 世界 ✓；
+  有窗口的 `-gpu host` = 卡在崩溃上报弹窗 ✗；`swiftshader_indirect` = 游戏画面全黑 ✗。
+- **模拟器跑不了 pipeline 任务**：`:shizuku_service` 会 SIGILL 死亡（栈在
+  `libopencv_world4.so` 的 `cv::parallel_for_ → matchTemplate`，见
+  `game-rescue/tombstones/tombstone_00_emu_sigill_opencv.txt`）。模拟器 vCPU 暴露了 M4 的
+  `sve2/sme` 等新扩展，OpenCV 运行时派发选了模拟器实现不了的高级指令路径。**真机 arm64 正常**，
+  所以走路闭环调参仍以真机为准，或在模拟器上先想办法屏蔽这些扩展。
+- **清空重建的完整配方**：删 `userdata-qemu.img.qcow2` → 装 `base.apk` → 首启建目录 →
+  `tar xf -` 流式灌 30GB → 解 CE/DE → 用 `pm list packages -U` 的 uid 统一三个目录属主 + `restorecon`
+  → 装 App/Shizuku（`libshizuku.so` 起 root server）→ 开调试模式 → 下 map-locate 补充包。
 - **GrowBack 修复待复测**：培养舱 3 槽被种满（16~43h 成熟），提取分支当前不可达。
 - **root 隐藏模块未装**（Zygisk-Next / Shamiko + 排除列表）——用户明确要求过。
 - CreditShopping 等上游 draft PR #6055 合并后再整体更新。
