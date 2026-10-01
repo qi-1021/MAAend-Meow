@@ -780,4 +780,7 @@
     <string name="supplement_error_network">下载失败：%1$s</string>
     <string name="supplement_error_verify_failed">校验失败：下载的内容与清单不一致，已丢弃。</string>
     <string name="supplement_installed_total">已安装：%1$s</string>
+    <string name="supplement_pack_version_format">版本 %1$s</string>
+    <string name="supplement_pack_version_unknown">版本未知</string>
+    <string name="supplement_pack_outdated_format">已安装版本 %1$s，低于要求的 %2$s；建议删除后重新下载。</string>
 </resources>

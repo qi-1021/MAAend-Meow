@@ -51,6 +51,35 @@ object SupplementPackLocal {
         else -> "${bytes / MIB} MiB"
     }
 
+    // ───────────────────────── 已装版本 ─────────────────────────
+
+    /** 已装版本标记文件名；直接放在包目录里，不新造目录结构。 */
+    const val VERSION_FILE = ".installed-version"
+
+    /**
+     * 读取 `[root]/.installed-version`：包安装成功时由安装器写入。
+     *
+     * 返回 null 表示「无从得知」（没装过、旧版本安装的没有这个文件、或文件不可读）——
+     * 而不是空串，便于界面区分「版本未知」与「版本为空」。
+     */
+    fun readInstalledVersion(root: File): String? = try {
+        val file = File(root, VERSION_FILE)
+        if (file.isFile) file.readText().trim().ifBlank { null } else null
+    } catch (_: IOException) {
+        null
+    }
+
+    /**
+     * 落盘已装版本。空白版本是空操作：没有版本的内容不值得留下一个「已装 X」的假象。
+     *
+     * 写在包目录内部，[scanLocal] 只遍历清单里的文件，因此这个标记不会干扰状态判定。
+     */
+    fun writeInstalledVersion(root: File, version: String) {
+        if (version.isBlank()) return
+        root.mkdirs()
+        File(root, VERSION_FILE).writeText(version.trim() + "\n")
+    }
+
     private const val KIB = 1024L
     private const val MIB = KIB * 1024
 }

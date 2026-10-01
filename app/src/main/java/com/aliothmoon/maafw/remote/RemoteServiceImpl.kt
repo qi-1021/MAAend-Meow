@@ -12,6 +12,7 @@ import com.aliothmoon.maafw.cli.DebugCliHost
 import com.aliothmoon.maafw.cli.DebugCliOcrResult
 import com.aliothmoon.maafw.cli.DebugCliRelayClient
 import com.aliothmoon.maafw.cli.DebugCliServer
+import com.aliothmoon.maafw.cli.DebugCliSupplementStatus
 import com.aliothmoon.maafw.constant.DefaultDisplayConfig
 import com.aliothmoon.maafw.constant.DisplayMode
 import com.aliothmoon.maafw.diagnostics.RunDiagnostics
@@ -21,6 +22,8 @@ import com.aliothmoon.maafw.remote.internal.ActivityUtils
 import com.aliothmoon.maafw.remote.internal.AppWatchdog
 import com.aliothmoon.maafw.remote.internal.PermissionGrantHelper
 import com.aliothmoon.maafw.service.AccessibilityHelperService
+import com.aliothmoon.maafw.supplement.SupplementPackLocal
+import com.aliothmoon.maafw.supplement.SupplementVersion
 import com.aliothmoon.maafw.remote.internal.PowerController
 import com.aliothmoon.maafw.remote.internal.PrimaryDisplayManager
 import com.aliothmoon.maafw.remote.internal.ScreenManager
@@ -519,13 +522,32 @@ class RemoteServiceImpl : RemoteService.Stub() {
         /** 截图落点：`<root>/files/cli/`（logDir 是 `<root>/files/log`）。 */
         private val cliDir: File = File(File(logDir).parentFile, "cli")
 
+        /** 补充包目录：与 logDir 同级的 `<root>/files/supplements`（见 SupplementPackInstaller）。 */
+        private val supplementsDir: File = File(File(logDir).parentFile, "supplements")
+
         override fun context(): DebugCliContext = DebugCliContext(
             projectRoot = runner.debugProjectRoot(),
             controllerReady = runner.debugControllerReady(),
             taskRunning = runner.isRunning(),
             reportDir = File(logDir, RunDiagnosticsPolicy.REPORT_DIR).absolutePath,
             logDir = logDir,
+            supplements = supplementStatuses(),
         )
+
+        /**
+         * 补充包诊断：包清单（要求版本）是 App 侧常量，已装版本从各包目录里的版本标记读。
+         * 特权进程拿不到 app 的 assets，所以不读清单 JSON——要求版本本来就不来自清单。
+         */
+        private fun supplementStatuses(): List<DebugCliSupplementStatus> =
+            SupplementVersion.REQUIRED.keys.map { packId ->
+                DebugCliSupplementStatus(
+                    packId = packId,
+                    installedVersion = SupplementPackLocal.readInstalledVersion(
+                        File(supplementsDir, packId),
+                    ),
+                    requiredVersion = SupplementVersion.requiredFor(packId),
+                )
+            }
 
         override fun newestReportFile(): File? {
             val dir = File(logDir, RunDiagnosticsPolicy.REPORT_DIR)

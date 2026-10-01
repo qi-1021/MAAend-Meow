@@ -126,4 +126,44 @@ class SupplementPackLocalTest {
         assertEquals("22 MiB", SupplementPackLocal.readableSize(23_083_663))
         assertTrue(SupplementPackLocal.readableSize(141_274_234).endsWith("MiB"))
     }
+
+    // ───────────────────── 已装版本标记 ─────────────────────
+
+    @Test
+    fun `版本落盘后可读回`() {
+        withTempRoot { root ->
+            SupplementPackLocal.writeInstalledVersion(root, "2026.9.28")
+            assertEquals("2026.9.28", SupplementPackLocal.readInstalledVersion(root))
+        }
+    }
+
+    @Test
+    fun `未写版本时读回为 null`() {
+        withTempRoot { root ->
+            assertNull(SupplementPackLocal.readInstalledVersion(root))
+        }
+    }
+
+    @Test
+    fun `空白版本不落盘`() {
+        withTempRoot { root ->
+            SupplementPackLocal.writeInstalledVersion(root, "   ")
+            assertNull(SupplementPackLocal.readInstalledVersion(root))
+        }
+    }
+
+    @Test
+    fun `版本标记不干扰本地扫描与状态判定`() {
+        withTempRoot { root ->
+            File(root, "map/a.txt").write(hello)
+            File(root, "map/b.bin").write(big)
+            SupplementPackLocal.writeInstalledVersion(root, "2026.9.28")
+
+            val target = pack()
+            val local = SupplementPackLocal.scanLocal(root, target)
+
+            assertEquals(setOf("map/a.txt", "map/b.bin"), local.keys)
+            assertEquals(SupplementPack.State.INSTALLED, SupplementPack.stateOf(target, local))
+        }
+    }
 }

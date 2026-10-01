@@ -5,7 +5,8 @@
     "blob 是 git blob 的 SHA-1，App 下载后按 git 的算法自算核对",
     "（SHA1(\"blob <size>\\0\" + content)）——这是完整性校验，不是安全边界。",
     "选 SHA-1 而不是 SHA-256 的原因：GitHub API 免费给前者，后者要先把 204 MiB 下下来才算得出。",
-    "nameKey/summaryKey 只是可读的对应说明：运行期查找走 SupplementPackText 的静态映射（getIdentifier 会被 release 的资源压缩裁掉）。"
+    "nameKey/summaryKey 只是可读的对应说明：运行期查找走 SupplementPackText 的静态映射（getIdentifier 会被 release 的资源压缩裁掉）。",
+    "每个包的 version 是这一份内容的声明版本（日期串），安装成功时落盘；设置页与调试 CLI status 用它核对装的是哪一份。"
   ],
   "schema": 1,
   "generatedAt": "2026-09-28",
@@ -19,6 +20,7 @@
       "id": "map-locate",
       "nameKey": "supplement_pack_map_locate_name",
       "summaryKey": "supplement_pack_map_locate_summary",
+      "version": "2026.9.28",
       "requires": [],
       "totalBytes": 23791447,
       "files": [
@@ -53,6 +55,7 @@
       "id": "map-navmesh",
       "nameKey": "supplement_pack_map_navmesh_name",
       "summaryKey": "supplement_pack_map_navmesh_summary",
+      "version": "2026.9.28",
       "requires": [
         "map-locate"
       ],
@@ -79,6 +82,7 @@
       "id": "detect",
       "nameKey": "supplement_pack_detect_name",
       "summaryKey": "supplement_pack_detect_summary",
+      "version": "2026.9.28",
       "requires": [],
       "totalBytes": 48774163,
       "files": [

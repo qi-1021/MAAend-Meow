@@ -73,6 +73,24 @@ class SupplementPackTest {
     }
 
     @Test
+    fun `包的声明版本被解析 缺省为空串`() {
+        val withVersion = SupplementPack.parseManifest(
+            """{"schema":1,"source":{"repo":"a","commit":"b","baseUrl":"c"},
+                "packs":[{"id":"x","nameKey":"n","summaryKey":"s","version":"2026.9.28","requires":[],
+                          "files":[{"path":"p","size":1,"blob":"d"}]}]}""",
+        )!!
+        assertEquals("2026.9.28", withVersion.packs[0].version)
+
+        // 旧清单没有 version 也要能解析，只是界面上显示成「版本未知」
+        val withoutVersion = SupplementPack.parseManifest(
+            """{"schema":1,"source":{"repo":"a","commit":"b","baseUrl":"c"},
+                "packs":[{"id":"x","nameKey":"n","summaryKey":"s","requires":[],
+                          "files":[{"path":"p","size":1,"blob":"d"}]}]}""",
+        )!!
+        assertEquals("", withoutVersion.packs[0].version)
+    }
+
+    @Test
     fun `结构不对时返回 null 而不是抛异常`() {
         assertNull(SupplementPack.parseManifest(null))
         assertNull(SupplementPack.parseManifest("不是 json"))

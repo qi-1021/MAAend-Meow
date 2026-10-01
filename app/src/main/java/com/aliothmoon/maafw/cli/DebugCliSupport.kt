@@ -32,6 +32,20 @@ const val DEBUG_CLI_MAX_TAIL = 2000
 const val DEBUG_CLI_MAX_ROOT_CMD = 4096
 
 /**
+ * 一个补充包在 `status` 里的诊断快照：包 id + 已装版本 + App 要求的最低版本。
+ *
+ * 本地化包名只在 app 进程有，特权进程只拿得到稳定的包 id——诊断要的是可比对的身份。
+ */
+data class DebugCliSupplementStatus(
+    /** 包 id（稳定标识；本地化包名在 app 进程，特权进程只拿得到 id）。 */
+    val packId: String,
+    /** 已落盘的安装版本；null = 未安装或旧版本没留版本标记。 */
+    val installedVersion: String?,
+    /** App 要求的最低版本；空串 = 对该包无要求。 */
+    val requiredVersion: String,
+)
+
+/**
  * 命令解析所需的**只读上下文快照**。
  *
  * 解析阶段只拿它做校验（controller 没好就拒绝 screenshot/ocr/run），不读活对象。
@@ -54,6 +68,13 @@ data class DebugCliContext(
     val connection: DebugCliConnection = DebugCliConnection.LOOPBACK,
     /** 本连接是否已 `auth` 成功；回环连接由服务端视为已鉴权。 */
     val authenticated: Boolean = false,
+    /**
+     * 补充包装载诊断：包 id + 已装版本 + App 要求的最低版本。
+     *
+     * 单独拎出来而不是塞进别处：`status` 要能回答「镜像回退拿到的到底是不是对的那份」，
+     * 这就得把落盘的已装版本和 App 的要求摆在一起。空列表 = 该进程取不到补充包信息。
+     */
+    val supplements: List<DebugCliSupplementStatus> = emptyList(),
 ) {
     /**
      * 是否必须鉴权：开了远程调试、连接来自非回环、且尚未鉴权。
@@ -352,7 +373,18 @@ object DebugCliSupport {
         appendLine("task         : ${if (context.taskRunning) "running" else "idle"}")
         appendLine("report dir   : ${context.reportDir ?: "-"}")
         appendLine("log dir      : ${context.logDir ?: "-"}")
+        appendLine("supplements  : ${supplementStatusText(context.supplements)}")
     }.trimEnd()
+
+    /** 补充包诊断行：`id(installed=X, required=Y)`，多个用 `; ` 分隔；无则 `-`。 */
+    private fun supplementStatusText(supplements: List<DebugCliSupplementStatus>): String {
+        if (supplements.isEmpty()) return "-"
+        return supplements.joinToString("; ") { status ->
+            val installed = status.installedVersion?.takeIf { it.isNotBlank() } ?: "未安装"
+            val required = status.requiredVersion.ifBlank { "-" }
+            "${status.packId}(installed=$installed, required=$required)"
+        }
+    }
 
     private fun noArgs(
         command: String,

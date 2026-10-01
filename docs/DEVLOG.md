@@ -7,6 +7,42 @@
 > 追加格式：新条目放在最上面，标题写 `## YYYY-MM-DD`，正文用「做了什么 / 为什么 / 怎么验的 / 教训 / 未做」几段。
 
 ---
+## 2026-10-01 · 补充包版本号 + PathHeatmap 由粗到细加速（两条 lane 并行）
+
+### 做了什么
+
+**① 三个补充包有了版本号（用户提议：用来验证）**
+- 清单 `app/src/main/assets/supplement-packs.json` 给每个包加 `version`（现为 `2026.9.28`）；
+- 安装成功后在 `<externalFilesDir>/supplements/<packId>/.installed-version` 记下已装版本；
+- 设置页那一行现在能看到已装版本，低于 App 要求的最低版本时以警示色提示；
+- 调试 CLI 的 `status` 增加一行 `supplements : id(installed=…, required=…)`；
+- 纯逻辑 `SupplementVersion.kt`（版本比较 / 是否过期 / App 侧所需版本表）独立可测。
+→ 意义：下载走镜像回退时能确认拿到的是不是对的那份；升级后能立刻看出哪些包是旧的。
+
+**② PathHeatmap 从「全图逐点细搜」改成「由粗到细」（性能）**
+- 先在 `stride=4` 的稀疏网格上精确打分（求值窗口数 ≈ 1/16），取「粗分 ≥ max−margin」且前 16 的点作候选，
+  只在候选的 ±4 邻域内做全分辨率 ZNCC（真峰因相关面被平滑而足够宽，邻域必入选，故不漏峰）；
+- 掩膜内 `ΣI`/`ΣI²` 改用「掩膜逐行区间的前缀和」，每窗口 O(模板高) 而非 O(有效像素数)；
+- `scoreAt` 原样保留作**参考路径**，等价性测试用它重建整张相关面逐一比对。
+→ 实测（本机 JVM、同输入）：400×400/模板 64 提速 **11.7×**；1000×1000/模板 128 提速 **15.0×**；
+   200×160 小图约 1.2–1.3×（固定开销占比高，但不退化）。峰值位置与 best 分 14/14 逐位一致，
+   top-5 位置与分数 14/14 一致；`psr` 相对偏差 ≤3.6%（旁瓣统计只在粗网格上估计，测试容差 5%）。
+
+### 怎么验的
+- 纯逻辑闸门 `scripts/verify_pure_logic.sh all`：**1392/1392**。
+- `python3 scripts/check_i18n_strings.py`：中英各 666 条，错误 0。
+- `scripts/build_local.sh debug`：**BUILD SUCCESSFUL（38s）**——Android 侧改动（UI/安装器/RemoteServiceImpl）全部编译通过。
+- 两条 lane 并行实现、文件所有权互不重叠；我独立复核双方在 `verify_pure_logic.sh` 的注册项都还在（7 处），
+  并补跑了 lane 没跑的 Gradle 构建。
+
+### 未做
+- 设备侧行为未验证（用户要求暂不使用虚拟手机）：版本号要在真实下载后看数字；PathHeatmap 的端到端收益要在设备上量；
+  `psr` 的 5% 容差是启发式的。
+- GrowBack：本轮未动。其失败在「动作」而非识别（`RepeatUntilFoundAction` 3 次都没等到 `GrowthChamberGrowViewIn`），
+  定位需要失败瞬间的抓帧，属设备侧工作；未做无证据的时序盲改。
+
+---
+
 ## 2026-10-01 · 无实物定位并修掉模拟器上的 OpenCV SIGILL（补 OpenCV 的 getauxval 桩）
 
 ### 它到底崩在哪（纯静态分析，未开模拟器）

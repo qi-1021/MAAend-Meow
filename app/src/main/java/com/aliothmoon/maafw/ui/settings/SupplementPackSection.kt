@@ -34,6 +34,7 @@ import com.aliothmoon.maafw.settings.SettingsIntent
 import com.aliothmoon.maafw.supplement.SupplementPack
 import com.aliothmoon.maafw.supplement.SupplementPackText
 import com.aliothmoon.maafw.supplement.SupplementPackInstaller
+import com.aliothmoon.maafw.supplement.SupplementVersion
 import com.aliothmoon.maafw.theme.MaaDesignTokens
 import com.aliothmoon.maafw.theme.MaaTheme
 import com.aliothmoon.maafw.ui.components.MaaButton
@@ -123,6 +124,28 @@ private fun SupplementPackRow(
         null
     }
 
+    // 已装版本：让人一眼看出装的是哪一份（镜像回退拿到的内容是不是对的，靠它核对）。
+    val installedVersionText = if (packState.state == SupplementPack.State.INSTALLED) {
+        val version = packState.installedVersion
+        if (version.isNullOrBlank()) {
+            stringResource(R.string.supplement_pack_version_unknown)
+        } else {
+            stringResource(R.string.supplement_pack_version_format, version)
+        }
+    } else {
+        null
+    }
+    // 低于 App 要求的最低版本 → 明确提示（不阻止使用，只建议重下）。
+    val outdatedText = if (SupplementVersion.isOutdated(pack.id, packState.installedVersion)) {
+        stringResource(
+            R.string.supplement_pack_outdated_format,
+            packState.installedVersion.orEmpty(),
+            SupplementVersion.requiredFor(pack.id),
+        )
+    } else {
+        null
+    }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(MaaDesignTokens.Spacing.xs),
@@ -170,6 +193,26 @@ private fun SupplementPackRow(
                 text = sizeText,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        installedVersionText?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        outdatedText?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
 

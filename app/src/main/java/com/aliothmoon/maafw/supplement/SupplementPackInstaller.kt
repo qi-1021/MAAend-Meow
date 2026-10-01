@@ -74,6 +74,8 @@ class SupplementPackInstaller(
         val progress: Progress?,
         /** null = 无错 */
         val error: UiText?,
+        /** 已落盘的安装版本；null = 未知（未装 / 旧版本安装没有版本标记） */
+        val installedVersion: String? = null,
     )
 
     data class UiState(
@@ -152,7 +154,12 @@ class SupplementPackInstaller(
         scope.launch {
             withContext(MaaDispatchers.IO) { packDir(packId).deleteRecursively() }
             updatePack(packId) {
-                it.copy(state = SupplementPack.State.NOT_INSTALLED, progress = null, error = null)
+                it.copy(
+                    state = SupplementPack.State.NOT_INSTALLED,
+                    progress = null,
+                    error = null,
+                    installedVersion = null,
+                )
             }
         }
     }
@@ -197,6 +204,7 @@ class SupplementPackInstaller(
         state = SupplementPack.stateOf(pack, SupplementPackLocal.scanLocal(packDir(pack.id), pack)),
         progress = null,
         error = null,
+        installedVersion = SupplementPackLocal.readInstalledVersion(packDir(pack.id)),
     )
 
     // ───────────────────────── 预检 ─────────────────────────
@@ -339,11 +347,16 @@ class SupplementPackInstaller(
                     completed += spec.size
                 }
 
+                // 文件全部校验通过并到位后，才把「这一份是哪版」记下来；
+                // 记在包目录里（不新造目录），最终状态与标记同进同出。
+                SupplementPackLocal.writeInstalledVersion(packDir(pack.id), pack.version)
+
                 updatePack(pack.id, token) {
                     it.copy(
                         state = SupplementPack.State.INSTALLED,
                         progress = null,
                         error = null,
+                        installedVersion = pack.version.trim().ifBlank { null },
                     )
                 }
             } catch (e: CancellationException) {

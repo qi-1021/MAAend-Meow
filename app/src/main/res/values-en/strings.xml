@@ -791,4 +791,7 @@
     <string name="supplement_error_network">Download failed: %1$s</string>
     <string name="supplement_error_verify_failed">Verification failed: the download did not match the manifest and was discarded.</string>
     <string name="supplement_installed_total">Installed: %1$s</string>
+    <string name="supplement_pack_version_format">Version %1$s</string>
+    <string name="supplement_pack_version_unknown">Version unknown</string>
+    <string name="supplement_pack_outdated_format">Installed version %1$s is below the required %2$s; remove and re-download.</string>
 </resources>

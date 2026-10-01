@@ -126,6 +126,7 @@ MAIN_FILES=(
   "$SRC/WorldMapImagePure.kt"
   "$SUP/SupplementPack.kt"
   "$SUP/SupplementPackLocal.kt"
+  "$SUP/SupplementVersion.kt"
   "$DIAG/RunDiagnosticsPolicy.kt"
   "$DIAG/GoodsProbeDumpPolicy.kt"
     "$CLI/DebugCliSupport.kt"
@@ -187,6 +188,7 @@ TEST_FILES=(
   "$TST/MapLocatorCalibrationTest.kt"
   "$TST/MapLocatorRefinePureTest.kt"
   "$TST/MapLocatorPathHeatmapTest.kt"
+  "$TST/MapLocatorPathHeatmapOptTest.kt"
   "$TST/MapLocatorHeatmapPipelineTest.kt"
   "$TST/MapLocatorTrackingTest.kt"
   "$TST/MapLocateAssertPureTest.kt"
@@ -196,6 +198,7 @@ TEST_FILES=(
   "$TST/WorldMapImagePureTest.kt"
   "$TSUP/SupplementPackTest.kt"
   "$TSUP/SupplementPackLocalTest.kt"
+  "$TSUP/SupplementVersionTest.kt"
   "$TDIAG/RunDiagnosticsPolicyTest.kt"
   "$TDIAG/GoodsProbeDumpPolicyTest.kt"
     "$TCLI/DebugCliSupportTest.kt"
@@ -257,6 +260,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.MapLocatorCalibrationTest
   com.aliothmoon.maafw.remote.MapLocatorRefinePureTest
   com.aliothmoon.maafw.remote.MapLocatorPathHeatmapTest
+  com.aliothmoon.maafw.remote.MapLocatorPathHeatmapOptTest
   com.aliothmoon.maafw.remote.MapLocatorHeatmapPipelineTest
   com.aliothmoon.maafw.remote.MapLocatorTrackingTest
   com.aliothmoon.maafw.remote.MapLocateAssertPureTest
@@ -266,6 +270,7 @@ TEST_CLASSES=(
   com.aliothmoon.maafw.remote.WorldMapImagePureTest
   com.aliothmoon.maafw.supplement.SupplementPackTest
   com.aliothmoon.maafw.supplement.SupplementPackLocalTest
+  com.aliothmoon.maafw.supplement.SupplementVersionTest
   com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest
   com.aliothmoon.maafw.diagnostics.GoodsProbeDumpPolicyTest
     com.aliothmoon.maafw.cli.DebugCliSupportTest
@@ -426,6 +431,7 @@ fun main() {
         "com.aliothmoon.maafw.remote.MapLocatorCalibrationTest",
         "com.aliothmoon.maafw.remote.MapLocatorRefinePureTest",
         "com.aliothmoon.maafw.remote.MapLocatorPathHeatmapTest",
+        "com.aliothmoon.maafw.remote.MapLocatorPathHeatmapOptTest",
         "com.aliothmoon.maafw.remote.MapLocatorHeatmapPipelineTest",
         "com.aliothmoon.maafw.remote.MapLocatorTrackingTest",
         "com.aliothmoon.maafw.remote.MapLocateAssertPureTest",
@@ -435,6 +441,7 @@ fun main() {
         "com.aliothmoon.maafw.remote.WorldMapImagePureTest",
         "com.aliothmoon.maafw.supplement.SupplementPackTest",
         "com.aliothmoon.maafw.supplement.SupplementPackLocalTest",
+        "com.aliothmoon.maafw.supplement.SupplementVersionTest",
         "com.aliothmoon.maafw.diagnostics.RunDiagnosticsPolicyTest",
         "com.aliothmoon.maafw.diagnostics.GoodsProbeDumpPolicyTest",
         "com.aliothmoon.maafw.cli.DebugCliSupportTest",

@@ -565,6 +565,27 @@ class DebugCliSupportTest {
         assertTrue(text.contains("(未设置)"))
     }
 
+    @Test
+    fun `statusText 渲染补充包已装版本与要求版本`() {
+        val text = DebugCliSupport.statusText(
+            ctx().copy(
+                supplements = listOf(
+                    DebugCliSupplementStatus("map-locate", "2026.9.28", "2026.9.28"),
+                    DebugCliSupplementStatus("detect", null, "2026.9.28"),
+                ),
+            ),
+        )
+        assertTrue(text.contains("supplements"))
+        assertTrue(text.contains("map-locate(installed=2026.9.28, required=2026.9.28)"))
+        assertTrue(text.contains("detect(installed=未安装, required=2026.9.28)"))
+    }
+
+    @Test
+    fun `statusText 无补充包信息时给占位`() {
+        val text = DebugCliSupport.statusText(ctx())
+        assertTrue(text.contains("supplements  : -"))
+    }
+
     // ───────────────────── 远程调试门控 ─────────────────────
 
     private fun remoteCtx(authenticated: Boolean = false) = DebugCliContext(

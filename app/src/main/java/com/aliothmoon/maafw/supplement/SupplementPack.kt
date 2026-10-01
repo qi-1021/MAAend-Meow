@@ -19,7 +19,12 @@ object SupplementPack {
     /** 清单里的一个文件。[blob] 是 git blob 的 SHA-1。 */
     data class FileSpec(val path: String, val size: Long, val blob: String)
 
-    /** 一个可选装的包。名称/说明走 i18n key，不写死文案。 */
+    /**
+     * 一个可选装的包。名称/说明走 i18n key，不写死文案。
+     *
+     * [version] 是该包这一份内容的声明版本（语义化或日期串，如 `2026.9.28`），
+     * 安装成功时被落盘；缺省为空串，保持对旧清单的兼容。比较/展示见 [SupplementVersion]。
+     */
     data class Pack(
         val id: String,
         val nameKey: String,
@@ -27,6 +32,7 @@ object SupplementPack {
         val requires: List<String>,
         val totalBytes: Long,
         val files: List<FileSpec>,
+        val version: String = "",
     )
 
     data class Source(val repo: String, val commit: String, val baseUrl: String)
@@ -85,6 +91,8 @@ object SupplementPack {
                 // 以文件之和为准：清单里那个 totalBytes 只是冗余字段，别信它
                 totalBytes = files.sumOf { it.size },
                 files = files,
+                // 未声明版本保持空串：旧清单也能解析，只是界面上显示「版本未知」
+                version = (p["version"] as? String)?.trim().orEmpty(),
             )
         }
         if (packs.isEmpty()) return null
