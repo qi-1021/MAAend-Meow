@@ -8187,13 +8187,15 @@ class MaaRunner(private val agentHost: AgentHost) {
         // 交回屏幕点框。解不出/置信不足一律如实返回 0（见 mapFindRun 的失败护栏）。
         regReco("MapFind", mapFindCallback)
 
+        // 自动战斗入口识别：允许进入战斗管线，配合 AutoFightMainAction 调度执行
+        regReco("AutoFightEntryRecognition", noopTrueRecognitionCallback)
+
         val falseRecognitions = listOf(
             "ImageCheckNotPassedRecognition",
             "IconRecognition",
             "AeroSalvageBalloonStateRecognition",
             "AeroSalvageGridRecognition",
             "AeroSalvageInitialStateRecognition",
-            "AutoFightEntryRecognition",
             "EssenceFilterAfterBattleNthRecognition",
             "EssenceGridAdvanceRecognition",
             "EssenceGridPendingRecognition",

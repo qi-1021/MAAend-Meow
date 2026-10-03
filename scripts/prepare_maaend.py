@@ -540,6 +540,42 @@ def enhance_opengame_pipeline():
     except Exception as e:
         log(f"Warning: failed to enhance OpenGame pipeline: {e}")
 
+    # 4. 在 AndroidOpenGame.json 的 ClientVersion 中添加云·终末地 (Cloud) 支持
+    android_opengame_file = ASSETS_ROOT / "tasks" / "AndroidOpenGame.json"
+    if android_opengame_file.is_file():
+        try:
+            content = android_opengame_file.read_text(encoding="utf-8")
+            data = json.loads(strip_json_comments(content))
+            client_version = data.get("option", {}).get("ClientVersion", {})
+            cases = client_version.get("cases", [])
+            if cases and not any(c.get("name") == "Cloud" for c in cases):
+                cases.append({
+                    "name": "Cloud",
+                    "label": "云·终末地 (Cloud)",
+                    "pipeline_override": {
+                        "StartUpGame": {
+                            "action": {
+                                "type": "StartApp",
+                                "param": {
+                                    "package": "com.hypergryph.cloud.endfield/com.hypergryph.cloud.endfield.splash.SplashActivity"
+                                }
+                            }
+                        },
+                        "CloseGame": {
+                            "action": {
+                                "type": "StopApp",
+                                "param": {
+                                    "package": "com.hypergryph.cloud.endfield"
+                                }
+                            }
+                        }
+                    }
+                })
+                android_opengame_file.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+                log("Added Cloud Endfield option to ClientVersion in AndroidOpenGame.json.")
+        except Exception as e:
+            log(f"Warning: failed to add Cloud case to AndroidOpenGame.json: {e}")
+
 
 def tag_unimplemented_tasks():
     """
@@ -572,12 +608,9 @@ def tag_unimplemented_tasks():
         # 环境监测：相机扫描（CameraScanAction）与失败收集器已实现；路线里仍依赖
         # `MapLocateAssertLocation`（C++ MapLocator 未移植）→ 路线定位是降级近似。
         "EnvironmentMonitoring": "🌿环境监测【移动端基础版：相机扫描已实现；路线定位待 MapLocator 移植】",
-        # ---- 以下 5 个在移动端的可见分组里（贵重品库/大世界/理智消耗），但整条链都跑不起来 ----
+        # ---- 移动端暂未完全实现或依赖桌面端组件的任务 ----
         # 基质筛选：上游 essencefilter 的 9 个组件全未移植 → 选中后空转。
         "EssenceFilter": "🔒基质筛选锁定【暂不可用·移动端未实现基质筛选】",
-        # 基质刷取：依赖基质筛选链（EssenceInventory 由它产出），且自身 2 个 action 未注册
-        # （未注册=硬失败，比 noop 更糟）。
-        "AutoEssence": "🎱基质刷取【暂不可用·依赖基质筛选链，移动端未实现】",
         # 浮空回收：上游 aerosalvage 的网格检测/拖拽规划组件全为 noop。
         "AeroSalvage": "🎈浮空回收【暂不可用·移动端未实现】",
         # 一键导入蓝图：上游 blueprintimport 的 3 个组件全为 noop。

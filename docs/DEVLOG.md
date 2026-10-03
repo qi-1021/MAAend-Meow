@@ -7,6 +7,32 @@
 > 追加格式：新条目放在最上面，标题写 `## YYYY-MM-DD`，正文用「做了什么 / 为什么 / 怎么验的 / 教训 / 未做」几段。
 
 ---
+## 2026-10-03 (二) · 全量吃进上游自动收菜与自动战斗 + 支持云·终末地 + 致敬上游官方手机版 (v0.1.7-beta.7)
+
+### 做了什么
+
+**① 致敬上游官方推出 MAA end 手机版，明确战友与前沿优化定位**
+- 在 `README.md` 顶栏增加致敬与声明块：热烈祝贺上游 [MaaEnd/MaaEnd](https://github.com/MaaEnd/MaaEnd) 官方推出 Android 手机版；
+- 明确项目定位为上游的紧密战友，重点打磨 Shizuku 独立后台虚拟屏（静默运行）、PathHeatmap 12~15x 算法加速、云·终末地适配以及完备的远程自动化运维；
+- 明晰个人业余维护免责与理解包容说明。
+
+**② 全量吃进上游核心日常能力（自动收菜、自动战斗、协议空间、基质刷取）**
+- **生态农场自动收菜 (`AutoEcoFarm`)**：解禁任务界面屏蔽，启用已完全打通的原生滑动定位与覆盖逻辑（`AutoEcoFarmSwipe`、`AutoEcoFarmOverride`、`AutoEcoFarmSleep`、`AutoEcoFarmNearest`）；
+- **自动战斗与协议空间 (`AutoFight` / `ProtocolSpace`)**：
+  - 放行 `AutoFightEntryRecognition` 入口判定，串联 `AutoFightMainAction` 与 `RealTimeTaskAction`；
+  - 配合补充包内置模型 `best.onnx`（协议空间）与 `autofightv12.onnx`（自动战斗），支持自动化战斗及目标锁定；
+- **基质刷取 (`AutoEssence`)**：解禁理智消耗类任务中的基质刷取展示，满足日常刷取流程。
+
+**③ 完善「云·终末地」官方客户端兼容**
+- 在 `AndroidOpenGame.json` 的 `ClientVersion` 选项中补充 `Cloud`（云·终末地）渠道，包名直接绑定 `com.hypergryph.cloud.endfield`；
+- 无缝适配手机端运行云·终末地时的自动化拉起与日常管线执行。
+
+### 怎么验的
+- 纯逻辑自动化单测套件：`./scripts/verify_pure_logic.sh all` 全部通过（**1401 / 1401** 测试全绿）。
+- 国际化文案一致性核查：`python3 scripts/check_i18n_strings.py`，中文 666 条，英文 666 条，0 错误 0 警告。
+- 资产预构建校验：`python3 scripts/prepare_maaend.py` 执行通过，全量断言与产物校验通过。
+
+---
 ## 2026-10-03 · 远程调试指令集大幅扩充 + 修复软件内更新无法升级 Beta 版
 
 ### 做了什么
