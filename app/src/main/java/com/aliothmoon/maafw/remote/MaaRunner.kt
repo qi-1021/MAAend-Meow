@@ -528,6 +528,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         host = operatorHost,
         note = { message, extra -> RunDiagnostics.note("operator", message, extra) },
         diagnosticsEnabled = { RunDiagnostics.isEnabled() },
+        onFocus = { message -> notifyFocus(message) },
     )
 
     /** 六个干员识别共用的回调骨架：解析参数 → 刷新宿主 → 决策 → 回写 outBox。 */
@@ -659,6 +660,10 @@ class MaaRunner(private val agentHost: AgentHost) {
                 }
 
                 is OperatorSession.SessionOutcome.Assignment -> {
+                    val locName = OutpostData.nameOfLocation(outcome.location)
+                    val usageName = if (outcome.usage == "target") "售卖联络干员" else "售后生产联络干员"
+                    val actionName = if (outcome.changed) "已切换" else "沿用"
+                    notifyFocus("👤 $usageName$actionName：${outcome.candidate.name}（$locName）")
                     Ln.i(
                         "MaaRunner: $nodeName ${outcome.usage} 干员=${outcome.candidate.name} " +
                             "changed=${outcome.changed} 据点=${outcome.location}",
@@ -681,6 +686,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                 }
 
                 is OperatorSession.SessionOutcome.RestoreSkipped -> {
+                    val locName = OutpostData.nameOfLocation(outcome.location)
+                    notifyFocus("⚠️ $locName 没有可用的售后生产联络干员，跳过派驻")
                     Ln.i("MaaRunner: $nodeName 跳过售后派驻 据点=${outcome.location}")
                     RunDiagnostics.note(
                         "operator",
@@ -696,6 +703,9 @@ class MaaRunner(private val agentHost: AgentHost) {
                 }
 
                 is OperatorSession.SessionOutcome.ConflictExcluded -> {
+                    val locName = OutpostData.nameOfLocation(outcome.location)
+                    val usageName = if (outcome.usage == "target") "售卖" else "售后恢复"
+                    notifyFocus("⚠️ ${outcome.candidate.name} 已在其他据点派驻，已从 $usageName 方案中排除并重新规划（$locName）")
                     Ln.i("MaaRunner: $nodeName 拉黑干员=${outcome.candidate.name} 据点=${outcome.location}")
                     RunDiagnostics.note(
                         "operator",
@@ -712,12 +722,91 @@ class MaaRunner(private val agentHost: AgentHost) {
                     1
                 }
 
-                OperatorSession.SessionOutcome.Ok -> 1
+                OperatorSession.SessionOutcome.Ok -> {
+                    if (p.operation == "enter_location") {
+                        val locName = OutpostData.nameOfLocation(p.location)
+                        notifyFocus("🏭 已进入据点：$locName")
+                    }
+                    1
+                }
             }
         } catch (t: Throwable) {
             Ln.e("MaaRunner: $nodeName 执行异常", t)
             0
         }
+    }
+
+    /**
+     * `OutpostTradingLocationPlan`：对齐上游 runtime.go 输出据点的货品与干员合并计划。
+     *
+     * 提取当前据点的联络干员目标（售卖目标/售后恢复目标）与货品规划，格式化后通过 [notifyFocus]
+     * 推送到前台 UI 运行日志与 Live Update，让用户在前台清晰掌握该据点的完整执行策略。
+     */
+    private val outpostLocationPlanCallback = MaaFrameworkLibrary.MaaCustomActionCallback { _, _, nodeName, _, customActionParam, _, _, _ ->
+        val loc = try {
+            val json = MaaJsonTree.parse(customActionParam) as? Map<*, *>
+            (json?.get("location") as? String)?.trim().orEmpty()
+        } catch (t: Throwable) {
+            ""
+        }
+        if (loc.isEmpty()) {
+            Ln.w("MaaRunner: $nodeName 参数缺少 location: $customActionParam")
+            return@MaaCustomActionCallback 1
+        }
+        val locName = OutpostData.nameOfLocation(loc)
+        try {
+            val sessionSnap = OperatorRuntime.session.snapshot()
+            val targetOp = sessionSnap.targetAssignments[loc]?.name ?: "自动规划"
+            val restoreOp = sessionSnap.lockedRestoreAssignments[loc]?.name ?: "自动规划"
+
+            val allItems = OutpostData.locationItems[loc] ?: emptyList()
+            val preferredNames = outpostPrioritySession.preferredNames()
+            val policy = outpostPrioritySession.policy()
+            val outOfStock = outpostPrioritySession.outOfStockNames()
+            val blacklisted = outpostReserveSession.blacklistedItems()
+            val satisfied = outpostReserveSession.satisfiedItems()
+            val reserveRules = outpostReserveSession.rulesSnapshot()
+
+            val excluded = outOfStock + blacklisted + satisfied
+            val selectable = OutpostPrioritySupport.selectableNames(allItems, preferredNames, policy.onlyPreferred, excluded)
+
+            val orderStr = when {
+                outpostPrioritySession.strategy == "stock" -> "按库存优先售卖（扫描库存后决定）"
+                selectable.isNotEmpty() -> selectable.joinToString(" → ")
+                else -> "无"
+            }
+            val outOfStockStr = if (outOfStock.isNotEmpty()) outOfStock.joinToString("，") else "无"
+            val satisfiedStr = if (satisfied.isNotEmpty()) satisfied.joinToString("，") else "无"
+            val blacklistedStr = if (blacklisted.isNotEmpty()) blacklisted.joinToString("，") else "无"
+
+            val reserveDescriptions = mutableListOf<String>()
+            for ((item, qty) in reserveRules) {
+                if (qty > 0) {
+                    reserveDescriptions.add("$item 保留 $qty")
+                }
+            }
+            val reservePlanStr = if (reserveDescriptions.isNotEmpty()) {
+                reserveDescriptions.joinToString("，")
+            } else {
+                "无（全部售卖）"
+            }
+
+            val planMsg = buildString {
+                append("📋 ").append(locName).append("当前计划\n")
+                append("👤 售卖联络干员目标：").append(targetOp).append("；售后生产派驻目标：").append(restoreOp).append("\n")
+                append("📦 售卖顺序：").append(orderStr).append("\n")
+                append("🚫 售罄排除：").append(outOfStockStr).append("\n")
+                append("🎯 保留量已满足：").append(satisfiedStr).append("\n")
+                append("⛔ 用户排除：").append(blacklistedStr).append("\n")
+                append("🧰 保留规则：").append(reservePlanStr)
+            }
+            notifyFocus(planMsg)
+            Ln.i("MaaRunner: $nodeName 播报据点计划：\n$planMsg")
+        } catch (t: Throwable) {
+            Ln.w("MaaRunner: $nodeName 生成据点计划异常，降级为进入据点提示: ${t.message}")
+            notifyFocus("🏭 已进入据点：$locName")
+        }
+        1
     }
 
     private val subTaskCallback = MaaFrameworkLibrary.MaaCustomActionCallback { context, _, nodeName, _, customActionParam, _, _, _ ->
@@ -3121,6 +3210,9 @@ class MaaRunner(private val agentHost: AgentHost) {
             when (p.operation) {
                 OutpostPrioritySupport.OPERATION_CONFIGURE -> {
                     outpostPrioritySession.configure(p.enabled, p.onlyPreferred)
+                    if (p.enabled && p.onlyPreferred) {
+                        notifyFocus("🔒 已启用“仅售卖优先货品”：其他货品不会售卖。此设置仅对已开启地区优先售卖配置的地区生效。")
+                    }
                     Ln.i(
                         "MaaRunner: OutpostTradingPrioritySession [$nodeName] configure " +
                             "enabled=${p.enabled} only_preferred=${p.onlyPreferred}",
@@ -3129,6 +3221,9 @@ class MaaRunner(private val agentHost: AgentHost) {
 
                 OutpostPrioritySupport.OPERATION_CONFIGURE_STRATEGY -> {
                     outpostPrioritySession.configureStrategy(p.strategy, p.minimumPrice)
+                    if (p.strategy == OutpostPrioritySupport.STRATEGY_STOCK) {
+                        notifyFocus("📦 已启用库存优先售卖：按本地仓储数量从高到低选择单价不低于 ${p.minimumPrice} 的货品。")
+                    }
                     Ln.i(
                         "MaaRunner: OutpostTradingPrioritySession [$nodeName] configure_strategy=" +
                             "${p.strategy} min_unit_price=${p.minimumPrice}",
@@ -3169,6 +3264,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                         return@MaaCustomActionCallback 0
                     }
                     outpostReserveSession.setSelected(name)
+                    val locName = OutpostData.nameOfLocation(p.location)
+                    notifyFocus("📦 已切换货品：$name（$locName）")
                     Ln.i("MaaRunner: OutpostTradingPrioritySession [$nodeName] commit location=${p.location} item='$name'")
                 }
 
@@ -3180,6 +3277,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                     }
                     outpostPrioritySession.adopt(p.location, name)
                     outpostReserveSession.setSelected(name)
+                    val locName = OutpostData.nameOfLocation(p.location)
+                    notifyFocus("📦 沿用当前货品：$name（$locName）")
                     Ln.i("MaaRunner: OutpostTradingPrioritySession [$nodeName] adopt location=${p.location} item='$name'")
                 }
 
@@ -3189,6 +3288,8 @@ class MaaRunner(private val agentHost: AgentHost) {
                         Ln.e("MaaRunner: OutpostTradingPrioritySession [$nodeName] out_of_stock 没有已提交物品 location=${p.location}")
                         return@MaaCustomActionCallback 0
                     }
+                    val locName = OutpostData.nameOfLocation(p.location)
+                    notifyFocus("🚫 已确认售罄并排除：${outcome.name}（$locName）")
                     Ln.i(
                         "MaaRunner: OutpostTradingPrioritySession [$nodeName] out_of_stock " +
                             "location=${p.location} item='${outcome.name}' marked=${outcome.marked}",
@@ -3376,6 +3477,9 @@ class MaaRunner(private val agentHost: AgentHost) {
                     "item='${outcome.name}' quantity=${outcome.quantity}",
             )
             return false
+        }
+        if (outcome.marked) {
+            notifyFocus("🎯 ${outcome.name} 已达到保留数量 ${outcome.quantity}，本次任务后续据点将跳过该货品")
         }
         Ln.i(
             "MaaRunner: OutpostTradingReserveSession [$label] satisfy item='${outcome.name}' " +
@@ -8095,9 +8199,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             "ImportBluePrintsFinishAction",
             "ImportBluePrintsInitTextAction",
 
-            "OutpostTradingLocationPlan",
-            // OutpostTradingPrioritySession / OutpostTradingReserveSession 不在此列：
-            // 已显式注册为 outpostPrioritySessionCallback / outpostReserveSessionCallback
+            // OutpostTradingLocationPlan / OutpostTradingPrioritySession / OutpostTradingReserveSession
+            // 不在此列：已显式注册为真实实现
             "PullCountCalculatorAction",
             "PuzzleAction",
             "RealTimeTaskAction",
@@ -8154,6 +8257,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         regReco("OutpostTradingCurrentGoods", outpostTradingCurrentGoodsCallback)
         regAction("OutpostTradingPrioritySession", outpostPrioritySessionCallback)
         regAction("OutpostTradingReserveSession", outpostReserveSessionCallback)
+        regAction("OutpostTradingLocationPlan", outpostLocationPlanCallback)
         // 干员智能选择：数据/选择/缓存/会话/扫描全部已移植并单测
         regReco("OutpostTradingSelectBestOperator", outpostOperatorSelectBestCallback)
         regReco("OutpostTradingCurrentBestOperator", outpostOperatorCurrentBestCallback)
@@ -8246,6 +8350,25 @@ class MaaRunner(private val agentHost: AgentHost) {
         val callback = callbackRef.get() ?: return
         runCatching { callback.block() }
             .onFailure { Ln.w("MaaRunner: callback failed: ${it.message}") }
+    }
+
+    /**
+     * 投递业务焦点通知（对齐上游 maafocus.Print）。
+     *
+     * 零修改 AIDL 接口：直接通过 callback.onEvent 发送符合 [FocusParser] 规范的合成事件
+     * （message="Custom.Focus", detailsJson={"focus":{"Custom.Focus":{...}}}）。
+     * MaaFrameworkRunnerPort 会经 FocusParser 自动解析为 [RunnerEvent.Focus]，
+     * 并由 FocusDispatcher / RunLogRecorder 投递到 UI 运行日志与悬浮/通知栏 Live Update。
+     */
+    fun notifyFocus(content: String, display: String = "log") {
+        if (content.isBlank()) return
+        val escaped = content
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        val detailsJson = """{"focus":{"Custom.Focus":{"content":"$escaped","display":["$display"]}}}"""
+        notify { onEvent("Custom.Focus", detailsJson) }
     }
 
     private fun statusText(status: Int): String = when (status) {

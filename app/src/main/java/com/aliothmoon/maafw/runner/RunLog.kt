@@ -54,13 +54,49 @@ enum class RunLogKind {
 const val RUN_LOG_CAPACITY = 500
 
 /**
+ * 日志查看透镜：
+ * - [Focus] 业务精简档：只展示焦点通知（据点买卖决策、干员变更、重要事件等业务核心）
+ * - [Progress] 进度档：任务推进与生命周期（原 isEssential）
+ * - [Troubleshoot] 排障档：告警、失败与异常定位
+ * - [All] 全部档：包含原始 AIDL、Framework Verbose 原始回调
+ */
+enum class RunLogFilter {
+    Focus,
+    Progress,
+    Troubleshoot,
+    All,
+}
+
+fun RunLogKind.matchesFilter(filter: RunLogFilter): Boolean = when (filter) {
+    RunLogFilter.Focus -> this == RunLogKind.Focus
+    RunLogFilter.Progress -> this !in NON_ESSENTIAL_KINDS
+    RunLogFilter.Troubleshoot -> this in TROUBLESHOOT_KINDS
+    RunLogFilter.All -> true
+}
+
+private val TROUBLESHOOT_KINDS = setOf(
+    RunLogKind.Warning,
+    RunLogKind.Error,
+    RunLogKind.AgentError,
+)
+
+/**
  * 「进度」档留下的：这一轮跑到哪了
  *
  * agent 的两条流都不在内——它和 `Node.*` 原始转储同级，是排障信息。agent 崩了照样看得见，
  * 那会以 `Tasker.Task.Failed` 的形式出现在进度档，再切「全部」看 stderr 上的现场
  */
 val RunLogEntry.isEssential: Boolean
-    get() = kind !in NON_ESSENTIAL_KINDS
+    get() = kind.matchesFilter(RunLogFilter.Progress)
+
+val RunLogEntry.isFocusOnly: Boolean
+    get() = kind.matchesFilter(RunLogFilter.Focus)
+
+val RunLogEntry.isTroubleshoot: Boolean
+    get() = kind.matchesFilter(RunLogFilter.Troubleshoot)
+
+fun RunSessionRecord.Line.matchesFilter(filter: RunLogFilter): Boolean =
+    kind.matchesFilter(filter)
 
 private val NON_ESSENTIAL_KINDS =
     setOf(RunLogKind.Verbose, RunLogKind.Agent, RunLogKind.AgentError)

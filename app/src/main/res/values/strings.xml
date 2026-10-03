@@ -449,8 +449,13 @@
     <string name="run_log_clear">清空</string>
     <string name="run_log_empty">暂无日志</string>
     <string name="tasks_log">日志</string>
+    <string name="run_log_filter_focus">精简</string>
     <string name="run_log_filter_progress">进度</string>
+    <string name="run_log_filter_troubleshoot">排障</string>
     <string name="run_log_filter_all">全部</string>
+    <string name="run_log_search_placeholder">搜索日志…</string>
+    <string name="run_log_copy_summary">复制摘要</string>
+    <string name="run_log_copied">已复制到剪贴板</string>
     <string name="run_log_connecting">正在连接设备…</string>
     <string name="run_log_connected">设备连接成功</string>
     <string name="run_log_agent_connected">Agent 已连接: %1$s</string>

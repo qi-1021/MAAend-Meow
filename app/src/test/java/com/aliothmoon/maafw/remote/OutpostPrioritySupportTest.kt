@@ -292,4 +292,25 @@ class OutpostPrioritySupportTest {
         s.resetGoodsSelection()
         assertTrue(s.goodsSelectionExhausted("L").isEmpty())
     }
+
+    @Test
+    fun `OutpostData nameOfLocation 映射据点中文名`() {
+        assertEquals("难民暂居处", OutpostData.nameOfLocation("RefugeeCamp"))
+        assertEquals("基建前站", OutpostData.nameOfLocation("InfraStation"))
+        assertEquals("重建指挥部", OutpostData.nameOfLocation("ReconstructionHQ"))
+        assertEquals("天王坪援建点", OutpostData.nameOfLocation("SkyKingFlatsConstructionSite"))
+        assertEquals("心脏修缮站", OutpostData.nameOfLocation("CardiacRemediationStation"))
+        assertEquals("盈天台建设站", OutpostData.nameOfLocation("XiranflowCloudseederStation"))
+        assertEquals("未知据点", OutpostData.nameOfLocation("未知据点"))
+    }
+
+    @Test
+    fun `OutpostData formatCacheTime 格式化时间戳`() {
+        assertEquals("未知", OutpostData.formatCacheTime(null))
+        assertEquals("未知", OutpostData.formatCacheTime(""))
+        assertEquals("未知", OutpostData.formatCacheTime("invalid-time"))
+        val formatted = OutpostData.formatCacheTime("2026-10-03T07:00:00Z")
+        assertTrue(formatted.matches(Regex("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}")))
+    }
 }
+

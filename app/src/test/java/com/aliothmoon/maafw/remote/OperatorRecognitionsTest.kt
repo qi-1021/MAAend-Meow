@@ -439,4 +439,25 @@ class OperatorRecognitionsTest {
             ),
         )
     }
+
+    @Test
+    fun `decideCacheReady 触发 onFocus 焦点播报`() {
+        val host = FakeHost()
+        val messages = mutableListOf<String>()
+        val rec = OperatorRecognitions(host, onFocus = { messages.add(it) })
+
+        rec.decideCacheReady(
+            param(usage = "all", location = "global"),
+            OperatorRecognitions.CacheStatus(ready = false, updatedAt = ""),
+        )
+        assertEquals(1, messages.size)
+        assertTrue(messages.first().contains("正在扫描并缓存干员列表"))
+
+        // 第二次因为 claimCacheNotice=false，不应重复播报
+        rec.decideCacheReady(
+            param(usage = "all", location = "global"),
+            OperatorRecognitions.CacheStatus(ready = true, updatedAt = "2026-10-03T07:00:00Z"),
+        )
+        assertEquals(1, messages.size)
+    }
 }

@@ -24,6 +24,8 @@ class OperatorRecognitions(
     private val note: (String, Map<String, Any?>) -> Unit = { _, _ -> },
     /** 埋点是否真的会落盘；false 时跳过昂贵的诊断计算（如整帧 OCR×候选匹配摘要）。 */
     private val diagnosticsEnabled: () -> Boolean = { false },
+    /** 焦点通知出口；由宿主注入到 `notifyFocus(...)`。默认丢弃。 */
+    private val onFocus: (String) -> Unit = {},
 ) {
 
     private typealias Candidate = OperatorDataset.OperatorCandidate
@@ -393,6 +395,7 @@ class OperatorRecognitions(
         }
 
         host.log("干员快照已过期，触发全量重扫（当前派驻=${found.first.name}）")
+        onFocus("🔄 当前派驻联络干员 ${found.first.name} 不在干员缓存中，缓存可能已过期，将重新扫描干员列表")
         note(
             "检出当前派驻未缓存：${found.first.name}（ocr='${found.second.ocrText}' tier=${found.second.tier}），已清快照触发全量重扫",
             mapOf(
@@ -412,6 +415,12 @@ class OperatorRecognitions(
         // 先 claim 再判 ready：不 ready 时这一次提示也已经用掉
         if (host.session.claimCacheNotice()) {
             host.log("干员缓存状态：ready=${status.ready} updated_at=${status.updatedAt}")
+            if (status.ready) {
+                val formattedTime = OutpostData.formatCacheTime(status.updatedAt)
+                onFocus("👥 已加载干员列表缓存（更新于 $formattedTime），将直接进行干员规划")
+            } else {
+                onFocus("👥 正在扫描并缓存干员列表，期间会浏览完整列表")
+            }
             note(
                 "缓存就绪检查｜ready=${status.ready} updated_at=${status.updatedAt}",
                 mapOf("stage" to "cache_ready", "ready" to status.ready, "updated_at" to status.updatedAt),
@@ -547,6 +556,9 @@ class OperatorRecognitions(
         }
         if (p.result == "retry" && state.hasCandidate) {
             host.log("重新规划完成，改用 ${candidates.first().name}")
+            val locName = OutpostData.nameOfLocation(p.location)
+            val usageName = if (p.usage == OperatorSelection.USAGE_TARGET) "售卖" else "售后生产"
+            onFocus("🔄 完整扫描后更新${usageName}方案：${locName}使用${candidates.first().name}")
         }
 
         host.scanStates.put(state)
@@ -563,6 +575,13 @@ class OperatorRecognitions(
             "error" -> {
                 if (state.error.isEmpty()) return Outcome.Miss
                 host.log("干员列表扫描失败：${state.error}")
+                if (p.usage == "all") {
+                    onFocus("❌ 干员缓存扫描失败")
+                } else {
+                    val locName = OutpostData.nameOfLocation(p.location)
+                    val usageName = if (p.usage == OperatorSelection.USAGE_TARGET) "售卖联络干员" else "售后生产联络干员"
+                    onFocus("❌ ${locName}的${usageName}扫描失败")
+                }
                 note(
                     "扫描结论=失败｜${state.error}（usage=${p.usage} location=${p.location}）",
                     mapOf(
@@ -578,7 +597,11 @@ class OperatorRecognitions(
 
             "not_found" -> {
                 if (state.error.isNotEmpty() || state.hasCandidate) return Outcome.Miss
-                if (p.usage == OperatorSelection.USAGE_TARGET) host.log("没有可用的售卖干员")
+                if (p.usage == OperatorSelection.USAGE_TARGET) {
+                    host.log("没有可用的售卖干员")
+                    val locName = OutpostData.nameOfLocation(p.location)
+                    onFocus("❌ ${locName}没有可用的售卖联络干员")
+                }
                 note(
                     "扫描结论=无可用候选｜usage=${p.usage} location=${p.location} " +
                         "期望=${state.expectedCandidates} 实际可见=${state.observedCandidates}",

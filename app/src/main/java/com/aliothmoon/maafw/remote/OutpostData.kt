@@ -72,6 +72,24 @@ object OutpostData {
      */
     val activityItemNames: Set<String> = setOf("重息壤龙泡泡", "息壤龙泡泡")
 
+    /**
+     * 据点 ID -> zh_cn 据点名（由 selection_data.json 生成）。
+     */
+    val locationNames: Map<String, String> = mapOf(
+        "RefugeeCamp" to "难民暂居处",
+        "InfraStation" to "基建前站",
+        "ReconstructionHQ" to "重建指挥部",
+        "SkyKingFlatsConstructionSite" to "天王坪援建点",
+        "CardiacRemediationStation" to "心脏修缮站",
+        "XiranflowCloudseederStation" to "盈天台建设站",
+    )
+
+    /** location ID 还原为 zh_cn 据点名；未知/空白回退 location 本身。 */
+    fun nameOfLocation(location: String?): String {
+        val trimmed = location?.trim().orEmpty()
+        return locationNames[trimmed] ?: trimmed
+    }
+
     /** item_id 还原为 zh_cn 名；未知/空白返回 null。 */
     fun nameOfItem(itemId: String?): String? = nameByItemId[itemId?.trim()]
 
@@ -80,4 +98,22 @@ object OutpostData {
 
     /** 该商品名是否为活动限时物品（不适用保留规则）。 */
     fun isActivityItemName(name: String?): Boolean = name?.trim() in activityItemNames
+
+    /**
+     * 将快照 ISO-8601 时间戳格式化为本地可读时间（"yyyy-MM-dd HH:mm:ss"），
+     * 空白或解析失败时返回 "未知"。对齐上游 runtimeLocalCacheUpdatedAt。
+     */
+    fun formatCacheTime(updatedAt: String?): String {
+        if (updatedAt.isNullOrBlank()) return "未知"
+        return try {
+            val instant = java.time.Instant.parse(updatedAt)
+            val zoneId = java.time.ZoneId.systemDefault()
+            val localDt = java.time.LocalDateTime.ofInstant(instant, zoneId)
+            val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+            localDt.format(formatter)
+        } catch (_: Throwable) {
+            "未知"
+        }
+    }
 }
+

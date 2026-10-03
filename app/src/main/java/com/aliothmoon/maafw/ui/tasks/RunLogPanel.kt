@@ -30,8 +30,9 @@ import androidx.compose.ui.text.font.FontFamily
 import com.aliothmoon.maafw.R
 import com.aliothmoon.maafw.i18n.asString
 import com.aliothmoon.maafw.runner.RunLogEntry
+import com.aliothmoon.maafw.runner.RunLogFilter
 import com.aliothmoon.maafw.runner.RunLogKind
-import com.aliothmoon.maafw.runner.isEssential
+import com.aliothmoon.maafw.runner.matchesFilter
 import com.aliothmoon.maafw.theme.MaaDesignTokens
 import com.aliothmoon.maafw.ui.components.MaaChoiceChip
 import com.aliothmoon.maafw.ui.components.MaaMarkdown
@@ -65,30 +66,54 @@ internal fun RunLogPanel(
     onClear: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var essentialOnly by rememberSaveable { mutableStateOf(true) }
+    var activeFilter by rememberSaveable { mutableStateOf(RunLogFilter.Progress) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var searchVisible by rememberSaveable { mutableStateOf(false) }
+
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val context = androidx.compose.ui.platform.LocalContext.current
+
     val all = entries()
-    val visible = remember(all, essentialOnly) {
-        if (essentialOnly) all.filter { it.isEssential } else all
+    val visible = remember(all, activeFilter, searchQuery) {
+        val query = searchQuery.trim().lowercase()
+        all.filter { entry ->
+            if (!entry.kind.matchesFilter(activeFilter)) return@filter false
+            if (query.isEmpty()) return@filter true
+            val textMatch = entry.text.asString().lowercase().contains(query)
+            val detailMatch = entry.detail?.lowercase()?.contains(query) == true
+            textMatch || detailMatch
+        }
     }
 
     Column(
         modifier = modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(MaaDesignTokens.Spacing.xs),
     ) {
+        // ── 顶部操作栏 ──
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(MaaDesignTokens.Spacing.xs),
         ) {
             MaaChoiceChip(
+                label = stringResource(R.string.run_log_filter_focus),
+                selected = activeFilter == RunLogFilter.Focus,
+                onClick = { activeFilter = RunLogFilter.Focus },
+            )
+            MaaChoiceChip(
                 label = stringResource(R.string.run_log_filter_progress),
-                selected = essentialOnly,
-                onClick = { essentialOnly = true },
+                selected = activeFilter == RunLogFilter.Progress,
+                onClick = { activeFilter = RunLogFilter.Progress },
+            )
+            MaaChoiceChip(
+                label = stringResource(R.string.run_log_filter_troubleshoot),
+                selected = activeFilter == RunLogFilter.Troubleshoot,
+                onClick = { activeFilter = RunLogFilter.Troubleshoot },
             )
             MaaChoiceChip(
                 label = stringResource(R.string.run_log_filter_all),
-                selected = !essentialOnly,
-                onClick = { essentialOnly = false },
+                selected = activeFilter == RunLogFilter.All,
+                onClick = { activeFilter = RunLogFilter.All },
             )
             Text(
                 text = pluralStringResource(R.plurals.run_log_count, visible.size, visible.size),
@@ -96,11 +121,68 @@ internal fun RunLogPanel(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
             )
+            // 搜索开关按钮
+            androidx.compose.material3.IconButton(
+                onClick = {
+                    searchVisible = !searchVisible
+                    if (!searchVisible) searchQuery = ""
+                },
+            ) {
+                androidx.compose.material3.Icon(
+                    imageVector = if (searchVisible) com.aliothmoon.maafw.theme.MaaIcons.Close else com.aliothmoon.maafw.theme.MaaIcons.Search,
+                    contentDescription = stringResource(R.string.run_log_search_placeholder),
+                    tint = if (searchVisible || searchQuery.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(
+                onClick = {
+                    val summary = buildString {
+                        val fmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+                        for (entry in visible) {
+                            append("[").append(fmt.format(Date(entry.atMillis))).append("] ")
+                            append(entry.text.asString()).append("\n")
+                        }
+                    }
+                    clipboard.setText(AnnotatedString(summary))
+                    android.widget.Toast.makeText(
+                        context,
+                        context.getString(R.string.run_log_copied),
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                },
+                enabled = visible.isNotEmpty(),
+            ) {
+                Text(stringResource(R.string.run_log_copy_summary))
+            }
             TextButton(onClick = onExport) {
                 Text(stringResource(R.string.run_log_export))
             }
             TextButton(onClick = onClear, enabled = all.isNotEmpty()) {
                 Text(stringResource(R.string.run_log_clear))
+            }
+        }
+
+        // ── 展开的即时搜索框 ──
+        if (searchVisible) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = MaaDesignTokens.Spacing.xxs),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(MaaDesignTokens.Spacing.xs),
+            ) {
+                com.aliothmoon.maafw.ui.components.AdaptiveTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text(stringResource(R.string.run_log_search_placeholder)) },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                if (searchQuery.isNotEmpty()) {
+                    TextButton(onClick = { searchQuery = "" }) {
+                        Text(stringResource(R.string.common_clear))
+                    }
+                }
             }
         }
 
