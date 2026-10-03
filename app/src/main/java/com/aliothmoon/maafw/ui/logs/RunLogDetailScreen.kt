@@ -55,7 +55,7 @@ import androidx.compose.ui.text.AnnotatedString
 import com.aliothmoon.maafw.runner.RunLogFilter
 import com.aliothmoon.maafw.runner.matchesFilter
 import com.aliothmoon.maafw.theme.MaaIcons
-import com.aliothmoon.maafw.ui.components.AdaptiveTextField
+import com.aliothmoon.maafw.ui.components.ITextField
 import com.aliothmoon.maafw.ui.components.MaaChoiceChip
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -234,10 +234,10 @@ fun RunLogDetailScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(MaaDesignTokens.Spacing.xs),
                     ) {
-                        AdaptiveTextField(
+                        ITextField(
                             value = searchQuery,
                             onValueChange = { searchQuery = it },
-                            placeholder = { Text(stringResource(R.string.run_log_search_placeholder)) },
+                            placeholder = stringResource(R.string.run_log_search_placeholder),
                             singleLine = true,
                             modifier = Modifier.weight(1f),
                         )

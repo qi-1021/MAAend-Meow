@@ -29,6 +29,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import com.aliothmoon.maafw.R
 import com.aliothmoon.maafw.i18n.asString
+import com.aliothmoon.maafw.i18n.resolve
 import com.aliothmoon.maafw.runner.RunLogEntry
 import com.aliothmoon.maafw.runner.RunLogFilter
 import com.aliothmoon.maafw.runner.RunLogKind
@@ -74,12 +75,12 @@ internal fun RunLogPanel(
     val context = androidx.compose.ui.platform.LocalContext.current
 
     val all = entries()
-    val visible = remember(all, activeFilter, searchQuery) {
+    val visible = remember(all, activeFilter, searchQuery, context) {
         val query = searchQuery.trim().lowercase()
         all.filter { entry ->
             if (!entry.kind.matchesFilter(activeFilter)) return@filter false
             if (query.isEmpty()) return@filter true
-            val textMatch = entry.text.asString().lowercase().contains(query)
+            val textMatch = entry.text.resolve(context).lowercase().contains(query)
             val detailMatch = entry.detail?.lowercase()?.contains(query) == true
             textMatch || detailMatch
         }
@@ -140,7 +141,7 @@ internal fun RunLogPanel(
                         val fmt = SimpleDateFormat("HH:mm:ss", Locale.US)
                         for (entry in visible) {
                             append("[").append(fmt.format(Date(entry.atMillis))).append("] ")
-                            append(entry.text.asString()).append("\n")
+                            append(entry.text.resolve(context)).append("\n")
                         }
                     }
                     clipboard.setText(AnnotatedString(summary))
@@ -171,10 +172,10 @@ internal fun RunLogPanel(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(MaaDesignTokens.Spacing.xs),
             ) {
-                com.aliothmoon.maafw.ui.components.AdaptiveTextField(
+                com.aliothmoon.maafw.ui.components.ITextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
-                    placeholder = { Text(stringResource(R.string.run_log_search_placeholder)) },
+                    placeholder = stringResource(R.string.run_log_search_placeholder),
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                 )

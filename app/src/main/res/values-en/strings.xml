@@ -8,6 +8,7 @@
     <string name="common_copy">Copy</string>
     <string name="common_rename">Rename</string>
     <string name="common_delete">Delete</string>
+    <string name="common_clear">Clear</string>
     <string name="common_loading">Loading…</string>
     <string name="dialog_confirm">OK</string>
     <string name="common_restart">Restart</string>

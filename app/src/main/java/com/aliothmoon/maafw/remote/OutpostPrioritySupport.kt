@@ -22,8 +22,12 @@ object OutpostPrioritySupport {
     const val OPERATION_ADOPT = "adopt"
     const val OPERATION_OUT_OF_STOCK = "out_of_stock"
 
+    const val STRATEGY_RARITY = "rarity"
+    const val STRATEGY_PRICE = "price"
+    const val STRATEGY_STOCK = "stock"
+
     /** 上游 `sellstrategy.Kind`：只有这三种合法。 */
-    val STRATEGIES = setOf("rarity", "price", "stock")
+    val STRATEGIES = setOf(STRATEGY_RARITY, STRATEGY_PRICE, STRATEGY_STOCK)
 
     /** 上游 session.go:31 `prioritySessionActionParam`。 */
     data class ActionParam(
