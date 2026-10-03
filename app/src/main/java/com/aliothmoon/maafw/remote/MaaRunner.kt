@@ -4279,6 +4279,65 @@ class MaaRunner(private val agentHost: AgentHost) {
         }
     }
 
+    /** 强制重新从 Controller 截图并保存到 [path] */
+    fun debugScreencap(path: String): String? {
+        val lib = MaaFrameworkLoader.library ?: return "MaaFramework 未加载"
+        val ctrl = controller ?: return "controller 未建立（先跑一次任务）"
+        val capId = lib.MaaControllerPostScreencap(ctrl)
+        if (capId > 0) lib.MaaControllerWait(ctrl, capId)
+        return debugSaveCachedImage(path)
+    }
+
+    /** 调试直接点击 (x, y) */
+    fun debugClick(x: Int, y: Int): String? {
+        val lib = MaaFrameworkLoader.library ?: return "MaaFramework 未加载"
+        val ctrl = controller ?: return "controller 未建立（先跑一次任务）"
+        val id = lib.MaaControllerPostClick(ctrl, x, y)
+        if (id <= 0) return "PostClick 被拒绝"
+        lib.MaaControllerWait(ctrl, id)
+        return null
+    }
+
+    /** 调试滑动 (x1, y1) -> (x2, y2) */
+    fun debugSwipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int): String? {
+        val lib = MaaFrameworkLoader.library ?: return "MaaFramework 未加载"
+        val ctrl = controller ?: return "controller 未建立（先跑一次任务）"
+        val id = lib.MaaControllerPostSwipe(ctrl, x1, y1, x2, y2, durationMs)
+        if (id <= 0) return "PostSwipe 被拒绝"
+        lib.MaaControllerWait(ctrl, id)
+        return null
+    }
+
+    /** 调试原生多点触控：按下 */
+    fun debugTouchDown(contact: Int, x: Int, y: Int, pressure: Int): String? {
+        val lib = MaaFrameworkLoader.library ?: return "MaaFramework 未加载"
+        val ctrl = controller ?: return "controller 未建立（先跑一次任务）"
+        val id = lib.MaaControllerPostTouchDown(ctrl, contact, x, y, pressure)
+        if (id <= 0) return "PostTouchDown 被拒绝"
+        lib.MaaControllerWait(ctrl, id)
+        return null
+    }
+
+    /** 调试原生多点触控：移动 */
+    fun debugTouchMove(contact: Int, x: Int, y: Int, pressure: Int): String? {
+        val lib = MaaFrameworkLoader.library ?: return "MaaFramework 未加载"
+        val ctrl = controller ?: return "controller 未建立（先跑一次任务）"
+        val id = lib.MaaControllerPostTouchMove(ctrl, contact, x, y, pressure)
+        if (id <= 0) return "PostTouchMove 被拒绝"
+        lib.MaaControllerWait(ctrl, id)
+        return null
+    }
+
+    /** 调试原生多点触控：抬起 */
+    fun debugTouchUp(contact: Int): String? {
+        val lib = MaaFrameworkLoader.library ?: return "MaaFramework 未加载"
+        val ctrl = controller ?: return "controller 未建立（先跑一次任务）"
+        val id = lib.MaaControllerPostTouchUp(ctrl, contact)
+        if (id <= 0) return "PostTouchUp 被拒绝"
+        lib.MaaControllerWait(ctrl, id)
+        return null
+    }
+
     // ────────────────────── 运行中调试探针：借第二个 tasker 并行 ──────────────────────
     //
     // 结论（读框架源码 v5.14.x）：

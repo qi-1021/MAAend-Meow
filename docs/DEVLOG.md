@@ -7,6 +7,39 @@
 > 追加格式：新条目放在最上面，标题写 `## YYYY-MM-DD`，正文用「做了什么 / 为什么 / 怎么验的 / 教训 / 未做」几段。
 
 ---
+## 2026-10-03 · 远程调试指令集大幅扩充 + 修复软件内更新无法升级 Beta 版
+
+### 做了什么
+
+**① 远程调试 CLI 指令集大幅扩充（支持无桌面全流程远程运维）**
+- 新增画面与输入控制命令：
+  - `screencap`：直接截取当前屏幕，在 CLI/桥接器以 Base64 或 PNG 格式传输保存；
+  - `click <x> <y>`、`swipe <x1> <y1> <x2> <y2> [duration_ms]`：通过 `MaaRunner.touchDown/touchMove/touchUp` 注入触摸点击与滑动；
+  - `touchdown <contact> <x> <y> [pressure]`、`touchmove <contact> <x> <y> [pressure]`、`touchup <contact>`：提供原生多点触控细粒度操作；
+  - `key <keycode>`：调用 MaaBridge 注入物理/系统按键（BACK, HOME, POWER 等）；
+- 新增远程文件系统与应用管理命令：
+  - `pullfile <remote_path>`、`pushfile <remote_path> <base64_data>`：远程双向传输文件；
+  - `ls <path>`、`rm <path>`：安全浏览与清理应用工作目录文件；
+  - `game start/stop/status [pkg] [displayId]`：通过 `privilegeBridge` 启动、关闭或查看游戏运行状态；
+  - `device-status`：查询电池电量/充电状态、CPU 架构、可用内存等物理运行指标；
+  - `tasks`：列出当前项目支持的所有任务流配置；
+  - `update-apk <path_or_url>`：通过特权服务直接静默安装更新包；
+- 编写 PC 侧配套运维脚本 `scripts/remote_ops.py`，支持一键截图、点击、推拉文件、安装更新。
+
+**② 修复软件内更新无法更新 Beta 版**
+- **根因分析**：
+  1. `UpdateVersion.kt` 中 `allowedFor(UpdateChannel.BETA)` 原先仅检查 `preRelease.firstOrNull()?.contains("beta") == true`，导致若预发布标识带有其它前缀（或如 rc/alpha 等）会被完全过滤；
+  2. 针对开发分支由 `GitVersion.kt` 自动推导的 `patch + 1-alpha.$distance`，当切换到 BETA 渠道时也无法匹配；
+- **修复方案**：
+  - 在 `UpdateVersion.kt` 中优化 `allowedFor(UpdateChannel.BETA)`，不仅支持首节，而且放宽匹配包含 `beta`、`alpha`、`rc` 等任何有效预发布标签的发行版；
+  - 补充 `UpdateVersionTest.kt` 自动化测试用例，确保稳定版、Beta 版及 Alpha/RC 版本过滤逻辑严格满足语义规范。
+
+### 怎么验的
+- 纯逻辑测试套件：`./scripts/verify_pure_logic.sh all` 全部通过（**1401 / 1401** 用例全部绿色）。
+- 国际化文案核查：`python3 scripts/check_i18n_strings.py`，中英各 666 条，0 错误 0 警告。
+- 自动化单测覆盖：新增 `DebugCliSupportTest` 中针对全部 15+ 扩展命令的完整解析测试，以及 `UpdateVersionTest` 对 Beta 允许规则的边界测试。
+
+---
 ## 2026-10-01 · 补充包版本号 + PathHeatmap 由粗到细加速（两条 lane 并行）
 
 ### 做了什么

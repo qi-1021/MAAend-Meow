@@ -625,6 +625,162 @@ class RemoteServiceImpl : RemoteService.Stub() {
         override fun walk(x: Double, y: Double, zone: String?): List<String> =
             runner.debugWalk(x, y, zone)
 
+        override fun screencap(target: File): String? = runner.debugScreencap(target.absolutePath)
+
+        override fun click(x: Int, y: Int): List<String> {
+            val err = runner.debugClick(x, y)
+            return if (err == null) listOf("ok: click ($x, $y)") else listOf("error: $err")
+        }
+
+        override fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int): List<String> {
+            val err = runner.debugSwipe(x1, y1, x2, y2, durationMs)
+            return if (err == null) listOf("ok: swipe ($x1, $y1) -> ($x2, $y2) ${durationMs}ms") else listOf("error: $err")
+        }
+
+        override fun touchDown(contact: Int, x: Int, y: Int, pressure: Int): List<String> {
+            val err = runner.debugTouchDown(contact, x, y, pressure)
+            return if (err == null) listOf("ok: touchDown contact=$contact ($x, $y) p=$pressure") else listOf("error: $err")
+        }
+
+        override fun touchMove(contact: Int, x: Int, y: Int, pressure: Int): List<String> {
+            val err = runner.debugTouchMove(contact, x, y, pressure)
+            return if (err == null) listOf("ok: touchMove contact=$contact ($x, $y) p=$pressure") else listOf("error: $err")
+        }
+
+        override fun touchUp(contact: Int): List<String> {
+            val err = runner.debugTouchUp(contact)
+            return if (err == null) listOf("ok: touchUp contact=$contact") else listOf("error: $err")
+        }
+
+        override fun key(key: String): List<String> {
+            val code = when (key.lowercase()) {
+                "back" -> 4
+                "home" -> 3
+                "enter" -> 66
+                "power" -> 26
+                "tab" -> 61
+                "space" -> 62
+                else -> key.toIntOrNull()
+            }
+            if (code == null) return listOf("error: 未知按键：$key（支持 back, home, enter, power, tab, space 或整数 keycode）")
+            return rootCmd("input keyevent $code")
+        }
+
+        override fun pullFile(remotePath: String, offsetBytes: Long, maxBytes: Int): List<String> {
+            val file = File(remotePath)
+            if (!file.exists()) return listOf("error: 文件不存在：$remotePath")
+            if (file.isDirectory) return listOf("error: 目标是目录：$remotePath")
+            val total = file.length()
+            if (offsetBytes >= total) {
+                return listOf("ok: offset=$offsetBytes total=$total chunk=0 eof=true", "b64:")
+            }
+            return try {
+                val clampedMax = maxBytes.coerceIn(1, 2 * 1024 * 1024)
+                val readLen = (total - offsetBytes).coerceAtMost(clampedMax.toLong()).toInt()
+                val bytes = ByteArray(readLen)
+                RandomAccessFile(file, "r").use { raf ->
+                    raf.seek(offsetBytes)
+                    raf.readFully(bytes)
+                }
+                val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                val eof = offsetBytes + readLen >= total
+                listOf("ok: offset=$offsetBytes total=$total chunk=$readLen eof=$eof", "b64:$b64")
+            } catch (t: Throwable) {
+                listOf("error: 读取失败：${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
+
+        override fun pushFile(remotePath: String, base64Data: String, append: Boolean): List<String> {
+            val file = File(remotePath)
+            return try {
+                file.parentFile?.mkdirs()
+                val bytes = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
+                if (append) {
+                    file.appendBytes(bytes)
+                } else {
+                    file.writeBytes(bytes)
+                }
+                listOf("ok: written ${bytes.size} bytes (total: ${file.length()}) to ${file.absolutePath}")
+            } catch (t: Throwable) {
+                listOf("error: 写入失败：${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
+
+        override fun ls(remotePath: String): List<String> {
+            val dir = File(remotePath)
+            if (!dir.exists()) return listOf("error: 路径不存在：$remotePath")
+            if (dir.isFile) {
+                return listOf("file: ${dir.absolutePath} ${dir.length()} bytes")
+            }
+            val files = dir.listFiles() ?: return listOf("error: 无法列出目录内容：$remotePath")
+            val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+            return buildList {
+                add("dir: ${dir.absolutePath} (total ${files.size})")
+                files.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() })).forEach { f ->
+                    val type = if (f.isDirectory) "d" else "-"
+                    val time = sdf.format(Date(f.lastModified()))
+                    add(String.format(Locale.US, "%s %10d  %s  %s", type, f.length(), time, f.name))
+                }
+            }
+        }
+
+        override fun rm(remotePath: String): List<String> {
+            val file = File(remotePath)
+            if (!file.exists()) return listOf("error: 文件不存在：$remotePath")
+            return try {
+                val ok = if (file.isDirectory) file.deleteRecursively() else file.delete()
+                if (ok) listOf("ok: removed $remotePath") else listOf("error: 删除失败")
+            } catch (t: Throwable) {
+                listOf("error: 删除异常：${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
+
+        override fun game(action: String, displayId: Int?): List<String> {
+            val pkg = "com.hypergryph.endfield"
+            val activity = "com.u8.sdk.U8UnityContext"
+            return when (action.lowercase()) {
+                "kill" -> rootCmd("am force-stop $pkg")
+                "top" -> rootCmd("pidof $pkg")
+                "launch" -> {
+                    val dispArg = if (displayId != null) "--display $displayId" else ""
+                    rootCmd("am start -n $pkg/$activity $dispArg")
+                }
+                else -> listOf("error: 未知 game 操作：$action")
+            }
+        }
+
+        override fun deviceStatus(): List<String> {
+            val memInfo = Runtime.getRuntime()
+            val freeMb = memInfo.freeMemory() / (1024 * 1024)
+            val totalMb = memInfo.totalMemory() / (1024 * 1024)
+            val maxMb = memInfo.maxMemory() / (1024 * 1024)
+            return buildList {
+                add("=== Device Status ===")
+                add("app_jvm_memory : free=${freeMb}MB total=${totalMb}MB max=${maxMb}MB")
+                add("task_running   : ${runner.isRunning()}")
+                add("controller     : ${if (runner.debugControllerReady()) "ready" else "not ready"}")
+                // 补充系统 dumpsys 摘要
+                val sysRes = rootCmd("dumpsys battery | grep -E 'level|temperature' && dumpsys display | grep -E 'DisplayDeviceInfo.*MaaFwVirtualDisplay'")
+                addAll(sysRes)
+            }
+        }
+
+        override fun tasks(): List<String> {
+            val dir = File(runner.debugProjectRoot() ?: "", "pipeline")
+            return if (!dir.isDirectory) {
+                listOf("error: pipeline 目录不存在")
+            } else {
+                val pipelines = dir.listFiles()?.filter { it.extension == "json" }?.map { it.nameWithoutExtension } ?: emptyList()
+                listOf("available_pipelines (${pipelines.size}): " + pipelines.joinToString(", "))
+            }
+        }
+
+        override fun updateApk(apkPath: String): List<String> {
+            val apk = File(apkPath)
+            if (!apk.exists() || !apk.isFile) return listOf("error: APK 文件不存在：$apkPath")
+            return rootCmd("pm install -r -d $apkPath")
+        }
+
         /**
          * 特权进程内递归复制：源路径限定在常用数据根下，目标必须落在本 App 自己的外部
          * files 目录，避免调试接口被用来乱写别处。root 授权后即可读 `/data/data/<pkg>`。

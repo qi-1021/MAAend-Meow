@@ -32,11 +32,13 @@ class UpdateVersionTest {
     }
 
     @Test
-    fun `stable channel excludes prereleases and beta channel excludes release candidates`() {
+    fun `stable channel excludes prereleases and beta channel allows beta alpha and rc`() {
         assertTrue(UpdateVersion.parse("1.0.0")!!.allowedFor(UpdateChannel.STABLE))
         assertFalse(UpdateVersion.parse("1.0.0-beta.1")!!.allowedFor(UpdateChannel.STABLE))
         assertTrue(UpdateVersion.parse("1.0.0-beta.1")!!.allowedFor(UpdateChannel.BETA))
-        assertFalse(UpdateVersion.parse("1.0.0-rc.1")!!.allowedFor(UpdateChannel.BETA))
+        assertTrue(UpdateVersion.parse("1.0.0-alpha.5")!!.allowedFor(UpdateChannel.BETA))
+        assertTrue(UpdateVersion.parse("1.0.0-rc.1")!!.allowedFor(UpdateChannel.BETA))
+        assertFalse(UpdateVersion.parse("1.0.0-dev.1")!!.allowedFor(UpdateChannel.BETA))
     }
 
     @Test

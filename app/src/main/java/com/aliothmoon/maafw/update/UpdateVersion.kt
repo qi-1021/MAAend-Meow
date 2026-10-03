@@ -45,7 +45,11 @@ internal data class UpdateVersion(
     fun allowedFor(channel: UpdateChannel): Boolean = when (channel) {
         UpdateChannel.STABLE -> preRelease.isEmpty()
         UpdateChannel.BETA -> preRelease.isEmpty() ||
-                preRelease.firstOrNull()?.contains("beta", ignoreCase = true) == true
+                preRelease.any {
+                    it.contains("beta", ignoreCase = true) ||
+                            it.contains("alpha", ignoreCase = true) ||
+                            it.contains("rc", ignoreCase = true)
+                }
     }
 
     companion object {

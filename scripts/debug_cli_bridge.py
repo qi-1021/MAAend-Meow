@@ -75,35 +75,43 @@ class RelayState:
         self.lock = threading.Lock()
         self.sessions: dict[str, dict] = {}
 
+    def _prune_locked(self, max_idle: float = 60.0) -> None:
+        now = time.time()
+        stale = [sid for sid, v in self.sessions.items() if now - v.get("last_active", v["created"]) > max_idle]
+        for sid in stale:
+            self.sessions.pop(sid, None)
+
     def attach(self) -> str:
         sid = uuid.uuid4().hex
+        now = time.time()
         with self.lock:
+            self._prune_locked()
             self.sessions[sid] = {
                 "pending": [],          # [(rid, command)]
                 "results": {},          # rid -> output
                 "waiters": {},          # rid -> [threading.Event]
-                "created": time.time(),
+                "created": now,
+                "last_active": now,
             }
         return sid
 
     def has_session(self) -> bool:
         with self.lock:
-            # 10 分钟没动静的会话视为掉线
-            now = time.time()
-            for sid in [k for k, v in self.sessions.items() if now - v["created"] > 600]:
-                self.sessions.pop(sid, None)
+            self._prune_locked(max_idle=45.0)
             return bool(self.sessions)
 
     def enqueue(self, command: str) -> tuple[str, str] | None:
-        """给最早的会话排一条命令；返回 (sid, rid)，没有会话则 None。"""
+        """选择最近还在活跃拉取 (last_active 最大) 的会话排一条命令；返回 (sid, rid)，没有会话则 None。"""
         with self.lock:
-            for sid, sess in self.sessions.items():
-                rid = uuid.uuid4().hex
-                sess["pending"].append((rid, command))
-                sess["waiters"][rid] = threading.Event()
-                sess["created"] = time.time()
-                return sid, rid
-        return None
+            self._prune_locked(max_idle=45.0)
+            if not self.sessions:
+                return None
+            # 按最近活跃时间降序排序，选最活跃的那个有效 session
+            sid, sess = max(self.sessions.items(), key=lambda kv: kv[1].get("last_active", kv[1]["created"]))
+            rid = uuid.uuid4().hex
+            sess["pending"].append((rid, command))
+            sess["waiters"][rid] = threading.Event()
+            return sid, rid
 
     def pull(self, sid: str, timeout: float) -> tuple[str, str] | None:
         """手机侧长轮询取一条命令。"""
@@ -113,14 +121,14 @@ class RelayState:
                 sess = self.sessions.get(sid)
                 if sess is None:
                     return None
+                sess["last_active"] = time.time()
                 if sess["pending"]:
-                    sess["created"] = time.time()
                     return sess["pending"].pop(0)
             time.sleep(0.2)
         with self.lock:
             sess = self.sessions.get(sid)
             if sess is not None:
-                sess["created"] = time.time()
+                sess["last_active"] = time.time()
         return None
 
     def deliver(self, sid: str, rid: str, output: str) -> bool:
@@ -129,7 +137,7 @@ class RelayState:
             if sess is None:
                 return False
             sess["results"][rid] = output
-            sess["created"] = time.time()
+            sess["last_active"] = time.time()
             waiter = sess["waiters"].pop(rid, None)
         if waiter:
             waiter.set()

@@ -701,8 +701,80 @@ class DebugCliSupportTest {
     @Test
     fun `helpText 列出 start stop auth`() {
         val text = DebugCliSupport.helpText()
-        for (command in listOf("start", "stop", "auth")) {
+        for (command in listOf("start", "stop", "auth", "click", "swipe", "pullfile", "pushfile", "game", "update-apk")) {
             assertTrue("helpText 缺少 $command", text.contains(command))
         }
+    }
+
+    @Test
+    fun `screencap 正常与未就绪拦截`() {
+        assertEquals(DebugCliIntent.Screencap(null), ok("screencap"))
+        assertEquals(DebugCliIntent.Screencap("/sdcard/test.png"), ok("screencap /sdcard/test.png"))
+        assertTrue(failure("screencap", ctx(controllerReady = false)).contains(DebugCliSupport.CONTROLLER_NOT_READY))
+    }
+
+    @Test
+    fun `click 参数校验与 controller 就绪要求`() {
+        assertEquals(DebugCliIntent.Click(100, 200), ok("click 100 200"))
+        assertTrue(failure("click 100").contains("两个坐标参数"))
+        assertTrue(failure("click a b").contains("必须是整数"))
+        assertTrue(failure("click 100 200", ctx(controllerReady = false)).contains(DebugCliSupport.CONTROLLER_NOT_READY))
+    }
+
+    @Test
+    fun `swipe 参数解析与默认耗时`() {
+        assertEquals(DebugCliIntent.Swipe(10, 20, 30, 40, 300), ok("swipe 10 20 30 40"))
+        assertEquals(DebugCliIntent.Swipe(10, 20, 30, 40, 500), ok("swipe 10 20 30 40 500"))
+        assertTrue(failure("swipe 10 20").contains("格式"))
+    }
+
+    @Test
+    fun `touchdown touchmove touchup 参数校验`() {
+        assertEquals(DebugCliIntent.TouchDown(0, 100, 200, 50), ok("touchdown 0 100 200"))
+        assertEquals(DebugCliIntent.TouchDown(1, 100, 200, 80), ok("touchdown 1 100 200 80"))
+        assertEquals(DebugCliIntent.TouchMove(1, 150, 250, 80), ok("touchmove 1 150 250 80"))
+        assertEquals(DebugCliIntent.TouchUp(1), ok("touchup 1"))
+        assertTrue(failure("touchdown 10 100 200").contains("0..9"))
+        assertTrue(failure("touchup").contains("格式"))
+    }
+
+    @Test
+    fun `key 注入解析`() {
+        assertEquals(DebugCliIntent.Key("back"), ok("key back"))
+        assertEquals(DebugCliIntent.Key("4"), ok("key 4"))
+    }
+
+    @Test
+    fun `pullfile 与 pushfile 绝对路径及参数解析`() {
+        assertEquals(DebugCliIntent.PullFile("/sdcard/a.txt", 0L, 512 * 1024), ok("pullfile /sdcard/a.txt"))
+        assertEquals(DebugCliIntent.PullFile("/sdcard/a.txt", 1024L, 2048), ok("pullfile /sdcard/a.txt 1024 2048"))
+        assertTrue(failure("pullfile relative/path").contains("绝对路径"))
+
+        assertEquals(DebugCliIntent.PushFile("/sdcard/b.txt", "aGVsbG8=", false), ok("pushfile /sdcard/b.txt aGVsbG8="))
+        assertEquals(DebugCliIntent.PushFile("/sdcard/b.txt", "aGVsbG8=", true), ok("pushfile /sdcard/b.txt aGVsbG8= true"))
+    }
+
+    @Test
+    fun `ls 与 rm 校验`() {
+        assertEquals(DebugCliIntent.Ls("/sdcard"), ok("ls /sdcard"))
+        assertEquals(DebugCliIntent.Rm("/sdcard/temp.png"), ok("rm /sdcard/temp.png"))
+        assertTrue(failure("rm rel.txt").contains("绝对路径"))
+    }
+
+    @Test
+    fun `game 子命令与 displayId 解析`() {
+        assertEquals(DebugCliIntent.Game("kill", null), ok("game kill"))
+        assertEquals(DebugCliIntent.Game("top", null), ok("game top"))
+        assertEquals(DebugCliIntent.Game("launch", null), ok("game launch"))
+        assertEquals(DebugCliIntent.Game("launch", 0), ok("game launch 0"))
+        assertTrue(failure("game unknown").contains("未知 game 子命令"))
+    }
+
+    @Test
+    fun `device-status tasks 与 update-apk 解析`() {
+        assertEquals(DebugCliIntent.DeviceStatus, ok("device-status"))
+        assertEquals(DebugCliIntent.Tasks, ok("tasks"))
+        assertEquals(DebugCliIntent.UpdateApk("/data/local/tmp/app.apk"), ok("update-apk /data/local/tmp/app.apk"))
+        assertTrue(failure("update-apk rel.apk").contains("绝对路径"))
     }
 }

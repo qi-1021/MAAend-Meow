@@ -287,6 +287,42 @@ object DebugCliServer {
             is DebugCliIntent.CopyOut -> host.copyOut(intent.srcPath, intent.dstDir)
 
             is DebugCliIntent.RootCmd -> host.rootCmd(intent.command)
+
+            is DebugCliIntent.Screencap -> {
+                val dir = host.screenshotDir()
+                dir.mkdirs()
+                val target = if (intent.path != null) File(intent.path) else File(dir, "cap-${timestamp()}.png")
+                val reason = host.screencap(target)
+                if (reason == null) listOf("saved: ${target.absolutePath}") else listOf("error: $reason")
+            }
+
+            is DebugCliIntent.Click -> host.click(intent.x, intent.y)
+
+            is DebugCliIntent.Swipe -> host.swipe(intent.x1, intent.y1, intent.x2, intent.y2, intent.durationMs)
+
+            is DebugCliIntent.TouchDown -> host.touchDown(intent.contact, intent.x, intent.y, intent.pressure)
+
+            is DebugCliIntent.TouchMove -> host.touchMove(intent.contact, intent.x, intent.y, intent.pressure)
+
+            is DebugCliIntent.TouchUp -> host.touchUp(intent.contact)
+
+            is DebugCliIntent.Key -> host.key(intent.key)
+
+            is DebugCliIntent.PullFile -> host.pullFile(intent.remotePath, intent.offsetBytes, intent.maxBytes)
+
+            is DebugCliIntent.PushFile -> host.pushFile(intent.remotePath, intent.base64Data, intent.append)
+
+            is DebugCliIntent.Ls -> host.ls(intent.remotePath)
+
+            is DebugCliIntent.Rm -> host.rm(intent.remotePath)
+
+            is DebugCliIntent.Game -> host.game(intent.action, intent.displayId)
+
+            DebugCliIntent.DeviceStatus -> host.deviceStatus()
+
+            DebugCliIntent.Tasks -> host.tasks()
+
+            is DebugCliIntent.UpdateApk -> host.updateApk(intent.apkPath)
         }
 
     /**
@@ -455,14 +491,53 @@ interface DebugCliHost {
      */
     fun copyOut(srcPath: String, dstDir: String): List<String>
 
-    /**
-     * 以 root 跑一条 shell 命令 [command]，回显 stdout / stderr / 退出码。
-     *
-     * 实现跑在特权进程里：优先 `ProcessBuilder("su","-c",command)`；若该进程本身已是 uid 0
-     * 而 `su` 不可用，则直接 `sh -c` 执行。**只做 debug 构建**。拿不到 root 时如实返回
-     * 以 `error:` 开头的说明，不要伪造成功。
-     */
+    /** 以 root 跑一条 shell 命令 [command]，回显 stdout / stderr / 退出码。 */
     fun rootCmd(command: String): List<String>
+
+    /** 强制重新截屏并保存到 [target]；成功返回 null，失败返回原因。 */
+    fun screencap(target: File): String?
+
+    /** 点击屏幕坐标 (x, y)。 */
+    fun click(x: Int, y: Int): List<String>
+
+    /** 滑动屏幕从 (x1, y1) 到 (x2, y2)，耗时 durationMs 毫秒。 */
+    fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int): List<String>
+
+    /** 原生多点触控：按下手指 contact (0..9)。 */
+    fun touchDown(contact: Int, x: Int, y: Int, pressure: Int): List<String>
+
+    /** 原生多点触控：移动手指 contact (0..9)。 */
+    fun touchMove(contact: Int, x: Int, y: Int, pressure: Int): List<String>
+
+    /** 原生多点触控：抬起手指 contact (0..9)。 */
+    fun touchUp(contact: Int): List<String>
+
+    /** 按键事件注入（如 back, home, enter, power 或 keycode）。 */
+    fun key(key: String): List<String>
+
+    /** 拉取文件为 Base64。支持分块 [offsetBytes, maxBytes]。 */
+    fun pullFile(remotePath: String, offsetBytes: Long, maxBytes: Int): List<String>
+
+    /** 推送 Base64 数据写入文件。 */
+    fun pushFile(remotePath: String, base64Data: String, append: Boolean): List<String>
+
+    /** 列出目录。 */
+    fun ls(remotePath: String): List<String>
+
+    /** 删除文件或空目录。 */
+    fun rm(remotePath: String): List<String>
+
+    /** 游戏进程管理。 */
+    fun game(action: String, displayId: Int?): List<String>
+
+    /** 设备硬件与系统状态。 */
+    fun deviceStatus(): List<String>
+
+    /** 列出当前配置的任务清单。 */
+    fun tasks(): List<String>
+
+    /** 触发静默安装 APK。 */
+    fun updateApk(apkPath: String): List<String>
 }
 
 /** [DebugCliHost.ocr] 的结果；[text] 为 null 时看 [reason]。 */

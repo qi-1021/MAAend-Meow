@@ -166,23 +166,56 @@ sealed interface DebugCliIntent {
      */
     data class Walk(val x: Double, val y: Double, val zone: String?) : DebugCliIntent
 
-    /**
-     * 调试用「拷出来」：在**特权进程**里把设备上的 [srcPath] 递归复制到 [dstDir] 之下。
-     *
-     * 用途：拿到 root 授权后，把 `/data/data/<pkg>` 这类只有特权身份才读得到的目录
-     * 搬到 app 自己的外部 files 目录，再由 `adb pull` 回本机。解析层只做参数形态校验
-     * （都是绝对路径）；路径是否存在、读不读得到、目标是否合法，全由特权进程实现判定并如实报错。
-     */
+    /** 调试用「拷出来」：在**特权进程**里把设备上的 [srcPath] 递归复制到 [dstDir] 之下。 */
     data class CopyOut(val srcPath: String, val dstDir: String) : DebugCliIntent
 
-    /**
-     * 调试用「以 root 跑一条 shell 命令」：在特权侧执行 [command] 并回显 stdout/stderr/退出码。
-     *
-     * 用途：拿到 root 授权后抢救 `/data/data/<pkg>` 这类只有 root 读得到的目录——例如
-     * `rootcmd tar -czf ... -C /data/data com.hypergryph.endfield`。解析层只做**基本**校验：
-     * 命令非空、长度不超 [DEBUG_CLI_MAX_ROOT_CMD]、不含控制字符；真正的权限/是否存在由特权侧判定。
-     */
+    /** 调试用「以 root 跑一条 shell 命令」：在特权侧执行 [command] 并回显 stdout/stderr/退出码。 */
     data class RootCmd(val command: String) : DebugCliIntent
+
+    /** 强制重新截屏并落盘。 */
+    data class Screencap(val path: String?) : DebugCliIntent
+
+    /** 点击屏幕坐标 (x, y)。 */
+    data class Click(val x: Int, val y: Int) : DebugCliIntent
+
+    /** 滑动屏幕从 (x1, y1) 到 (x2, y2)，耗时 durationMs 毫秒。 */
+    data class Swipe(val x1: Int, val y1: Int, val x2: Int, val y2: Int, val durationMs: Int) : DebugCliIntent
+
+    /** 原生多点触控：按下手指 contact (0..9) 在 (x, y)，压力 pressure。 */
+    data class TouchDown(val contact: Int, val x: Int, val y: Int, val pressure: Int) : DebugCliIntent
+
+    /** 原生多点触控：移动手指 contact (0..9) 到 (x, y)，压力 pressure。 */
+    data class TouchMove(val contact: Int, val x: Int, val y: Int, val pressure: Int) : DebugCliIntent
+
+    /** 原生多点触控：抬起手指 contact (0..9)。 */
+    data class TouchUp(val contact: Int) : DebugCliIntent
+
+    /** 按键事件注入（如 back, home, enter, power 或 keycode）。 */
+    data class Key(val key: String) : DebugCliIntent
+
+    /** 拉取设备文件，以 Base64 输出。支持分块 [offsetBytes, maxBytes]。 */
+    data class PullFile(val remotePath: String, val offsetBytes: Long, val maxBytes: Int) : DebugCliIntent
+
+    /** 推送文件写入设备：接收 Base64 编码数据写入 [remotePath]，支持 append 模式。 */
+    data class PushFile(val remotePath: String, val base64Data: String, val append: Boolean) : DebugCliIntent
+
+    /** 列出目录内容。 */
+    data class Ls(val remotePath: String) : DebugCliIntent
+
+    /** 删除设备文件或空目录。 */
+    data class Rm(val remotePath: String) : DebugCliIntent
+
+    /** 游戏进程管理（launch [displayId], kill, top）。 */
+    data class Game(val action: String, val displayId: Int?) : DebugCliIntent
+
+    /** 设备状态查询（电池电量、温度、可用内存、屏幕列表等）。 */
+    data object DeviceStatus : DebugCliIntent
+
+    /** 查询当前 App 配置中加载的任务列表及其开关。 */
+    data object Tasks : DebugCliIntent
+
+    /** 远程触发 APK 静默升级安装。 */
+    data class UpdateApk(val apkPath: String) : DebugCliIntent
 }
 
 /** 解析结果：要么是意图，要么是给用户看的错误。 */
@@ -338,6 +371,150 @@ object DebugCliSupport {
                 }
             }
 
+            "screencap" -> when {
+                args.size > 1 -> DebugCliParse.Failure("screencap 最多接受一个目标路径：screencap [path]")
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> DebugCliParse.Ok(DebugCliIntent.Screencap(args.getOrNull(0)))
+            }
+
+            "click" -> when {
+                args.size != 2 -> DebugCliParse.Failure("click 需要两个坐标参数：click <x> <y>")
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> {
+                    val x = args[0].toIntOrNull()
+                    val y = args[1].toIntOrNull()
+                    if (x == null || y == null) {
+                        DebugCliParse.Failure("click 坐标必须是整数：${args[0]} ${args[1]}")
+                    } else {
+                        DebugCliParse.Ok(DebugCliIntent.Click(x, y))
+                    }
+                }
+            }
+
+            "swipe" -> when {
+                args.size < 4 || args.size > 5 -> DebugCliParse.Failure("swipe 格式：swipe <x1> <y1> <x2> <y2> [durationMs]")
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> {
+                    val x1 = args[0].toIntOrNull()
+                    val y1 = args[1].toIntOrNull()
+                    val x2 = args[2].toIntOrNull()
+                    val y2 = args[3].toIntOrNull()
+                    val dur = if (args.size == 5) args[4].toIntOrNull() else 300
+                    if (x1 == null || y1 == null || x2 == null || y2 == null || dur == null || dur <= 0) {
+                        DebugCliParse.Failure("swipe 参数必须为整数且耗时大于 0")
+                    } else {
+                        DebugCliParse.Ok(DebugCliIntent.Swipe(x1, y1, x2, y2, dur))
+                    }
+                }
+            }
+
+            "touchdown" -> when {
+                args.size < 3 || args.size > 4 -> DebugCliParse.Failure("touchdown 格式：touchdown <contact(0..9)> <x> <y> [pressure]")
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> {
+                    val c = args[0].toIntOrNull()
+                    val x = args[1].toIntOrNull()
+                    val y = args[2].toIntOrNull()
+                    val p = if (args.size == 4) args[3].toIntOrNull() else 50
+                    if (c == null || c !in 0..9 || x == null || y == null || p == null) {
+                        DebugCliParse.Failure("touchdown 手指 id 必须在 0..9 且坐标有效")
+                    } else {
+                        DebugCliParse.Ok(DebugCliIntent.TouchDown(c, x, y, p))
+                    }
+                }
+            }
+
+            "touchmove" -> when {
+                args.size < 3 || args.size > 4 -> DebugCliParse.Failure("touchmove 格式：touchmove <contact(0..9)> <x> <y> [pressure]")
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> {
+                    val c = args[0].toIntOrNull()
+                    val x = args[1].toIntOrNull()
+                    val y = args[2].toIntOrNull()
+                    val p = if (args.size == 4) args[3].toIntOrNull() else 50
+                    if (c == null || c !in 0..9 || x == null || y == null || p == null) {
+                        DebugCliParse.Failure("touchmove 手指 id 必须在 0..9 且坐标有效")
+                    } else {
+                        DebugCliParse.Ok(DebugCliIntent.TouchMove(c, x, y, p))
+                    }
+                }
+            }
+
+            "touchup" -> when {
+                args.size != 1 -> DebugCliParse.Failure("touchup 格式：touchup <contact(0..9)>")
+                !context.controllerReady -> DebugCliParse.Failure(CONTROLLER_NOT_READY)
+                else -> {
+                    val c = args[0].toIntOrNull()
+                    if (c == null || c !in 0..9) {
+                        DebugCliParse.Failure("touchup 手指 id 必须在 0..9")
+                    } else {
+                        DebugCliParse.Ok(DebugCliIntent.TouchUp(c))
+                    }
+                }
+            }
+
+            "key" -> when {
+                args.size != 1 -> DebugCliParse.Failure("key 格式：key <back|home|enter|power|keycode>")
+                else -> DebugCliParse.Ok(DebugCliIntent.Key(args[0]))
+            }
+
+            "pullfile" -> when {
+                args.isEmpty() || args.size > 3 -> DebugCliParse.Failure("pullfile 格式：pullfile <remotePath> [offsetBytes] [maxBytes]")
+                !args[0].startsWith("/") -> DebugCliParse.Failure("pullfile 路径必须是绝对路径：${args[0]}")
+                else -> {
+                    val offset = if (args.size >= 2) args[1].toLongOrNull() ?: 0L else 0L
+                    val maxBytes = if (args.size == 3) args[2].toIntOrNull() ?: (512 * 1024) else (512 * 1024)
+                    DebugCliParse.Ok(DebugCliIntent.PullFile(args[0], offset, maxBytes))
+                }
+            }
+
+            "pushfile" -> when {
+                args.size < 2 || args.size > 3 -> DebugCliParse.Failure("pushfile 格式：pushfile <remotePath> <base64Data> [append:true|false]")
+                !args[0].startsWith("/") -> DebugCliParse.Failure("pushfile 路径必须是绝对路径：${args[0]}")
+                else -> {
+                    val append = args.getOrNull(2)?.toBoolean() ?: false
+                    DebugCliParse.Ok(DebugCliIntent.PushFile(args[0], args[1], append))
+                }
+            }
+
+            "ls" -> when {
+                args.size > 1 -> DebugCliParse.Failure("ls 最多接受一个目录路径：ls [dir]")
+                else -> {
+                    val path = args.getOrNull(0) ?: (context.projectRoot ?: "/sdcard")
+                    if (!path.startsWith("/")) {
+                        DebugCliParse.Failure("ls 路径必须是绝对路径：$path")
+                    } else {
+                        DebugCliParse.Ok(DebugCliIntent.Ls(path))
+                    }
+                }
+            }
+
+            "rm" -> when {
+                args.size != 1 -> DebugCliParse.Failure("rm 格式：rm <remotePath>")
+                !args[0].startsWith("/") -> DebugCliParse.Failure("rm 路径必须是绝对路径：${args[0]}")
+                else -> DebugCliParse.Ok(DebugCliIntent.Rm(args[0]))
+            }
+
+            "game" -> when {
+                args.isEmpty() -> DebugCliParse.Failure("game 格式：game <launch [displayId]|kill|top>")
+                args[0].equals("kill", ignoreCase = true) -> DebugCliParse.Ok(DebugCliIntent.Game("kill", null))
+                args[0].equals("top", ignoreCase = true) -> DebugCliParse.Ok(DebugCliIntent.Game("top", null))
+                args[0].equals("launch", ignoreCase = true) -> {
+                    val disp = if (args.size > 1) args[1].toIntOrNull() else null
+                    DebugCliParse.Ok(DebugCliIntent.Game("launch", disp))
+                }
+                else -> DebugCliParse.Failure("未知 game 子命令：${args[0]}（可用 launch, kill, top）")
+            }
+
+            "device-status" -> noArgs(command, args) { DebugCliIntent.DeviceStatus }
+            "tasks" -> noArgs(command, args) { DebugCliIntent.Tasks }
+
+            "update-apk" -> when {
+                args.size != 1 -> DebugCliParse.Failure("update-apk 格式：update-apk <remoteApkPath>")
+                !args[0].startsWith("/") -> DebugCliParse.Failure("update-apk 路径必须是绝对路径：${args[0]}")
+                else -> DebugCliParse.Ok(DebugCliIntent.UpdateApk(args[0]))
+            }
+
             else -> DebugCliParse.Failure("未知命令：$command（输入 help 查看可用命令）")
         }
     }
@@ -348,11 +525,23 @@ object DebugCliSupport {
         appendLine("help                列出命令")
         appendLine("auth <token>        远程连接鉴权；回环连接无需令牌")
         appendLine("status              项目根 / controller 就绪 / 当前任务状态")
+        appendLine("device-status       手机硬件状态（电池、温度、RAM、ROM、屏幕列表）")
+        appendLine("tasks               列出当前 App 配置中全部任务")
         appendLine("start [task...]     启动任务（不带参数=当前激活配置；带参数按 taskName 筛选）")
         appendLine("stop                停止当前任务")
         appendLine("report [n]          最新 RunDiagnostics JSONL 的末 n 行（默认 $DEBUG_CLI_DEFAULT_TAIL）")
         appendLine("logtail [n]         主日志的末 n 行（默认 $DEBUG_CLI_DEFAULT_TAIL）")
+        appendLine("screencap [path]    强制触发一次屏幕采集并落盘")
         appendLine("screenshot          把当前缓存帧存成 png，返回路径")
+        appendLine("click <x> <y>       原生/Controller 模拟点击")
+        appendLine("swipe <x1> <y1> <x2> <y2> [ms] 原生/Controller 滑动")
+        appendLine("touchdown/touchmove/touchup  原生多指触控注入")
+        appendLine("key <back|home...>  系统按键注入")
+        appendLine("pullfile <path> [off] [max]  读取文件为 Base64（免 adb pull）")
+        appendLine("pushfile <path> <b64> [append] 写入文件（免 adb push）")
+        appendLine("ls [dir] / rm <path>  文件目录浏览与清理")
+        appendLine("game <launch [disp]|kill|top> 终末地游戏进程快捷启停与监控")
+        appendLine("update-apk <apkPath> 触发特权静默更新 APK")
         appendLine("ocr <nodeName>      对当前帧跑该识别节点，返回 best 文本")
         appendLine("run <nodeName>      跑一次该节点（运行中会排到任务结束后执行，结果见 probe-result）")
         appendLine("probe-result        读回最近一次排队执行的调试结果")
